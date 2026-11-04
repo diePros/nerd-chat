@@ -6,6 +6,7 @@ pub mod cell;
 pub mod identity;
 pub mod message;
 pub mod session;
+pub mod trust;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {

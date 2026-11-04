@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 seburity-core = { path = "../core" }
+seburity-net = { path = "../net" }
 spake2 = "0.4"
+curve25519-dalek = "4"
 chacha20poly1305 = "0.10"
 blake2 = "0.11"
 getrandom = "0.3"

@@ -70,13 +70,11 @@ pub enum Profile {
 impl Profile {
     /// Profiles tried when opening. Unit tests only try the fast profile (the real
     /// ones would take minutes per failed open in debug builds).
-    #[cfg(not(test))]
-    const ALL: &'static [Profile] = &[
-        Profile::Strong,
-        Profile::LowMem,
-        #[cfg(feature = "insecure-test-kdf")]
-        Profile::InsecureTest,
-    ];
+    #[cfg(all(not(test), not(feature = "insecure-test-kdf")))]
+    const ALL: &'static [Profile] = &[Profile::Strong, Profile::LowMem];
+    /// With the test feature the fast profile goes FIRST so dependants' tests stay quick.
+    #[cfg(all(not(test), feature = "insecure-test-kdf"))]
+    const ALL: &'static [Profile] = &[Profile::InsecureTest, Profile::Strong, Profile::LowMem];
     #[cfg(test)]
     const ALL: &'static [Profile] = &[Profile::InsecureTest];
     fn cost(self) -> (u32, u32, u32) {

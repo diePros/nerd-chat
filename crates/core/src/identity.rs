@@ -40,6 +40,13 @@ impl ContactIdentity {
     }
 
     pub fn verifying_key(&self) -> VerifyingKey { self.sign.verifying_key() }
+
+    /// Sign `msg` with this contact's Ed25519 key. The CALLER must start `msg` with a unique
+    /// domain-separation string (existing domains: "seburity-bundle-v1", "seburity-msg-v1").
+    pub fn sign_domain(&self, msg: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        self.sign.sign(msg).to_bytes()
+    }
     pub fn dh_public(&self) -> XPublic { XPublic::from(&self.dh) }
     pub fn kem_public(&self) -> EncapsulationKey768 { self.kem.encapsulation_key().clone() }
 }

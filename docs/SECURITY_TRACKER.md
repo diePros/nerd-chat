@@ -58,3 +58,23 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 - Pairing code = 10 digits, ONE online guess per code (burned on failure). App MUST regenerate the code after any failure and rate-limit attempts.
 - File import yields `verified=false`; UI must force safety-number comparison before first chat.
 - Bundle does not yet carry onion address / client-auth key (R2-I3): add in the net stage and cover by signature + safety number.
+
+## Review 3 — exchange crate (commit 8299745)
+No Critical/High. Crypto sound (no offline dictionary attack, no reflection, no KDF ambiguity). Findings:
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R3-M1 | "One guess per code" not enforced (listener re-parses code -> ~1265 guesses/s) | FIXED (see exchange stage 2) | `PairingOffer` consumed by one attempt, no parse-from-digits for listener, expiry, global failure backoff |
+| R3-M2 | Symmetric SPAKE2: two sessions of one device cross-complete | FIXED | asymmetric roles (start_a/start_b), role bound in tags/AAD |
+| R3-M3 | `verified=true` after PAKE although code knowledge != identity | FIXED | `Trust` enum: Unverified / CodeAuthenticated / SafetyVerified; never one bool |
+| R3-L1 | No proof of possession of bundle secrets; unknown-key-share | FIXED | Ed25519 PoP signature over transcript + full KK handshake over the pairing stream |
+| R3-L2 | No final confirmation; asymmetric outcomes | FIXED | transcript-hash confirmation cells both ways before commit |
+| R3-L3 | Blocking I/O without deadline; write-before-read deadlock | FIXED | `PairStream` timeouts + overall deadline; role-ordered I/O |
+| R3-L4 | Zeroization gaps (code String reallocs, display(), spake2 state) | PARTIAL | our code fixed; **spake2 0.4 does not zeroize** -> D-2 |
+| R3-L5 | Trust state publicly mutable | FIXED | private fields, confirmation token |
+| R3-I1 | Peer point validation (small-order / non-canonical accepted by spake2) | FIXED | rejected before finish |
+| R3-I2 | Active MITM gets 2 guesses/code (not 1) | ACCEPTED | docs corrected; 2/10^10 |
+| R3-I3 | Armor not canonical (line lengths, CRLF) | OPEN (low) | tighten or reword docs |
+| R3-I4 | SPAKE2 classical: recorded transcript + future DL solver + brute force 10^10 links public keys to pairing event | ACCEPTED | note beside D-2 |
+| R3-I5 | LAN attacker can burn codes (inherent DoS) | ACCEPTED | UI must say "pairing interrupted, possible attacker" |
+| R3-I6 | Bundle (~1.8 KB armored) too large for easy QR (v37+) | OPEN | QR path later: consider hash-only QR + file |
+| R3-I7 | KDF/tag use plain concat | OPEN (low) | move to keyed BLAKE2b/HKDF with length prefixes |

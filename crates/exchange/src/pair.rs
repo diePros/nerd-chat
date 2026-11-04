@@ -1,94 +1,221 @@
-//! Local pairing link: SPAKE2 over any `Read + Write` stream (TCP/LAN now; BLE/Wi-Fi Direct later).
+//! Local pairing link (asymmetric SPAKE2 over any `PairStream`).
 //!
-//! 1. Both sides run symmetric SPAKE2 on the one-time `PairingCode` -> shared key K.
-//! 2. Key confirmation: each sends MAC(K_conf, own pake msg || peer pake msg); the peer verifies
-//!    it. A wrong code or an active attacker is detected here. An attacker gets exactly ONE
-//!    guess per code, so the code is consumed (taken by value) and must be regenerated after
-//!    any failure.
-//! 3. Each side sends its self-signed bundle under XChaCha20-Poly1305 keyed from K, with the
-//!    full transcript (sender's msg || receiver's msg) as AAD, which also stops reflection.
-//! 4. Both sides then show `safety_number` (optional extra check if the code travelled over a
-//!    weak channel).
+//! Roles: the OFFER side (shows the code, listens) is role A; the JOIN side (types the code) is role B.
+//! Two sessions of the same role can never complete, so cross-wiring a device's own sessions fails.
+//!
+//! 1. SPAKE2(code) -> K. A writes first, B reads first (no write/write deadlock).
+//! 2. Key confirmation tags (role-bound) over the length-prefixed transcript.
+//! 3. Self-signed bundles under XChaCha20-Poly1305 (AAD binds role + transcript).
+//! 4. Proof of possession: each side signs the transcript+both bundles with its Ed25519 key.
+//! 5. A full Noise/ML-KEM session handshake over the same stream (proves possession of the X25519 and
+//!    ML-KEM secrets) and an exchanged transcript-hash confirmation cell both ways. Only then is the
+//!    contact returned, so both sides commit or neither does.
+//!
+//! One-time code: a `PairingOffer` is consumed by exactly ONE attempt (success or failure), has no
+//! constructor from digits, expires, and failures feed a process-wide backoff. An active MITM still
+//! gets one guess against each side (2 per code, p = 2e-10).
 use crate::{ExchangeError, ImportedContact};
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
-use seburity_core::{bundle::{Bundle, BUNDLE_LEN, safety_number}, identity::ContactIdentity};
+use curve25519_dalek::edwards::CompressedEdwardsY;
+use seburity_core::{bundle::{safety_number, Bundle, BUNDLE_LEN}, identity::ContactIdentity};
+use seburity_net::{guard::HandshakeGuard, link};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 use zeroize::Zeroizing;
 
 const MAX_FRAME: usize = 2048;
-const ID: &[u8] = b"seburity-pair-v1";
-/// 10 decimal digits (~33 bits): fine because every code allows ONE online guess and burns on failure.
+const ID_A: &[u8] = b"seburity-pair-v1-offer";
+const ID_B: &[u8] = b"seburity-pair-v1-join";
+/// 10 decimal digits (~33 bits). Safe because each code allows ~one online guess per side.
 pub const CODE_DIGITS: usize = 10;
+pub const OFFER_TTL: Duration = Duration::from_secs(300);
+pub const PAIR_DEADLINE: Duration = Duration::from_secs(60);
 
-pub struct PairingCode(Zeroizing<String>);
+/// A byte stream with a settable I/O timeout (TCP, Unix socket, BLE wrapper...).
+pub trait PairStream: Read + Write {
+    fn set_timeout(&mut self, d: Duration) -> std::io::Result<()>;
+}
+impl PairStream for std::net::TcpStream {
+    fn set_timeout(&mut self, d: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(d))?;
+        self.set_write_timeout(Some(d))
+    }
+}
+#[cfg(unix)]
+impl PairStream for std::os::unix::net::UnixStream {
+    fn set_timeout(&mut self, d: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(d))?;
+        self.set_write_timeout(Some(d))
+    }
+}
 
-impl PairingCode {
-    pub fn generate() -> Self {
-        let mut s = String::new();
-        let mut b = [0u8; 16];
-        getrandom::fill(&mut b).expect("OS RNG unavailable");
-        for x in b {
-            // rejection sampling: no modulo bias
-            if x < 250 && s.len() < CODE_DIGITS { s.push((b'0' + x % 10) as char); }
+// ---------- failure backoff ----------
+/// Consecutive-failure counter shared by all pairing attempts in the process.
+#[derive(Default)]
+pub struct Lockout(Mutex<(u32, Option<Instant>)>);
+
+impl Lockout {
+    fn global() -> Arc<Lockout> {
+        static G: OnceLock<Arc<Lockout>> = OnceLock::new();
+        G.get_or_init(|| Arc::new(Lockout::default())).clone()
+    }
+    /// Seconds to wait before the next attempt (0 = go). First 2 failures are free, then 30 s * 2^n (cap 1 h).
+    pub fn remaining(&self) -> u64 {
+        let g = self.0.lock().unwrap();
+        match (g.0, g.1) {
+            (n, Some(t)) if n >= 3 => {
+                let wait = Duration::from_secs((30u64 << (n - 3).min(7)).min(3600));
+                wait.saturating_sub(t.elapsed()).as_secs()
+            }
+            _ => 0,
         }
-        // 16 bytes make >=10 accepted digits overwhelmingly likely; top up if not
-        while s.len() < CODE_DIGITS {
-            let mut o = [0u8; 1];
-            getrandom::fill(&mut o).expect("OS RNG unavailable");
-            if o[0] < 250 { s.push((b'0' + o[0] % 10) as char); }
+    }
+    fn fail(&self) { let mut g = self.0.lock().unwrap(); g.0 = g.0.saturating_add(1); g.1 = Some(Instant::now()); }
+    fn ok(&self) { *self.0.lock().unwrap() = (0, None); }
+    fn guard(&self) -> Result<(), ExchangeError> {
+        match self.remaining() { 0 => Ok(()), n => Err(ExchangeError::Locked(n)) }
+    }
+}
+
+fn fresh_digits() -> Zeroizing<[u8; CODE_DIGITS]> {
+    let mut d = Zeroizing::new([0u8; CODE_DIGITS]);
+    let mut i = 0;
+    while i < CODE_DIGITS {
+        let mut b = Zeroizing::new([0u8; 16]);
+        getrandom::fill(&mut *b).expect("OS RNG unavailable");
+        for &x in b.iter() {
+            // 250 = 25 * 10: rejection sampling, no modulo bias
+            if x < 250 && i < CODE_DIGITS { d[i] = b'0' + x % 10; i += 1; }
         }
-        Self(Zeroizing::new(s))
+    }
+    d
+}
+
+fn display(d: &[u8; CODE_DIGITS]) -> Zeroizing<String> {
+    let mut s = Zeroizing::new(String::with_capacity(CODE_DIGITS + 1));
+    for (i, &c) in d.iter().enumerate() {
+        if i == CODE_DIGITS / 2 { s.push('-'); }
+        s.push(c as char);
+    }
+    s
+}
+
+// ---------- public API ----------
+/// Offer side. There is deliberately NO way to rebuild an offer from its digits.
+pub struct PairingOffer { code: Zeroizing<[u8; CODE_DIGITS]>, expires: Instant, lockout: Arc<Lockout>, deadline: Duration }
+
+impl PairingOffer {
+    /// Returns the offer and the digits to show the user. Fails while locked out.
+    pub fn generate() -> Result<(Self, Zeroizing<String>), ExchangeError> { Self::generate_in(Lockout::global()) }
+
+    pub fn generate_in(lockout: Arc<Lockout>) -> Result<(Self, Zeroizing<String>), ExchangeError> {
+        lockout.guard()?;
+        let code = fresh_digits();
+        let shown = display(&code);
+        Ok((Self { code, expires: Instant::now() + OFFER_TTL, lockout, deadline: PAIR_DEADLINE }, shown))
     }
 
+    pub fn expires_in(&self) -> Duration { self.expires.saturating_duration_since(Instant::now()) }
+    pub fn with_deadline(mut self, d: Duration) -> Self { self.deadline = d; self }
+
+    /// Consumes the offer: ONE attempt, success or failure. The listener must stop accepting connections afterwards.
+    pub fn accept<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
+        if Instant::now() >= self.expires { return Err(ExchangeError::Expired); }
+        self.lockout.guard()?;
+        let r = run(Role::A, s, me, &self.code, self.deadline, None);
+        if r.is_ok() { self.lockout.ok() } else { self.lockout.fail() }
+        r
+    }
+}
+
+/// Join side: the user types the code.
+pub struct PairingJoin { code: Zeroizing<[u8; CODE_DIGITS]>, lockout: Arc<Lockout>, deadline: Duration }
+
+impl PairingJoin {
     /// Accepts `12345-67890`, spaces, or plain digits.
-    pub fn parse(input: &str) -> Result<Self, ExchangeError> {
-        let d: String = input.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
-        if d.len() != CODE_DIGITS || !d.bytes().all(|c| c.is_ascii_digit()) { return Err(ExchangeError::BadCode); }
-        Ok(Self(Zeroizing::new(d)))
+    pub fn parse(input: &str) -> Result<Self, ExchangeError> { Self::parse_in(input, Lockout::global()) }
+
+    pub fn parse_in(input: &str, lockout: Arc<Lockout>) -> Result<Self, ExchangeError> {
+        let mut code = Zeroizing::new([0u8; CODE_DIGITS]);
+        let mut n = 0;
+        for c in input.bytes().filter(|c| !matches!(c, b'-' | b' ')) {
+            if n >= CODE_DIGITS || !c.is_ascii_digit() { return Err(ExchangeError::BadCode); }
+            code[n] = c;
+            n += 1;
+        }
+        if n != CODE_DIGITS { return Err(ExchangeError::BadCode); }
+        Ok(Self { code, lockout, deadline: PAIR_DEADLINE })
     }
 
-    /// Human display `12345-67890`.
-    pub fn display(&self) -> String { format!("{}-{}", &self.0[..5], &self.0[5..]) }
+    pub fn with_deadline(mut self, d: Duration) -> Self { self.deadline = d; self }
+
+    pub fn join<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
+        self.lockout.guard()?;
+        let r = run(Role::B, s, me, &self.code, self.deadline, None);
+        if r.is_ok() { self.lockout.ok() } else { self.lockout.fail() }
+        r
+    }
 }
 
 pub struct Paired { pub contact: ImportedContact, pub safety_number: String }
 
-fn write_frame<W: Write>(w: &mut W, data: &[u8]) -> Result<(), ExchangeError> {
-    if data.len() > MAX_FRAME { return Err(ExchangeError::Malformed); }
-    w.write_all(&(data.len() as u16).to_be_bytes()).map_err(|_| ExchangeError::Io)?;
-    w.write_all(data).map_err(|_| ExchangeError::Io)?;
-    w.flush().map_err(|_| ExchangeError::Io)
+// ---------- protocol ----------
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role { A, B }
+impl Role {
+    fn byte(self) -> u8 { if self == Role::A { b'A' } else { b'B' } }
+    fn other(self) -> Role { if self == Role::A { Role::B } else { Role::A } }
 }
 
-fn read_frame<R: Read>(r: &mut R) -> Result<Vec<u8>, ExchangeError> {
-    let mut l = [0u8; 2];
-    r.read_exact(&mut l).map_err(|_| ExchangeError::Io)?;
-    let n = u16::from_be_bytes(l) as usize;
-    if n > MAX_FRAME { return Err(ExchangeError::Malformed); }
-    let mut v = vec![0u8; n];
-    r.read_exact(&mut v).map_err(|_| ExchangeError::Io)?;
-    Ok(v)
+struct Clock(Instant);
+impl Clock {
+    fn arm<S: PairStream>(&self, s: &mut S) -> Result<(), ExchangeError> {
+        let left = self.0.saturating_duration_since(Instant::now());
+        if left.is_zero() { return Err(ExchangeError::Io); }
+        s.set_timeout(left).map_err(|_| ExchangeError::Io)
+    }
+    fn write<S: PairStream>(&self, s: &mut S, d: &[u8]) -> Result<(), ExchangeError> {
+        if d.len() > MAX_FRAME { return Err(ExchangeError::Malformed); }
+        self.arm(s)?;
+        s.write_all(&(d.len() as u16).to_be_bytes()).and_then(|_| s.write_all(d)).and_then(|_| s.flush()).map_err(|_| ExchangeError::Io)
+    }
+    fn read<S: PairStream>(&self, s: &mut S) -> Result<Vec<u8>, ExchangeError> {
+        self.arm(s)?;
+        let mut l = [0u8; 2];
+        s.read_exact(&mut l).map_err(|_| ExchangeError::Io)?;
+        let n = u16::from_be_bytes(l) as usize;
+        if n > MAX_FRAME { return Err(ExchangeError::Malformed); }
+        let mut v = vec![0u8; n];
+        s.read_exact(&mut v).map_err(|_| ExchangeError::Io)?;
+        Ok(v)
+    }
 }
 
-fn kdf(k: &[u8], label: &[u8], lo: &[u8], hi: &[u8]) -> Zeroizing<[u8; 32]> {
+fn lp(h: &mut Blake2b<U32>, x: &[u8]) { h.update((x.len() as u32).to_be_bytes()); h.update(x); }
+
+fn kdf(k: &[u8], label: &[u8], a: &[u8], b: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut h = Blake2b::<U32>::new();
-    h.update(b"seburity-pair-kdf-v1");
-    h.update(label);
-    h.update(k);
-    h.update(lo);
-    h.update(hi);
+    lp(&mut h, b"seburity-pair-kdf-v2");
+    for x in [label, k, a, b] { lp(&mut h, x); }
     Zeroizing::new(h.finalize().into())
 }
 
-fn tag(k_conf: &[u8; 32], own: &[u8], peer: &[u8]) -> [u8; 32] {
+fn tag(k_conf: &[u8; 32], role: Role, a: &[u8], b: &[u8]) -> [u8; 32] {
     let mut h = Blake2b::<U32>::new();
-    h.update(b"seburity-pair-confirm-v1");
-    h.update(k_conf);
-    h.update((own.len() as u32).to_be_bytes());
-    h.update(own);
-    h.update(peer);
+    lp(&mut h, b"seburity-pair-confirm-v2");
+    for x in [&[role.byte()][..], k_conf, a, b] { lp(&mut h, x); }
+    h.finalize().into()
+}
+
+fn transcript(a: &[u8], b: &[u8], enc_a: &[u8], enc_b: &[u8]) -> [u8; 32] {
+    let mut h = Blake2b::<U32>::new();
+    lp(&mut h, b"seburity-pair-transcript-v2");
+    for x in [a, b, enc_a, enc_b] { lp(&mut h, x); }
     h.finalize().into()
 }
 
@@ -96,39 +223,109 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-/// Run the pairing. Consumes the code: it can never be reused. Blocking; set stream timeouts at the transport.
-pub fn pair<S: Read + Write>(stream: &mut S, me: &ContactIdentity, code: PairingCode) -> Result<Paired, ExchangeError> {
-    let (st, my_msg) = Spake2::<Ed25519Group>::start_symmetric(&Password::new(code.0.as_bytes()), &Identity::new(ID));
-    drop(code);
-    write_frame(stream, &my_msg)?;
-    let peer_msg = read_frame(stream)?;
-    if peer_msg == my_msg { return Err(ExchangeError::Reflection); }
+/// Reject SPAKE2 points that are non-decodable, small-order or non-canonically encoded.
+fn check_point(msg: &[u8]) -> Result<(), ExchangeError> {
+    if msg.len() != 33 { return Err(ExchangeError::PairingFailed); }
+    let raw: [u8; 32] = msg[1..].try_into().unwrap();
+    let c = CompressedEdwardsY(raw);
+    let p = c.decompress().ok_or(ExchangeError::PairingFailed)?;
+    if p.is_small_order() || p.compress().to_bytes() != raw { return Err(ExchangeError::PairingFailed); }
+    Ok(())
+}
+
+/// `claimed`: test hook letting an adversarial peer present a DIFFERENT bundle than its identity's.
+fn run<S: PairStream>(role: Role, s: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
+    let clock = Clock(Instant::now() + deadline);
+    let pw = Password::new(&code[..]);
+    let (st, my_msg) = match role {
+        Role::A => Spake2::<Ed25519Group>::start_a(&pw, &Identity::new(ID_A), &Identity::new(ID_B)),
+        Role::B => Spake2::<Ed25519Group>::start_b(&pw, &Identity::new(ID_A), &Identity::new(ID_B)),
+    };
+    // 1. PAKE messages (A writes first; B reads first)
+    let peer_msg = if role == Role::A {
+        clock.write(s, &my_msg)?;
+        clock.read(s)?
+    } else {
+        let p = clock.read(s)?;
+        clock.write(s, &my_msg)?;
+        p
+    };
+    check_point(&peer_msg)?;
     let k = Zeroizing::new(st.finish(&peer_msg).map_err(|_| ExchangeError::PairingFailed)?);
-    // Order-independent transcript for key derivation.
-    let (lo, hi) = if my_msg < peer_msg { (&my_msg, &peer_msg) } else { (&peer_msg, &my_msg) };
-    let k_conf = kdf(&k, b"conf", lo, hi);
-    let k_enc = kdf(&k, b"enc", lo, hi);
+    let (ma, mb) = if role == Role::A { (&my_msg, &peer_msg) } else { (&peer_msg, &my_msg) };
+    let k_conf = kdf(&k, b"conf", ma, mb);
+    let k_enc = kdf(&k, b"enc", ma, mb);
 
-    // Key confirmation (detects wrong code / MITM before any bundle is sent).
-    write_frame(stream, &tag(&k_conf, &my_msg, &peer_msg))?;
-    let their_tag = read_frame(stream)?;
-    if !ct_eq(&their_tag, &tag(&k_conf, &peer_msg, &my_msg)) { return Err(ExchangeError::PairingFailed); }
+    // 2. Key confirmation
+    let my_tag = tag(&k_conf, role, ma, mb);
+    let their_expected = tag(&k_conf, role.other(), ma, mb);
+    let their_tag = if role == Role::A {
+        clock.write(s, &my_tag)?;
+        clock.read(s)?
+    } else {
+        let t = clock.read(s)?;
+        clock.write(s, &my_tag)?;
+        t
+    };
+    if !ct_eq(&their_tag, &their_expected) { return Err(ExchangeError::PairingFailed); }
 
-    // Bundle exchange under the PAKE-derived key.
+    // 3. Bundle exchange (encrypted under K, role+transcript in AAD)
     let me_b = Bundle::from_identity(me);
+    let my_enc = claimed.unwrap_or_else(|| me_b.encode(me));
     let cipher = XChaCha20Poly1305::new((&*k_enc).into());
-    let mut nonce = [0u8; 24];
-    getrandom::fill(&mut nonce).expect("OS RNG unavailable");
-    let aad_send = [b"seburity-pair-bundle".as_slice(), &my_msg, &peer_msg].concat();
-    let ct = cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: &me_b.encode(me), aad: &aad_send }).map_err(|_| ExchangeError::Malformed)?;
-    write_frame(stream, &[nonce.as_slice(), &ct].concat())?;
+    let seal = |role: Role, pt: &[u8]| -> Result<Vec<u8>, ExchangeError> {
+        let mut nonce = [0u8; 24];
+        getrandom::fill(&mut nonce).expect("OS RNG unavailable");
+        let aad = [b"seburity-pair-frame".as_slice(), &[role.byte()], ma, mb].concat();
+        let ct = cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: pt, aad: &aad }).map_err(|_| ExchangeError::Malformed)?;
+        Ok([nonce.as_slice(), &ct].concat())
+    };
+    let open = |role: Role, f: &[u8]| -> Result<Zeroizing<Vec<u8>>, ExchangeError> {
+        if f.len() < 24 + 16 { return Err(ExchangeError::Malformed); }
+        let aad = [b"seburity-pair-frame".as_slice(), &[role.byte()], ma, mb].concat();
+        cipher.decrypt(XNonce::from_slice(&f[..24]), Payload { msg: &f[24..], aad: &aad }).map(Zeroizing::new).map_err(|_| ExchangeError::PairingFailed)
+    };
+    let exchange = |s: &mut S, out: Vec<u8>| -> Result<Vec<u8>, ExchangeError> {
+        if role == Role::A { clock.write(s, &out)?; clock.read(s) } else { let r = clock.read(s)?; clock.write(s, &out)?; Ok(r) }
+    };
+    let peer_enc_frame = exchange(s, seal(role, &my_enc)?)?;
+    let peer_enc = open(role.other(), &peer_enc_frame)?;
+    if peer_enc.len() != BUNDLE_LEN { return Err(ExchangeError::Malformed); }
+    let theirs = Bundle::decode(&peer_enc).map_err(|_| ExchangeError::Malformed)?;
+    if theirs == me_b { return Err(ExchangeError::ProofFailed); }
 
-    let f = read_frame(stream)?;
-    if f.len() != 24 + BUNDLE_LEN + 16 { return Err(ExchangeError::Malformed); }
-    let aad_recv = [b"seburity-pair-bundle".as_slice(), &peer_msg, &my_msg].concat();
-    let pt = cipher.decrypt(XNonce::from_slice(&f[..24]), Payload { msg: &f[24..], aad: &aad_recv }).map_err(|_| ExchangeError::PairingFailed)?;
-    let theirs = Bundle::decode(&pt).map_err(|_| ExchangeError::Malformed)?;
-    if theirs == me_b { return Err(ExchangeError::Reflection); }
+    // 4. Proof of possession of the Ed25519 key, bound to this exact transcript and both bundles
+    let (ea, eb) = if role == Role::A { (&my_enc[..], &peer_enc[..]) } else { (&peer_enc[..], &my_enc[..]) };
+    let t = transcript(ma, mb, ea, eb);
+    let pop_msg = |r: Role| [b"seburity-pair-pop-v1".as_slice(), &[r.byte()], &t].concat();
+    let my_pop = me.sign_domain(&pop_msg(role));
+    let peer_pop_frame = exchange(s, seal(role, &my_pop)?)?;
+    let peer_pop = open(role.other(), &peer_pop_frame)?;
+    let peer_pop: [u8; 64] = peer_pop[..].try_into().map_err(|_| ExchangeError::ProofFailed)?;
+    if !theirs.verify_domain(&pop_msg(role.other()), &peer_pop) { return Err(ExchangeError::ProofFailed); }
+
+    // 5. Prove X25519 + ML-KEM possession with a real session handshake; confirm the transcript both ways.
+    // B dials, A accepts (stream timeouts are re-armed to the remaining time).
+    clock.arm(s)?;
+    let mut guard = HandshakeGuard::new(0);
+    match role {
+        Role::B => {
+            let mut sess = link::dial(s, me, &theirs, &t).map_err(|_| ExchangeError::ProofFailed)?;
+            clock.arm(s)?;
+            let mut cell = vec![0u8; seburity_core::session::WIRE_CELL_LEN];
+            s.read_exact(&mut cell).map_err(|_| ExchangeError::Io)?;
+            let m = sess.recv(me, &cell).map_err(|_| ExchangeError::ProofFailed)?;
+            if !ct_eq(&m.body, &t) { return Err(ExchangeError::ProofFailed); }
+        }
+        Role::A => {
+            let (mut sess, first) = link::accept(s, me, &theirs, &mut guard, 0).map_err(|_| ExchangeError::ProofFailed)?;
+            if !ct_eq(&first.body, &t) { return Err(ExchangeError::ProofFailed); }
+            let reply = sess.send(me, &t).map_err(|_| ExchangeError::ProofFailed)?;
+            clock.arm(s)?;
+            s.write_all(&reply).and_then(|_| s.flush()).map_err(|_| ExchangeError::Io)?;
+        }
+    }
+    if Instant::now() >= clock.0 { return Err(ExchangeError::Io); }
     let sn = safety_number(&me_b, &theirs);
     Ok(Paired { contact: ImportedContact::from_pake(theirs), safety_number: sn })
 }
@@ -136,65 +333,134 @@ pub fn pair<S: Read + Write>(stream: &mut S, me: &ContactIdentity, code: Pairing
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seburity_core::trust::Trust;
     use std::os::unix::net::UnixStream;
     use std::thread;
 
-    fn run(code_a: PairingCode, code_b: PairingCode) -> (Result<Paired, ExchangeError>, Result<Paired, ExchangeError>, ContactIdentity, ContactIdentity) {
+    fn clone_id(i: &ContactIdentity) -> ContactIdentity { ContactIdentity::from_secret_bytes(&i.secret_bytes()).unwrap() }
+
+    fn lo() -> Arc<Lockout> { Arc::new(Lockout::default()) }
+
+    fn run_pair(code_a: &str, code_b: &str, l: Arc<Lockout>) ->  (Result<Paired, ExchangeError>, Result<Paired, ExchangeError>, ContactIdentity, ContactIdentity) {
+        run_pair2(code_a, code_b, l, lo())
+    }
+
+    /// Each side has its OWN lockout, as on two real devices.
+    fn run_pair2(code_a: &str, code_b: &str, la: Arc<Lockout>, lb: Arc<Lockout>) -> (Result<Paired, ExchangeError>, Result<Paired, ExchangeError>, ContactIdentity, ContactIdentity) {
         let (mut sa, mut sb) = UnixStream::pair().unwrap();
         let (a, b) = (ContactIdentity::generate(), ContactIdentity::generate());
-        let (a2, b2) = (ContactIdentity::from_secret_bytes(&a.secret_bytes()).unwrap(), ContactIdentity::from_secret_bytes(&b.secret_bytes()).unwrap());
-        let ta = thread::spawn(move || { let r = pair(&mut sa, &a2, code_a); drop(sa); r });
-        let tb = thread::spawn(move || { let r = pair(&mut sb, &b2, code_b); drop(sb); r });
+        let (a2, b2) = (clone_id(&a), clone_id(&b));
+        let offer = {
+            let (mut o, _) = PairingOffer::generate_in(la.clone()).unwrap();
+            o.code = PairingJoin::parse_in(code_a, la.clone()).unwrap().code; // test-only: fixed code
+            o.with_deadline(Duration::from_secs(10))
+        };
+        let join = PairingJoin::parse_in(code_b, lb).unwrap().with_deadline(Duration::from_secs(10));
+        let ta = thread::spawn(move || { let r = offer.accept(&mut sa, &a2); drop(sa); r });
+        let tb = thread::spawn(move || { let r = join.join(&mut sb, &b2); drop(sb); r });
         (ta.join().unwrap(), tb.join().unwrap(), a, b)
     }
 
     #[test]
-    fn matching_code_exchanges_bundles_and_safety_numbers() {
-        let c = PairingCode::generate();
-        let c2 = PairingCode::parse(&c.display()).unwrap();
-        let (ra, rb, a, b) = run(c, c2);
+    fn matching_code_pairs_with_pop_and_codeauthenticated_trust() {
+        let (ra, rb, a, b) = run_pair("1234567890", "12345-67890", lo());
         let (ra, rb) = (ra.unwrap(), rb.unwrap());
-        assert_eq!(ra.contact.bundle, Bundle::from_identity(&b));
-        assert_eq!(rb.contact.bundle, Bundle::from_identity(&a));
+        assert_eq!(ra.contact.bundle(), &Bundle::from_identity(&b));
+        assert_eq!(rb.contact.bundle(), &Bundle::from_identity(&a));
         assert_eq!(ra.safety_number, rb.safety_number);
-        assert!(ra.contact.verified);
+        assert_eq!(ra.contact.trust(), Trust::CodeAuthenticated);
     }
 
     #[test]
-    fn wrong_code_fails_on_both_sides_before_any_bundle() {
-        let (ra, rb, _, _) = run(PairingCode::parse("1111111111").unwrap(), PairingCode::parse("1111111112").unwrap());
+    fn safety_confirmation_raises_trust_only_with_matching_view() {
+        let (ra, _rb, a, _b) = run_pair("1111111111", "1111111111", lo());
+        let mut c = ra.unwrap().contact;
+        let mine = Bundle::from_identity(&a);
+        let v = c.safety_view(&mine);
+        assert!(c.confirm(&mine, v));
+        assert_eq!(c.trust(), Trust::SafetyVerified);
+        // a view for a different contact is refused
+        let other = ImportedContact::from_file(Bundle::from_identity(&ContactIdentity::generate()));
+        let mut c2 = ImportedContact::from_file(Bundle::from_identity(&ContactIdentity::generate()));
+        assert!(!c2.confirm(&mine, other.safety_view(&mine)));
+        assert_eq!(c2.trust(), Trust::Unverified);
+    }
+
+    #[test]
+    fn wrong_code_fails_both_sides() {
+        let (ra, rb, _, _) = run_pair("1111111111", "1111111112", lo());
         assert_eq!(ra.err(), Some(ExchangeError::PairingFailed));
         assert_eq!(rb.err(), Some(ExchangeError::PairingFailed));
     }
 
     #[test]
-    fn reflection_is_rejected() {
-        // attacker echoes our own first frame back
-        let (mut me, mut atk) = UnixStream::pair().unwrap();
-        let id = ContactIdentity::generate();
-        let t = thread::spawn(move || pair(&mut me, &id, PairingCode::generate()));
-        let f = read_frame(&mut atk).unwrap();
-        write_frame(&mut atk, &f).unwrap();
-        assert_eq!(t.join().unwrap().err(), Some(ExchangeError::Reflection));
+    fn same_role_sessions_cannot_cross_complete() {
+        // two OFFER-side sessions of the same device relayed to each other (R3-M2)
+        let (mut s1, mut s2) = UnixStream::pair().unwrap();
+        let l = lo();
+        let mk = |l: &Arc<Lockout>| { let (mut o, _) = PairingOffer::generate_in(l.clone()).unwrap(); o.code = Zeroizing::new(*b"4242424242"); o.with_deadline(Duration::from_secs(5)) };
+        let (o1, o2) = (mk(&l), mk(&l));
+        let (i1, i2) = (ContactIdentity::generate(), ContactIdentity::generate());
+        let t1 = thread::spawn(move || o1.accept(&mut s1, &i1).err());
+        let t2 = thread::spawn(move || o2.accept(&mut s2, &i2).err());
+        assert!(t1.join().unwrap().is_some() && t2.join().unwrap().is_some());
     }
 
     #[test]
-    fn code_parsing_and_generation() {
-        assert!(PairingCode::parse("12345-6789").is_err());
-        assert!(PairingCode::parse("12345-6789a").is_err());
-        assert!(PairingCode::parse("123 45-67890").is_ok());
-        let c = PairingCode::generate();
-        assert_eq!(c.display().len(), CODE_DIGITS + 1);
-        assert_ne!(PairingCode::generate().display(), c.display());
+    fn lockout_after_repeated_failures_and_offer_is_single_use() {
+        let l = lo();
+        for _ in 0..3 { let (a, b, _, _) = run_pair("1111111111", "2222222222", l.clone()); assert!(a.is_err() && b.is_err()); }
+        assert!(l.remaining() > 0);
+        assert!(matches!(PairingOffer::generate_in(l.clone()), Err(ExchangeError::Locked(_))));
+        assert!(matches!(PairingJoin::parse_in("1111111111", l).unwrap().join(&mut UnixStream::pair().unwrap().0, &ContactIdentity::generate()), Err(ExchangeError::Locked(_))));
     }
 
     #[test]
-    fn oversized_frame_rejected() {
-        let (mut me, mut atk) = UnixStream::pair().unwrap();
-        let id = ContactIdentity::generate();
-        let t = thread::spawn(move || pair(&mut me, &id, PairingCode::generate()));
-        let _ = read_frame(&mut atk);
-        atk.write_all(&[0xff, 0xff]).unwrap();
-        assert_eq!(t.join().unwrap().err(), Some(ExchangeError::Malformed));
+    fn stalled_peer_times_out() {
+        let (mut me, _atk) = UnixStream::pair().unwrap();
+        let j = PairingJoin::parse_in("1111111111", lo()).unwrap().with_deadline(Duration::from_millis(300));
+        let t = Instant::now();
+        assert_eq!(j.join(&mut me, &ContactIdentity::generate()).err(), Some(ExchangeError::Io));
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn small_order_and_garbage_points_rejected() {
+        let mut ident = vec![b'A']; ident.extend_from_slice(&{ let mut p = [0u8; 32]; p[0] = 1; p }); // identity point
+        assert!(check_point(&ident).is_err());
+        assert!(check_point(&[b'A'; 10]).is_err());
+        let mut noncanon = vec![b'A']; noncanon.extend_from_slice(&[0xff; 32]);
+        assert!(check_point(&noncanon).is_err());
+    }
+
+    #[test]
+    fn bundle_substitution_without_key_possession_fails() {
+        // Mallory knows the code and presents CAROL's (validly signed) bundle but cannot prove possession.
+        let carol = ContactIdentity::generate();
+        let carol_enc = Bundle::from_identity(&carol).encode(&carol);
+        let (mut sa, mut sm) = UnixStream::pair().unwrap();
+        let l = lo();
+        let (mut o, _) = PairingOffer::generate_in(l).unwrap();
+        o.code = Zeroizing::new(*b"5555555555");
+        let o = o.with_deadline(Duration::from_secs(10));
+        let alice = ContactIdentity::generate();
+        let ta = thread::spawn(move || o.accept(&mut sa, &alice).err());
+        let mallory = ContactIdentity::generate();
+        let r = run(Role::B, &mut sm, &mallory, b"5555555555", Duration::from_secs(10), Some(carol_enc));
+        assert!(r.is_err());
+        assert_eq!(ta.join().unwrap(), Some(ExchangeError::ProofFailed));
+    }
+
+    #[test]
+    fn code_parsing_generation_and_zeroizing_display() {
+        let l = lo();
+        assert!(PairingJoin::parse_in("12345-6789", l.clone()).is_err());
+        assert!(PairingJoin::parse_in("12345-6789a", l.clone()).is_err());
+        assert!(PairingJoin::parse_in("12345678901", l.clone()).is_err());
+        assert!(PairingJoin::parse_in("123 45-67890", l.clone()).is_ok());
+        let (_, d1) = PairingOffer::generate_in(l.clone()).unwrap();
+        let (_, d2) = PairingOffer::generate_in(l).unwrap();
+        assert_eq!(d1.len(), CODE_DIGITS + 1);
+        assert_ne!(*d1, *d2);
     }
 }

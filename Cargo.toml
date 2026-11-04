@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vault", "crates/core", "crates/exchange", "crates/net"]
+members = ["crates/vault", "crates/core", "crates/exchange", "crates/net", "crates/store"]
 
 [workspace.package]
 edition = "2021"
@@ -12,3 +12,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Crypto crates are far too slow unoptimized (Argon2 512 MiB, ML-KEM); keep deps fast in dev/test.
+[profile.dev.package."*"]
+opt-level = 3

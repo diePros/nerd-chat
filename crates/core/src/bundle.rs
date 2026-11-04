@@ -64,11 +64,29 @@ impl Bundle {
         Ok(me)
     }
 
+    /// Rebuild a bundle from stored public parts (e.g. from the authenticated vault) applying
+    /// the same key validity checks as `decode`.
+    pub fn from_parts(sign_pub: [u8; 32], dh_pub: [u8; 32], kem_pub: [u8; KEM_PUB_LEN]) -> Result<Self, Error> {
+        let me = Self { sign_pub, dh_pub, kem_pub };
+        me.verifying_key()?;
+        me.check_dh_pub()?;
+        me.kem_key()?;
+        Ok(me)
+    }
+
     /// Ed25519 key, rejecting small-order ("weak") keys for which universal signatures exist.
     pub fn verifying_key(&self) -> Result<VerifyingKey, Error> {
         let vk = VerifyingKey::from_bytes(&self.sign_pub).map_err(|_| Error::Malformed)?;
         if vk.is_weak() { return Err(Error::Malformed); }
         Ok(vk)
+    }
+
+    /// Strictly verify a domain-prefixed signature made by this bundle's Ed25519 key.
+    pub fn verify_domain(&self, msg: &[u8], sig: &[u8; 64]) -> bool {
+        match self.verifying_key() {
+            Ok(vk) => vk.verify_strict(msg, &Signature::from_bytes(sig)).is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Reject low-order X25519 points (they force an all-zero, public DH output).
