@@ -22,11 +22,36 @@ fn usage() -> ! {
   --ram                RAM-only: never write anything to disk\n\
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
   --keyfile PATH       second factor file (>= 32 bytes), keep it on a SEPARATE device\n\
-  --counter-file PATH  rollback counter file (default <vault>.counter; best on the keyfile device)");
+  --counter-file PATH  rollback counter file (default <vault>.counter; best on the keyfile device)\n\
+  --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
+                       add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override");
     std::process::exit(2)
 }
 
+/// `seburity --probe-tor [--probe-onion] [--tor-control ADDR] [--tor-cookie PATH]`: report what the Tor on this
+/// machine allows, then exit. Passive unless --probe-onion (creates and removes one throwaway onion service).
+fn probe_tor(args: &[String]) -> ! {
+    use seburity_net::tor::{control::AuthPref, probe::{probe, Candidates}, Addr};
+    let (mut onion, mut ctl, mut cookie) = (false, None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--probe-tor" => {}
+            "--probe-onion" => onion = true,
+            "--tor-control" => ctl = it.next().and_then(|s| Addr::parse(s)),
+            "--tor-cookie" => cookie = it.next().map(PathBuf::from),
+            _ => usage(),
+        }
+    }
+    let mut c = Candidates::standard();
+    if let Some(a) = ctl { c.control = vec![a]; }
+    for l in probe(&c, onion, &AuthPref { password: None, cookie_path: cookie }) { println!("{l}"); }
+    std::process::exit(0)
+}
+
 fn parse_args() -> Config {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
     let mut path = Some(PathBuf::from("seburity.vault"));
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
     let mut it = std::env::args().skip(1);

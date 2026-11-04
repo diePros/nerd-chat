@@ -5,6 +5,7 @@
 
 pub mod guard;
 pub mod link;
+pub mod tor;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NetError {

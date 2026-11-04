@@ -1,0 +1,99 @@
+//! `seburity --probe-tor`: find out what the Tor on THIS machine allows (Tails, Whonix, system tor...).
+//! Passive by default; `try_onion` additionally creates and removes one throwaway onion service.
+use super::{control::{AuthPref, Controller}, open, Addr, TorError};
+use seburity_core::{bundle::Bundle, identity::ContactIdentity};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
+
+pub struct Candidates { pub control: Vec<Addr>, pub socks: Vec<Addr> }
+
+impl Candidates {
+    pub fn standard() -> Self {
+        let tcp = |p: u16| Addr::Tcp(SocketAddr::from(([127, 0, 0, 1], p)));
+        Self {
+            control: vec![tcp(9051), tcp(9151), Addr::Unix(PathBuf::from("/run/tor/control")), Addr::Unix(PathBuf::from("/var/run/tor/control"))],
+            socks: vec![tcp(9050), tcp(9150), Addr::Unix(PathBuf::from("/run/tor/socks"))],
+        }
+    }
+}
+
+fn show(a: &Addr) -> String { match a { Addr::Tcp(s) => s.to_string(), Addr::Unix(p) => format!("unix:{}", p.display()) } }
+
+/// Returns human-readable report lines. Never prints cookie contents.
+pub fn probe(c: &Candidates, try_onion: bool, auth: &AuthPref) -> Vec<String> {
+    let mut out = vec![];
+    match super::spawn::find_tor() { Some(p) => out.push(format!("tor binary in PATH: {}", p.display())), None => out.push("tor binary in PATH: none (spawn mode unavailable unless you pass --tor-path)".into()) }
+    let mut working_ctl: Option<Addr> = None;
+    for a in &c.control {
+        match open(a, Duration::from_secs(2)) {
+            Err(e) => out.push(format!("control {}: not reachable ({e})", show(a))),
+            Ok(s) => {
+                let mut ctl = Controller::new(s);
+                match ctl.protocolinfo() {
+                    Err(e) => out.push(format!("control {}: reachable but not a tor control port ({e})", show(a))),
+                    Ok(pi) => {
+                        out.push(format!("control {}: tor {} offers auth methods [{}]", show(a), pi.version.as_deref().unwrap_or("?"), pi.methods.join(",")));
+                        if let Some(cf) = &pi.cookie_file {
+                            match super::control::read_cookie(std::path::Path::new(cf)) {
+                                Ok(_) => out.push(format!("  cookie file {cf}: readable by this user")),
+                                Err(e) => out.push(format!("  cookie file {cf}: NOT usable ({e})")),
+                            }
+                        }
+                        match ctl.authenticate(auth) {
+                            Ok(()) => { out.push("  authentication: OK".into()); working_ctl.get_or_insert(a.clone()); }
+                            Err(e) => out.push(format!("  authentication: FAILED ({e})")),
+                        }
+                        if ctl.authenticated {
+                            if let Ok(l) = ctl.socks_listeners() { out.push(format!("  tor's SOCKS listeners: {}", l.iter().map(show).collect::<Vec<_>>().join(", "))); }
+                            if let Ok(p) = ctl.bootstrap_progress() { out.push(format!("  bootstrap: {p}%")); }
+                            if try_onion { out.push(onion_test(&mut ctl)); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for a in &c.socks {
+        match open(a, Duration::from_secs(2)) {
+            Err(e) => out.push(format!("socks {}: not reachable ({e})", show(a))),
+            Ok(mut s) => {
+                use std::io::{Read, Write};
+                let ok = s.write_all(&[5, 1, 0]).is_ok() && { let mut r = [0u8; 2]; s.read_exact(&mut r).is_ok() && r == [5, 0] };
+                out.push(format!("socks {}: {}", show(a), if ok { "answers SOCKS5 (no-auth)" } else { "open but did not answer like a SOCKS5 proxy" }));
+            }
+        }
+    }
+    if working_ctl.is_none() { out.push("RESULT: no authenticated control port. Seburity can still DIAL contacts through a SOCKS port, but cannot HOST onion services here.".into()); }
+    else { out.push("RESULT: control port works: both dialing and hosting are possible".into()); }
+    out
+}
+
+/// Create one throwaway onion service (with a dummy authorized client) and remove it again.
+fn onion_test<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> String {
+    let id = ContactIdentity::generate();
+    let dummy = Bundle::from_identity(&ContactIdentity::generate());
+    let target = SocketAddr::from(([127, 0, 0, 1], 9));
+    match ctl.add_onion(&id.onion_expanded_secret(), super::VIRT_PORT, target, &[dummy.auth_pub], &id.onion_public()) {
+        Ok(sid) => { let _ = ctl.del_onion(&sid); "  ADD_ONION (hosting onion services): ALLOWED".into() }
+        Err(TorError::Rejected { code, msg }) => format!("  ADD_ONION: REFUSED by tor ({code} {msg}) - hosting not possible through this control port"),
+        Err(e) => format!("  ADD_ONION: failed ({e})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::{Read, Write}, os::unix::net::UnixListener, thread};
+
+    #[test]
+    fn probe_reports_unreachable_and_non_tor_ports_without_panicking() {
+        let d = tempfile::tempdir().unwrap();
+        let sock = d.path().join("notor");
+        let l = UnixListener::bind(&sock).unwrap();
+        thread::spawn(move || { for s in l.incoming() { if let Ok(mut s) = s { let _ = s.write_all(b"SSH-2.0-nope\r\n"); let mut b = [0u8; 64]; let _ = s.read(&mut b); } } });
+        let c = Candidates { control: vec![Addr::Unix(d.path().join("missing")), Addr::Unix(sock)], socks: vec![Addr::Unix(d.path().join("nosocks"))] };
+        let r = probe(&c, false, &AuthPref::default()).join("\n");
+        assert!(r.contains("not reachable"), "{r}");
+        assert!(r.contains("not a tor control port") || r.contains("reachable but"), "{r}");
+        assert!(r.contains("RESULT: no authenticated control port"), "{r}");
+    }
+}

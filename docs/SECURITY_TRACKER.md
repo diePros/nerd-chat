@@ -107,3 +107,11 @@ No Critical/High. Pairing crypto verified (no substitution/reflection/role-desyn
 | R4-I3 | Joiner can retry the same code (~6e-10) | ACCEPTED | UI never reuses a failed code (buffer cleared) |
 | R4-I4 | Names with bidi/format chars | FIXED | rejected |
 | R4-I5 | store decode doesn't check id uniqueness | OPEN (info) | needs the vault key to exploit |
+
+## Transport stage (self-notes before review 5)
+- Bundle v3 (SBC3) now carries onion pubkey + client-auth pubkey inside the signed body and safety number: **R2-I3 FIXED**.
+- `snow` no longer pulls `ring` (C/asm) — musl static build works. Tracker D-4: still need cargo-deny/vet.
+- Tor control/SOCKS code is parser-heavy and handles untrusted peers (a local process claiming to be tor): review 5 target.
+- Not verifiable here without a real tor: ADD_ONION flag acceptance, ONION_CLIENT_AUTH_ADD syntax, SpawnedTor against real tor, behaviour on Tails. Covered by the ignored live test + `--probe-tor`; results from the user's machines pending.
+- Control password auth is not exposed in the CLI yet (code path exists, tested).
+- External-mode hosting forwards to a TCP 127.0.0.1 port: any local user can connect to it, so every inbound connection must pass the Noise handshake + HandshakeGuard (rate limit/replay) — the chat engine must wire one guard per onion service.
