@@ -79,12 +79,21 @@ The report states for every control port whether its owner check passed (`owner 
   A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).
 - **Known limitation:** if you are the designated listener but cannot host (e.g. a Tails whose control port refuses `ADD_ONION`),
   that contact cannot reach you; if you are the designated dialer it works. Role negotiation is future work (tracker C6-roles).
-- **Per-contact guards:** one `HandshakeGuard` (rate limit + replay cache) per hosted service, locked only for the quick checks, never
-  across network I/O; at most 4 concurrent unauthenticated handshakes per contact.
+- **Handshake availability (review 6):** NO per-contact refusal before authentication (a token bucket let anyone who could connect
+  lock the real peer out). Per hosted service only a replay cache runs before the handshake; CPU is bounded by ONE engine-wide budget
+  (50 handshakes/s, burst 100); every handshake has a TOTAL deadline (45 s) instead of per-read timeouts; at most 4 unauthenticated
+  handshakes run per contact and when they are full the OLDEST is aborted, so a newcomer (maybe the real peer) always gets in.
+- **Who can even reach our listener:** spawn mode = a unix socket in a 0700 directory (only us). External tor = a TCP port on
+  127.0.0.1 that every local user could reach, so an inbound client is dropped unread unless its socket belongs to us, root or the tor
+  account (checked via /proc/net/tcp), or you passed `--tor-trust-control`.
+- **Nothing outlives a contact:** deleting a contact (or going offline, or exiting) removes its hosted onion service AND the client-auth
+  credential we installed in tor (`ONION_CLIENT_AUTH_REMOVE`), and unlinks its socket file. A contact deleted or added while tor is
+  still starting is reconciled when the engine becomes ready. A bundle that reuses another contact's onion address is refused.
 - **Connection lifetime:** cells are polled in 200 ms ticks (partial cells buffered); a keepalive cell every 30 s when idle; no cell for
   100 s drops the connection; the dialer reconnects with jittered backoff 3 s -> 60 s.
-- **Messages:** RAM only. Texts are chunked into signed+encrypted 1 KiB cells (max 32 KiB per message), reassembled with hard caps,
-  control and bidi characters from the peer are replaced by '?'. Unknown message kinds are ignored (room for files later).
+- **Messages:** RAM only. Texts are chunked into signed+encrypted 1 KiB cells (max 32 KiB per message), reassembled in a fixed-capacity
+  wiped buffer, and everything a peer sends is sanitised (control, format, bidi, invisible, private-use characters become '?', stacked
+  combining marks are capped; same rules for contact names). Unknown message kinds are ignored (room for files later).
 - **Timing metadata:** keepalives and reconnect attempts are visible patterns to a network observer of your Tor entry; constant-rate
   cover traffic is not implemented.
 

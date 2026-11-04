@@ -129,15 +129,17 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     for l in app.chat_lines().iter().rev() {
         let (tag, style) = if l.mine { (if l.queued { "me (queued)> " } else { "me> " }, Style::default().fg(Color::Cyan)) } else { ("them> ", Style::default().fg(Color::Green)) };
+        // wrap by DISPLAY width (wide CJK characters take two cells): nothing may silently fall off the right edge (R6-L5)
         let mut chunks: Vec<&str> = Vec::new();
         let t: &str = &l.text;
-        let mut start = 0;
-        while start < t.len() {
-            let mut end = t[start..].char_indices().nth(w.saturating_sub(tag.len()).max(1)).map_or(t.len(), |(i, _)| start + i);
-            if end <= start { end = t.len(); }
-            chunks.push(&t[start..end]);
-            start = end;
+        let avail = w.saturating_sub(tag.len()).max(2);
+        let (mut start, mut cols) = (0usize, 0usize);
+        for (i, ch) in t.char_indices() {
+            let cw = Span::raw(&t[i..i + ch.len_utf8()]).width().max(1);
+            if cols + cw > avail && i > start { chunks.push(&t[start..i]); start = i; cols = 0; }
+            cols += cw;
         }
+        if start < t.len() { chunks.push(&t[start..]); }
         for (i, c) in chunks.iter().enumerate().rev() {
             lines.push(Line::from(vec![Span::styled(if i == 0 { tag.to_string() } else { " ".repeat(tag.len()) }, style), Span::raw(*c)]));
         }

@@ -25,14 +25,9 @@ impl std::fmt::Debug for Contact {
 #[derive(Default, Debug)]
 pub struct Store { pub contacts: Vec<Contact> }
 
-/// Controls and invisible/bidirectional formatting characters can spoof what the user sees.
-fn bad_char(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
-}
-
 fn valid_name(n: &str) -> bool {
     let t = n.trim();
-    !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(bad_char)
+    !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(seburity_core::text::is_unsafe_char)
 }
 
 impl Drop for Contact {

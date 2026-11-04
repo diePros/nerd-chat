@@ -9,12 +9,47 @@ use crate::{
 use seburity_core::{identity::ContactIdentity, session::{Session, WIRE_CELL_LEN}};
 use std::{
     io::{ErrorKind, Read, Write},
-    sync::mpsc::{Receiver, Sender, TryRecvError},
+    sync::{atomic::{AtomicBool, Ordering}, mpsc::{Receiver, Sender, TryRecvError}, Arc},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
 pub enum Out { Text(Zeroizing<String>), Close }
+
+/// Wraps a stream for the HANDSHAKE: one TOTAL deadline (a per-read timeout lets a slow-drip peer hold a slot for hours,
+/// R6-M2) and an abort flag so the engine can evict the oldest unauthenticated handshake when slots run out.
+pub(crate) struct DeadlineStream<'a> { pub s: &'a mut BoxStream, pub end: Instant, pub abort: Arc<AtomicBool> }
+
+const SLICE: Duration = Duration::from_millis(250);
+
+impl DeadlineStream<'_> {
+    fn left(&self) -> std::io::Result<Duration> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() || self.abort.load(Ordering::SeqCst) { return Err(std::io::Error::new(ErrorKind::TimedOut, "handshake deadline or aborted")); }
+        Ok(left.min(SLICE))
+    }
+}
+
+impl Read for DeadlineStream<'_> {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let d = self.left()?;
+            self.s.set_read_timeout_(Some(d))?;
+            match self.s.read(b) { Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => continue, r => return r }
+        }
+    }
+}
+
+impl Write for DeadlineStream<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        loop {
+            let d = self.left()?;
+            self.s.set_write_timeout_(Some(d))?;
+            match self.s.write(b) { Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => continue, r => return r }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.s.flush() }
+}
 
 /// Accumulates bytes until a full cell is available. A read timeout is "no data yet", not an error.
 #[derive(Default)]

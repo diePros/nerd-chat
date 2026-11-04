@@ -4,8 +4,12 @@
 //! service for that contact). So exactly one connection exists per pair and only listeners publish a service.
 //! A new AUTHENTICATED inbound connection replaces a stale one; strangers cannot (they fail the handshake).
 //! Messages typed while the peer is offline wait in a bounded RAM outbox; nothing is ever written to disk.
+//!
+//! Availability design (review 6): NO per-contact pre-authentication refusal (it let anyone who could connect lock the real
+//! peer out); CPU is bounded by one engine-wide budget instead, every handshake has a TOTAL deadline, and when the handshake
+//! slots are full the OLDEST unauthenticated handshake is aborted so a newcomer (possibly the real peer) always gets in.
 use crate::{
-    conn::{self, Out},
+    conn::{self, DeadlineStream, Out},
     proto,
     transport::{BoxStream, DialFn, Transport},
 };
@@ -13,14 +17,14 @@ use seburity_core::{bundle::Bundle, identity::ContactIdentity};
 use seburity_net::{guard::HandshakeGuard, link};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, mpsc::{channel, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
+    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, mpsc::{channel, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
 const MAX_PENDING: usize = 50;
-const MAX_CONCURRENT_HANDSHAKES: usize = 4;
+const MAX_HANDSHAKE_SLOTS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
@@ -32,13 +36,31 @@ pub struct Timing {
     pub idle: Duration,
     pub min_backoff: Duration,
     pub max_backoff: Duration,
+    /// TOTAL time allowed for one handshake (inbound and outbound), not a per-read timeout.
     pub handshake: Duration,
+    /// Engine-wide cap on handshake attempts per second (bounds CPU against floods without ever refusing by contact).
+    pub handshakes_per_sec: f64,
 }
 
 impl Default for Timing {
     fn default() -> Self {
         Self { poll: Duration::from_millis(200), keepalive: Duration::from_secs(30), idle: Duration::from_secs(100),
-               min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(60) }
+               min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(45), handshakes_per_sec: 50.0 }
+    }
+}
+
+/// Engine-wide token bucket for handshake CPU.
+pub(crate) struct Budget { st: Mutex<(f64, Instant)>, cap: f64, rate: f64 }
+
+impl Budget {
+    pub(crate) fn new(rate: f64) -> Self { let cap = (rate * 2.0).max(10.0); Self { st: Mutex::new((cap, Instant::now())), cap, rate } }
+    pub(crate) fn take(&self) -> bool {
+        let Ok(mut g) = self.st.lock() else { return false };
+        let now = Instant::now();
+        let refill = now.duration_since(g.1).as_secs_f64() * self.rate;
+        g.0 = (g.0 + refill).min(self.cap);
+        g.1 = now;
+        if g.0 >= 1.0 { g.0 -= 1.0; true } else { false }
     }
 }
 
@@ -60,10 +82,10 @@ pub enum Event {
 }
 
 pub(crate) enum ConnEvent {
-    Up { id: [u8; 8], gen: u64, tx: Sender<Out> },
+    Up { id: [u8; 8], gen: u64, epoch: u64, tx: Sender<Out> },
     Down { id: [u8; 8], gen: u64 },
     Msg { id: [u8; 8], gen: u64, text: Zeroizing<String> },
-    DialFailed { id: [u8; 8] },
+    DialFailed { id: [u8; 8], epoch: u64 },
 }
 pub(crate) enum In { Cmd(Command), Conn(ConnEvent) }
 
@@ -76,7 +98,10 @@ impl Engine {
         let tx2 = tx.clone();
         let handle = thread::spawn(move || {
             let dial = transport.dial_fn();
-            let mut core = Core { transport, dial, rts: HashMap::new(), in_tx: tx2, ev: ev_tx, t: timing, gen: Arc::new(AtomicU64::new(0)), epoch: Instant::now() };
+            let mut core = Core {
+                transport, dial, rts: HashMap::new(), in_tx: tx2, ev: ev_tx, t: timing, gen: Arc::new(AtomicU64::new(0)),
+                epoch: Instant::now(), budget: Arc::new(Budget::new(timing.handshakes_per_sec)), next_epoch: 0,
+            };
             for c in contacts { core.add(c); }
             loop {
                 match rx.recv_timeout(timing.poll) {
@@ -118,6 +143,8 @@ struct Rt {
     peer: Bundle,
     my_onion: [u8; 32],
     we_dial: bool,
+    /// Distinguishes this registration from an earlier one with the same id (remove + add): stale Up/DialFailed are ignored.
+    epoch: u64,
     conn: Option<(u64, Sender<Out>)>,
     pending: VecDeque<Zeroizing<String>>,
     dialing: bool,
@@ -136,6 +163,8 @@ struct Core {
     t: Timing,
     gen: Arc<AtomicU64>,
     epoch: Instant,
+    budget: Arc<Budget>,
+    next_epoch: u64,
 }
 
 fn jitter(d: Duration) -> Duration {
@@ -143,6 +172,8 @@ fn jitter(d: Duration) -> Duration {
     getrandom::fill(&mut b).expect("OS RNG unavailable");
     d.mul_f64(0.75 + b[0] as f64 / 255.0 * 0.5) // +-25%
 }
+
+type Slots = Arc<Mutex<Vec<(u64, Arc<AtomicBool>)>>>;
 
 impl Core {
     fn notice(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into() }); }
@@ -156,34 +187,45 @@ impl Core {
         let guard = Arc::new(Mutex::new(HandshakeGuard::new(0)));
         let mut iso = [0u8; 16];
         getrandom::fill(&mut iso).expect("OS RNG unavailable");
+        self.next_epoch += 1;
+        let epoch = self.next_epoch;
         match self.transport.add_contact(&me, &cfg.peer, !we_dial) {
             Err(e) => self.notice(Some(cfg.id), format!("cannot reach/host for this contact: {e}")),
-            Ok(Some(rx)) => self.spawn_acceptor(cfg.id, &cfg, rx, guard.clone(), stop.clone()),
+            Ok(Some(rx)) => self.spawn_acceptor(cfg.id, &cfg, rx, guard, stop.clone(), epoch),
             Ok(None) => {}
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, we_dial, conn: None, pending: VecDeque::new(), dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, we_dial, epoch, conn: None, pending: VecDeque::new(), dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
 
-    fn spawn_acceptor(&self, id: [u8; 8], cfg: &ContactCfg, rx: Receiver<BoxStream>, guard: Arc<Mutex<HandshakeGuard>>, stop: Arc<AtomicBool>) {
+    fn spawn_acceptor(&self, id: [u8; 8], cfg: &ContactCfg, rx: Receiver<BoxStream>, guard: Arc<Mutex<HandshakeGuard>>, stop: Arc<AtomicBool>, epoch: u64) {
         let (secret, peer) = (cfg.secret.clone(), cfg.peer.clone());
-        let (in_tx, gen, epoch, t) = (self.in_tx.clone(), self.gen.clone(), self.epoch, self.t);
-        let busy = Arc::new(AtomicUsize::new(0));
+        let (in_tx, gen, started, t, budget) = (self.in_tx.clone(), self.gen.clone(), self.epoch, self.t, self.budget.clone());
+        let slots: Slots = Arc::new(Mutex::new(Vec::new()));
+        let next_slot = Arc::new(AtomicU64::new(0));
         thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(stream) => {
-                        // cap concurrent unauthenticated handshakes per contact: a stranger cannot pile up threads
-                        if busy.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_HANDSHAKES { busy.fetch_sub(1, Ordering::SeqCst); continue; }
-                        let (secret, peer, guard, in_tx, gen, busy) = (secret.clone(), peer.clone(), guard.clone(), in_tx.clone(), gen.clone(), busy.clone());
-                        thread::spawn(move || inbound(stream, secret, peer, guard, epoch, gen, in_tx, id, t, busy));
+                        let abort = Arc::new(AtomicBool::new(false));
+                        let slot = next_slot.fetch_add(1, Ordering::SeqCst);
+                        {
+                            // slots full: abort the OLDEST unauthenticated handshake; the newcomer (maybe the real peer) always gets in
+                            let mut s = slots.lock().unwrap();
+                            if s.len() >= MAX_HANDSHAKE_SLOTS { if let Some((_, old)) = s.first() { old.store(true, Ordering::SeqCst); } }
+                            s.push((slot, abort.clone()));
+                        }
+                        let (secret, peer, guard, in_tx, gen, slots2, budget) = (secret.clone(), peer.clone(), guard.clone(), in_tx.clone(), gen.clone(), slots.clone(), budget.clone());
+                        thread::spawn(move || inbound(stream, secret, peer, guard, started, gen, in_tx, id, epoch, t, budget, abort, slots2, slot));
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
+            // contact removed / engine stopping: abort in-flight handshakes so they release their key copies at once
+            for (_, a) in slots.lock().unwrap().iter() { a.store(true, Ordering::SeqCst); }
         });
     }
 
@@ -191,7 +233,7 @@ impl Core {
         if let Some(rt) = self.rts.remove(&id) {
             rt.stop.store(true, Ordering::SeqCst);
             if let Some((_, tx)) = &rt.conn { let _ = tx.send(Out::Close); let _ = self.ev.send(Event::Disconnected { id }); }
-            self.transport.remove_contact(&rt.my_onion);
+            self.transport.remove_contact(&rt.my_onion, &rt.peer.onion_pub);
         }
     }
 
@@ -201,8 +243,8 @@ impl Core {
             In::Cmd(Command::Remove(id)) => self.remove(id),
             In::Cmd(Command::Send { id, text }) => self.send(id, text),
             In::Cmd(Command::Shutdown) => {}
-            In::Conn(ConnEvent::Up { id, gen, tx }) => {
-                let Some(rt) = self.rts.get_mut(&id) else { let _ = tx.send(Out::Close); return };
+            In::Conn(ConnEvent::Up { id, gen, epoch, tx }) => {
+                let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) else { let _ = tx.send(Out::Close); return };
                 let had = rt.conn.is_some();
                 if let Some((_, old)) = rt.conn.replace((gen, tx.clone())) { let _ = old.send(Out::Close); }
                 rt.dialing = false;
@@ -222,8 +264,8 @@ impl Core {
             In::Conn(ConnEvent::Msg { id, gen, text }) => {
                 if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
             }
-            In::Conn(ConnEvent::DialFailed { id }) => {
-                if let Some(rt) = self.rts.get_mut(&id) {
+            In::Conn(ConnEvent::DialFailed { id, epoch }) => {
+                if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) {
                     rt.dialing = false;
                     rt.backoff = (rt.backoff * 2).min(self.t.max_backoff);
                     rt.next_dial = Instant::now() + jitter(rt.backoff);
@@ -238,10 +280,11 @@ impl Core {
         match &rt.conn {
             Some((_, tx)) => { let _ = tx.send(Out::Text(text)); }
             None => {
-                if rt.pending.len() >= MAX_PENDING { rt.pending.pop_front(); self.notice(Some(id), "outbox full: oldest queued message dropped"); }
-                let rt = self.rts.get_mut(&id).expect("exists");
+                let dropped = rt.pending.len() >= MAX_PENDING;
+                if dropped { rt.pending.pop_front(); }
                 rt.pending.push_back(text);
                 if rt.we_dial && !rt.dialing { rt.backoff = self.t.min_backoff; rt.next_dial = Instant::now(); }
+                if dropped { self.notice(Some(id), "outbox full: oldest queued message dropped"); }
             }
         }
     }
@@ -252,8 +295,8 @@ impl Core {
         for id in ids {
             let rt = self.rts.get_mut(&id).expect("exists");
             rt.dialing = true;
-            let (dial, secret, peer, iso, in_tx, gen, t) = (self.dial.clone(), rt.secret.clone(), rt.peer.clone(), rt.iso, self.in_tx.clone(), self.gen.clone(), self.t);
-            thread::spawn(move || outbound(dial, secret, peer, iso, in_tx, gen, id, t));
+            let (dial, secret, peer, iso, in_tx, gen, epoch, t) = (self.dial.clone(), rt.secret.clone(), rt.peer.clone(), rt.iso, self.in_tx.clone(), self.gen.clone(), rt.epoch, self.t);
+            thread::spawn(move || outbound(dial, secret, peer, iso, in_tx, gen, id, epoch, t));
         }
     }
 
@@ -264,29 +307,36 @@ impl Core {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guard: Arc<Mutex<HandshakeGuard>>, epoch: Instant, gen: Arc<AtomicU64>, in_tx: Sender<In>, id: [u8; 8], t: Timing, busy: Arc<AtomicUsize>) {
-    let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { busy.fetch_sub(1, Ordering::SeqCst); return };
-    let _ = stream.set_timeout(Some(t.handshake));
-    let r = link::accept_shared(&mut stream, &me, &peer, &guard, epoch.elapsed().as_secs());
-    busy.fetch_sub(1, Ordering::SeqCst);
+fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guard: Arc<Mutex<HandshakeGuard>>, started: Instant, gen: Arc<AtomicU64>,
+           in_tx: Sender<In>, id: [u8; 8], epoch: u64, t: Timing, budget: Arc<Budget>, abort: Arc<AtomicBool>, slots: Slots, slot: u64) {
+    let release = |slots: &Slots| slots.lock().unwrap().retain(|(s, _)| *s != slot);
+    let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return release(&slots) };
+    let r = {
+        let mut ds = DeadlineStream { s: &mut stream, end: Instant::now() + t.handshake, abort };
+        link::accept_shared(&mut ds, &me, &peer, &guard, started.elapsed().as_secs(), &|| budget.take())
+    };
+    release(&slots);
     if let Ok((sess, _first)) = r {
         let g = gen.fetch_add(1, Ordering::SeqCst) + 1;
         let (otx, orx) = channel();
-        if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, tx: otx })).is_err() { return; }
+        if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, epoch, tx: otx })).is_err() { return; }
         conn::run(stream, sess, me, orx, in_tx, id, g, t);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], t: Timing) {
-    let fail = |in_tx: &Sender<In>| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id })); };
+fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing) {
+    let fail = |in_tx: &Sender<In>| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id, epoch })); };
     let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return fail(&in_tx) };
     let Ok(mut stream) = dial(&peer, &iso) else { return fail(&in_tx) };
-    let _ = stream.set_timeout(Some(t.handshake));
-    let Ok(sess) = link::dial(&mut stream, &me, &peer, &proto::keepalive()) else { return fail(&in_tx) };
+    let r = {
+        let mut ds = DeadlineStream { s: &mut stream, end: Instant::now() + t.handshake, abort: Arc::new(AtomicBool::new(false)) };
+        link::dial(&mut ds, &me, &peer, &proto::keepalive())
+    };
+    let Ok(sess) = r else { return fail(&in_tx) };
     let g = gen.fetch_add(1, Ordering::SeqCst) + 1;
     let (otx, orx) = channel();
-    if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, tx: otx })).is_err() { return; }
+    if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, epoch, tx: otx })).is_err() { return; }
     conn::run(stream, sess, me, orx, in_tx, id, g, t);
 }
 
@@ -297,7 +347,7 @@ mod tests {
 
     pub fn fast() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(100), idle: Duration::from_millis(700),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5) }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
     }
 
     fn ident() -> (ContactIdentity, Bundle) { let i = ContactIdentity::generate(); let b = Bundle::from_identity(&i); (i, b) }
@@ -472,5 +522,75 @@ mod tests {
         assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("empty or too long"))));
         say(&ed, ID, &"a".repeat(proto::MAX_TEXT_BYTES + 1));
         assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("empty or too long"))));
+    }
+
+    /// R6-M1: garbage handshakes must never lock the REAL peer out (the old per-contact token bucket did, for minutes).
+    #[test]
+    fn a_garbage_flood_does_not_lock_out_the_real_peer() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = start(&net, &l, &db, ID);
+        let dial = net.transport().dial_fn();
+        let end = Instant::now() + Duration::from_secs(5);
+        while dial(&lb, &[0; 16]).is_err() && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
+        for _ in 0..60 {                                        // far beyond the old burst of 5
+            if let Ok(mut s) = dial(&lb, &[3; 16]) {
+                use std::io::Write;
+                let _ = s.write_all(&vec![0xAB; seburity_core::session::MSG1_LEN]);
+            }
+        }
+        let ed = start(&net, &d, &lb, ID);                       // now the real peer arrives
+        assert!(connected(&ed) && connected(&el), "real peer was locked out by garbage");
+        say(&ed, ID, "through the noise");
+        assert!(got(&el, "through the noise"));
+    }
+
+    /// R6-M2: trickling connections must neither hold all slots nor outlive the TOTAL deadline.
+    #[test]
+    fn slowloris_cannot_starve_the_handshake_slots() {
+        use std::io::Write;
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = start(&net, &l, &db, ID);
+        let dial = net.transport().dial_fn();
+        let end = Instant::now() + Duration::from_secs(5);
+        while dial(&lb, &[0; 16]).is_err() && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut feeders = vec![];
+        for _ in 0..8 {                                          // twice the number of slots, one byte every 50 ms
+            let mut s = dial(&lb, &[4; 16]).unwrap();
+            let stop = stop.clone();
+            feeders.push(std::thread::spawn(move || { while !stop.load(Ordering::SeqCst) { if s.write_all(&[0u8]).is_err() { break; } std::thread::sleep(Duration::from_millis(50)); } }));
+        }
+        let t = Instant::now();
+        let ed = start(&net, &d, &lb, ID);
+        assert!(connected(&ed) && connected(&el), "slowloris starved the real peer");
+        assert!(t.elapsed() < Duration::from_secs(4), "took {:?}", t.elapsed());
+        stop.store(true, Ordering::SeqCst);
+        for f in feeders { let _ = f.join(); }
+    }
+
+    #[test]
+    fn engine_wide_budget_refills_and_caps() {
+        let b = Budget::new(20.0);                               // cap 40
+        let taken = (0..100).filter(|_| b.take()).count();
+        assert!((38..=45).contains(&taken), "burst should be about the cap, got {taken}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(b.take(), "tokens refill with time");
+    }
+
+    /// R6-I1: replacing a contact (same id, remove + add) must not leave the old registration alive.
+    #[test]
+    fn re_adding_a_contact_replaces_it_cleanly() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = start(&net, &l, &db, ID);
+        let ed = start(&net, &d, &lb, ID);
+        assert!(connected(&el) && connected(&ed));
+        el.add(ContactCfg::new(ID, &l, db.clone()));             // same id re-added: old connection closed, new one established
+        assert!(wait(&el, |e| matches!(e, Event::Disconnected { .. })));
+        assert!(wait(&el, |e| matches!(e, Event::Connected { .. })));
+        say(&ed, ID, "after re-add");
+        assert!(got(&el, "after re-add"));
     }
 }

@@ -53,14 +53,18 @@ pub fn accept<S: Read + Write>(s: &mut S, me: &ContactIdentity, peer: &Bundle, g
 
 /// Like [`accept`] but the guard is shared between threads and locked only for the quick checks, NEVER across network
 /// I/O: a stranger that connects and stalls must not be able to block the real contact's handshake.
-pub fn accept_shared<S: Read + Write>(s: &mut S, me: &ContactIdentity, peer: &Bundle, guard: &std::sync::Mutex<HandshakeGuard>, now: u64) -> Result<(Session, Signed), NetError> {
+///
+/// No per-contact volume limit: only the replay cache runs before authentication (garbage must never cost the REAL peer
+/// a token). `admit` is the caller's engine-wide CPU budget, asked once a full msg1 has arrived and before any crypto.
+pub fn accept_shared<S: Read + Write>(s: &mut S, me: &ContactIdentity, peer: &Bundle, guard: &std::sync::Mutex<HandshakeGuard>, now: u64, admit: &dyn Fn() -> bool) -> Result<(Session, Signed), NetError> {
     let m1 = rd(s, MSG1_LEN)?;
-    let verdict = guard.lock().map_err(|_| NetError::Io)?.check(&m1, now);
+    let verdict = guard.lock().map_err(|_| NetError::Io)?.check_replay(&m1, now);
     match verdict {
         Verdict::Allow => {}
         Verdict::RateLimited => return Err(NetError::RateLimited),
         Verdict::Replay => return Err(NetError::Replay),
     }
+    if !admit() { return Err(NetError::RateLimited); }
     let (mut sess, m2) = Handshake::respond(me, peer, &m1).map_err(|_| NetError::Handshake)?;
     wr(s, &m2)?;
     let cell = rd(s, WIRE_CELL_LEN)?;

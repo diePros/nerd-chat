@@ -68,6 +68,32 @@ pub fn check_tcp_listener(addr: &SocketAddr) -> PeerCheck {
     }
 }
 
+/// uid owning the ESTABLISHED client socket whose local endpoint is `ip_hex:port` (state 01), from /proc/net/tcp*.
+fn client_uid_in(table: &str, port: u16, ip_hex: &str) -> Option<u32> {
+    table.lines().skip(1).find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 8 || f[3] != "01" { return None; }
+        let (ip, p) = f[1].rsplit_once(':')?;
+        if ip != ip_hex || u16::from_str_radix(p, 16).ok()? != port { return None; }
+        f[7].parse().ok()
+    })
+}
+
+/// Who owns the loopback client that just connected to OUR listener (External mode: tor forwards to a TCP port every local
+/// user can reach)? Only us, root or the tor account may talk to it; everything else is dropped before any bytes are read.
+pub fn check_tcp_client(client: &SocketAddr) -> PeerCheck {
+    let (file, ip_hex) = match client {
+        SocketAddr::V4(a) => ("/proc/net/tcp", { let o = a.ip().octets(); format!("{:02X}{:02X}{:02X}{:02X}", o[3], o[2], o[1], o[0]) }),
+        SocketAddr::V6(a) => ("/proc/net/tcp6", { let o = a.ip().octets(); (0..4).map(|i| format!("{:02X}{:02X}{:02X}{:02X}", o[i * 4 + 3], o[i * 4 + 2], o[i * 4 + 1], o[i * 4])).collect::<String>() }),
+    };
+    let Ok(t) = std::fs::read_to_string(file) else { return PeerCheck { verified: false, detail: format!("cannot read {file}") } };
+    match client_uid_in(&t, client.port(), &ip_hex) {
+        None => PeerCheck { verified: false, detail: format!("no established socket found for client {client}") },
+        Some(uid) if allowed_uids(&[]).contains(&uid) => PeerCheck { verified: true, detail: format!("client {client} owned by trusted uid {uid}") },
+        Some(uid) => PeerCheck { verified: false, detail: format!("client {client} owned by uid {uid} (not us/root/tor)") },
+    }
+}
+
 /// Cookie path acceptable to use? Only an explicit user choice or a well-known root-controlled location.
 pub fn cookie_path_allowed(announced: &Path, explicit: Option<&PathBuf>) -> bool {
     explicit.is_some_and(|e| e == announced) || TRUSTED_COOKIE_PATHS.iter().any(|t| Path::new(t) == announced)
@@ -89,6 +115,23 @@ mod tests {
         assert_eq!(listener_uid_in(t, 0x1F90, "0100007F"), Some(1001), "wildcard bind counts");
         assert_eq!(listener_uid_in(t, 0x238B, "0200007F"), None, "different ip");
         assert_eq!(listener_uid_in("garbage\nnot a table", 1, "0100007F"), None);
+    }
+
+    #[test]
+    fn loopback_clients_are_identified_by_uid() {
+        let t = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                 0: 0100007F:D431 0100007F:1F90 01 00000000:00000000 00:00000000 00000000   108        0 1 1 0 100 0 0 10 0\n\
+                 1: 0100007F:D432 0100007F:1F90 06 00000000:00000000 00:00000000 00000000  1000        0 1 1 0 100 0 0 10 0\n";
+        assert_eq!(client_uid_in(t, 0xD431, "0100007F"), Some(108));
+        assert_eq!(client_uid_in(t, 0xD432, "0100007F"), None, "only ESTABLISHED rows");
+        assert_eq!(client_uid_in(t, 0xD431, "0200007F"), None);
+        // a real loopback connection made by this process is owned by us -> trusted
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let c = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (_srv, from) = l.accept().unwrap();
+        assert_eq!(from, c.local_addr().unwrap());
+        let v = check_tcp_client(&from);
+        assert!(v.verified, "{}", v.detail);
     }
 
     #[test]

@@ -36,6 +36,14 @@ impl HandshakeGuard {
         }
     }
 
+    /// Replay check ONLY: never refuses because of volume. Used by the chat engine, where a per-contact token bucket
+    /// let anyone who could connect lock the real peer out (review R6-M1); CPU is bounded by an engine-wide budget instead.
+    pub fn check_replay(&mut self, msg1: &[u8], now: u64) -> Verdict {
+        self.evict(now);
+        let h: [u8; 32] = Blake2b::<U32>::digest(msg1).into();
+        if self.seen.contains_key(&h) { Verdict::Replay } else { Verdict::Allow }
+    }
+
     /// Call BEFORE any expensive crypto on an unauthenticated msg1. Consumes a token.
     pub fn check(&mut self, msg1: &[u8], now: u64) -> Verdict {
         self.evict(now);
@@ -78,6 +86,14 @@ mod tests {
         g.record_success(b"m1", 0);
         assert_eq!(g.check(b"m1", 5), Verdict::Replay);
         assert_eq!(g.check(b"m1", 11), Verdict::Allow, "ttl expiry");
+    }
+
+    #[test]
+    fn replay_only_check_never_rate_limits() {
+        let mut g = HandshakeGuard::with(0, 1.0, 0.0, 16, 100);
+        for i in 0..1000u32 { assert_eq!(g.check_replay(&i.to_be_bytes(), 0), Verdict::Allow, "garbage must never exhaust anything"); }
+        g.record_success(b"real", 0);
+        assert_eq!(g.check_replay(b"real", 1), Verdict::Replay);
     }
 
     #[test]

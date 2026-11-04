@@ -149,3 +149,22 @@ CONFIRMED CORRECT against real tor: ADD_ONION syntax (V3Auth + ClientAuthV3 + ED
 - C6-copies PARTIAL: message text lives in `Zeroizing<String>` (engine events, chat lines, outbox) and a fixed-capacity compose buffer; the on-screen copy of a sent message is a second wiped-on-drop String. NOT covered: ratatui's cell buffers (blanked at panic, but live while a chat is open), crossterm input buffer (R4-M2), `snow`'s internal buffers (R2-M3).
 - Panic: engine shutdown is awaited for at most 400 ms; connection/acceptor threads end on their own afterwards; the process then exits.
 - Verified by tests: both directions, ordering, offline queue, chunking, text cleaning, reconnect after either side restarts, impostor handshakes rejected, silent-peer idle timeout, remove/shutdown, outbox/input limits, two UIs end-to-end over an in-memory network, panic wipe, delete-while-online.
+
+## Review 6 — chat engine + chat screens (commit 68e5b9f)
+No Critical. Verified OK: only the pinned peer gets a session; no contact can impersonate or hijack another contact's connection; routing ids are fixed per thread by our side; role rule has no self-connect/impersonation path; two contacts with the same peer bundle do not collide; counters/replay checked; `Event` Debug never prints text; `busy` counter correct on all paths. Reach analysis: with v3 client auth a remote stranger cannot connect; spawn mode uses a 0700 unix socket; the exposed groups are (1) ANY local user in External mode (TCP 127.0.0.1 listener), (2) holders of our client-auth key (other controllers of a shared tor), (3) the contact.
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R6-M1 | Per-contact pre-auth token bucket (burst 5, 1 per 10 s) lets anyone who can connect lock the REAL peer out (garbage msg1 costs the same token); reconnect flapping alone throttles | FIXED | no pre-auth refusal per contact any more: replay cache only + an engine-wide CPU budget; External mode drops inbound loopback clients not owned by tor/us/root (`/proc/net/tcp` uid) |
+| R6-M2 | Slowloris holds all 4 handshake slots (per-read timeouts only); real peer's streams dropped | FIXED | one TOTAL deadline per handshake (`DeadlineStream`), and when slots are full the OLDEST unauthenticated handshake is aborted so newcomers always get in |
+| R6-M3 | Client-auth secrets never removed from tor (stay in the shared tor after delete/offline/exit; UI claimed keys deleted) | FIXED | `ONION_CLIENT_AUTH_REMOVE` on remove_contact, on going offline and in `Drop for Tor` |
+| R6-M4 | Contact deleted while `Starting` stays live in the engine; its messages accepted under an invisible id | FIXED | reconcile engine against the vault on `Ready`; events for unknown ids ignored |
+| R6-L1 | Events for unknown ids create hidden chat state | FIXED | |
+| R6-L2 | Contact imported/paired while `Starting` never connects | FIXED | reconcile on `Ready` |
+| R6-L3 | Plaintext left in freed heap while reassembling (buffer grows by realloc) | FIXED | fixed-capacity wiped assembler |
+| R6-L4 | `clean()` misses many invisible/format/bidi characters (U+061C, U+2028/9, tag chars, variation selectors, Hangul fillers, private use, unbounded combining marks) | FIXED | shared `core::text` (also used for contact names), combining marks capped |
+| R6-L5 | Chat view wraps by char count: wide (CJK) characters silently hidden | FIXED | wrap by display width |
+| R6-L6 | Going offline blocks the UI up to 3 s (panic key dead meanwhile); second tor could start during teardown | FIXED | teardown on a worker thread, `Stopping` state |
+| R6-L7 | A crafted bundle can reuse another contact's onion address and overwrite our client-auth entry for it | FIXED | contacts whose onion key collides with any other contact's (peer or own) are refused |
+| R6-I1 | Stale Up/DialFailed after remove+re-add of the same id attaches an old connection to the new entry | FIXED | per-contact epoch checked on Up/DialFailed |
+| R6-I2 | Spawn-mode unix socket files never unlinked (re-add fails with EADDRINUSE) | FIXED | |
+| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | ACCEPTED | RAM-only by design, documented in the UI status text |

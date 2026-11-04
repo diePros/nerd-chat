@@ -23,8 +23,9 @@ pub type DialFn = Arc<dyn Fn(&Bundle, &[u8; 16]) -> Result<BoxStream, String> + 
 pub trait Transport: Send {
     /// Register a contact. `listen = true`: host our service for it and return the receiver of accepted streams.
     fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String>;
-    /// Stop hosting the service whose onion public key is `my_onion_pub`.
-    fn remove_contact(&mut self, my_onion_pub: &[u8; 32]);
+    /// Stop hosting the service whose onion public key is `my_onion_pub` and forget any credentials we installed to dial
+    /// the peer's service (`peer_onion_pub`). Nothing of a deleted contact may stay behind in a shared tor.
+    fn remove_contact(&mut self, my_onion_pub: &[u8; 32], peer_onion_pub: &[u8; 32]);
     fn dial_fn(&self) -> DialFn;
 }
 
@@ -48,7 +49,7 @@ impl Transport for MemTransport {
         self.hosted.push(key);
         Ok(Some(rx))
     }
-    fn remove_contact(&mut self, k: &[u8; 32]) { self.net.0.lock().unwrap().remove(k); self.hosted.retain(|h| h != k); }
+    fn remove_contact(&mut self, k: &[u8; 32], _peer: &[u8; 32]) { self.net.0.lock().unwrap().remove(k); self.hosted.retain(|h| h != k); }
     fn dial_fn(&self) -> DialFn {
         let net = self.net.clone();
         Arc::new(move |peer: &Bundle, _iso: &[u8; 16]| {
@@ -76,19 +77,23 @@ pub struct TorTransport {
     tor: Tor,
     dialer: Dialer,
     spawn_dir: Option<std::path::PathBuf>,
-    services: HashMap<[u8; 32], (String, Arc<AtomicBool>)>, // onion pub -> (service id, stop flag of its acceptor)
+    /// External tor: the user vouched for local processes (otherwise inbound loopback clients must be owned by us/root/tor).
+    trust_local: bool,
+    /// onion pub -> (service id, stop flag of its acceptor, unix socket file to unlink)
+    services: HashMap<[u8; 32], (String, Arc<AtomicBool>, Option<std::path::PathBuf>)>,
 }
 
 impl TorTransport {
     /// Blocks until tor is usable (spawn mode waits for bootstrap, reporting progress 0..=100).
     pub fn start(setup: TorSetup, progress: impl FnMut(u8)) -> Result<Self, String> {
+        let trust_local = matches!(&setup, TorSetup::External { trust_control: true, .. });
         let tor = match setup {
             TorSetup::Spawn(cfg) => Tor::spawn(&cfg, Duration::from_secs(300), progress).map_err(|e| e.to_string())?,
             TorSetup::External { control, auth, socks, trust_control } => Tor::connect_external(&control, &auth, socks, trust_control).map_err(|e| e.to_string())?,
         };
         let dialer = tor.dialer();
         let spawn_dir = tor.spawn_dir().map(|p| p.to_path_buf());
-        Ok(Self { tor, dialer, spawn_dir, services: HashMap::new() })
+        Ok(Self { tor, dialer, spawn_dir, trust_local, services: HashMap::new() })
     }
 }
 
@@ -103,10 +108,14 @@ impl Transport for TorTransport {
         let (tx, rx) = channel::<BoxStream>();
         let stop = Arc::new(AtomicBool::new(false));
         // where tor forwards accepted connections: a unix socket in our private dir (spawn mode) or loopback TCP (external tor)
+        let mut sock_file = None;
+        let trust_local = self.trust_local;
         let (target, acceptor): (Target, Box<dyn FnMut() -> Option<BoxStream> + Send>) = match &self.spawn_dir {
             Some(dir) => {
                 let path = dir.join(format!("{}.sock", hex8(&me.onion_public())));
+                let _ = std::fs::remove_file(&path); // a socket file left by an earlier add of the same contact
                 let l = UnixListener::bind(&path).map_err(|e| e.to_string())?;
+                sock_file = Some(path.clone());
                 l.set_nonblocking(true).map_err(|e| e.to_string())?;
                 (Target::Unix(path), Box::new(move || l.accept().ok().map(|(s, _)| { let _ = s.set_nonblocking(false); Box::new(s) as BoxStream })))
             }
@@ -114,10 +123,18 @@ impl Transport for TorTransport {
                 let l = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
                 l.set_nonblocking(true).map_err(|e| e.to_string())?;
                 let addr = l.local_addr().map_err(|e| e.to_string())?;
-                (Target::Tcp(addr), Box::new(move || l.accept().ok().map(|(s, _)| { let _ = s.set_nonblocking(false); Box::new(s) as BoxStream })))
+                // ANY local user can connect to this port: only tor (its account), root or we may, unless the user vouched for all
+                (Target::Tcp(addr), Box::new(move || l.accept().ok().and_then(|(s, from)| {
+                    if !trust_local && !seburity_net::tor::trust::check_tcp_client(&from).verified { return None; } // dropped unread
+                    let _ = s.set_nonblocking(false);
+                    Some(Box::new(s) as BoxStream)
+                })))
             }
         };
-        let id = self.tor.host(me, peer, &target).map_err(|e| e.to_string())?;
+        let id = match self.tor.host(me, peer, &target) {
+            Ok(id) => id,
+            Err(e) => { if let Some(p) = &sock_file { let _ = std::fs::remove_file(p); } return Err(e.to_string()); }
+        };
         let stop2 = stop.clone();
         thread::spawn(move || {
             let mut accept = acceptor;
@@ -128,15 +145,17 @@ impl Transport for TorTransport {
                 }
             }
         });
-        self.services.insert(me.onion_public(), (id, stop));
+        self.services.insert(me.onion_public(), (id, stop, sock_file));
         Ok(Some(rx))
     }
 
-    fn remove_contact(&mut self, k: &[u8; 32]) {
-        if let Some((id, stop)) = self.services.remove(k) {
+    fn remove_contact(&mut self, k: &[u8; 32], peer: &[u8; 32]) {
+        if let Some((id, stop, sock)) = self.services.remove(k) {
             stop.store(true, Ordering::SeqCst);
             self.tor.unhost(&id);
+            if let Some(p) = sock { let _ = std::fs::remove_file(p); }
         }
+        self.tor.forget_dial(peer); // ONION_CLIENT_AUTH_REMOVE: our auth secret must not outlive the contact (R6-M3)
     }
 
     fn dial_fn(&self) -> DialFn {
@@ -146,5 +165,5 @@ impl Transport for TorTransport {
 }
 
 impl Drop for TorTransport {
-    fn drop(&mut self) { for (_, (_, stop)) in self.services.drain() { stop.store(true, Ordering::SeqCst); } }
+    fn drop(&mut self) { for (_, (_, stop, sock)) in self.services.drain() { stop.store(true, Ordering::SeqCst); if let Some(p) = sock { let _ = std::fs::remove_file(p); } } }
 }

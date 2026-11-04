@@ -71,7 +71,7 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
 
 /// Where the engine is. (UI reads this.)
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Online { Offline, Starting(u8), Online, Failed(String) }
+pub enum Online { Offline, Starting(u8), Online, Stopping, Failed(String) }
 
 enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 
@@ -146,6 +146,9 @@ pub struct App {
     lockout: std::sync::Arc<Lockout>,
     engine: Option<Engine>,
     start_rx: Option<Receiver<StartMsg>>,
+    /// ids the engine was started with (to reconcile with the vault when it becomes ready)
+    started_ids: HashSet<[u8; 8]>,
+    stop_rx: Option<Receiver<()>>,
     pub online: Online,
     chats: HashMap<[u8; 8], Vec<ChatLine>>,
     linked: HashSet<[u8; 8]>,
@@ -163,7 +166,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
             else if exists { "Enter your password to unlock.".into() }
@@ -193,6 +196,7 @@ impl App {
             Online::Offline => "offline".into(),
             Online::Starting(p) => format!("starting tor {p}%"),
             Online::Online => "ONLINE".into(),
+            Online::Stopping => "stopping...".into(),
             Online::Failed(_) => "offline (failed)".into(),
         }
     }
@@ -224,6 +228,8 @@ impl App {
         // chat: engine first (it owns identity clones and sockets), then every message and the half-typed line
         if let Some(e) = self.engine.take() { e.shutdown_within(Duration::from_millis(400)); }
         self.start_rx = None;
+        self.stop_rx = None;
+        self.started_ids.clear();
         self.online = Online::Offline;
         self.chats.clear();
         self.linked.clear();
@@ -475,6 +481,7 @@ impl App {
                         Ok(b) => {
                             let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
                             if b == mine { self.err("That is YOUR OWN bundle, not the other person's."); return; }
+                            if self.onion_collision(self.sel, &b) { self.err("Refused: this bundle reuses an onion address that another contact (or you) already has."); return; }
                             let (peer, trust) = ImportedContact::from_file(b).into_parts();
                             let c = self.cur().expect("selected");
                             c.peer = Some(peer);
@@ -611,11 +618,15 @@ impl App {
     fn toggle_online(&mut self) {
         match self.online.clone() {
             Online::Starting(_) => self.err("Already starting; wait for it to finish."),
+            Online::Stopping => self.err("Still shutting down; wait a moment."),
             Online::Online => {
-                if let Some(e) = self.engine.take() { e.shutdown(); }
-                self.online = Online::Offline;
+                // tear down on a worker so the UI (and the panic key) stay responsive while onion services are removed
+                let (tx, rx) = channel();
+                if let Some(e) = self.engine.take() { thread::spawn(move || { e.shutdown(); let _ = tx.send(()); }); } else { let _ = tx.send(()); }
+                self.stop_rx = Some(rx);
+                self.online = Online::Stopping;
                 self.linked.clear();
-                self.ok("Offline. Connections closed, onion services removed.");
+                self.ok("Going offline: closing connections and removing onion services...");
             }
             Online::Offline | Online::Failed(_) => self.start_online(),
         }
@@ -624,6 +635,7 @@ impl App {
     fn start_online(&mut self) {
         let Some(vf) = self.vf.as_ref() else { return };
         let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| c.peer.as_ref().map(|p| ContactCfg::new(c.id, &c.identity, p.clone()))).collect();
+        self.started_ids = contacts.iter().map(|c| c.id).collect();
         let (factory, tor, timing) = (self.cfg.transport.clone(), self.cfg.tor.clone(), self.cfg.timing);
         let (tx, rx) = channel();
         thread::spawn(move || {
@@ -646,6 +658,15 @@ impl App {
         let Some(e) = &self.engine else { return };
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)) else { return };
         if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone())); }
+    }
+
+    /// A peer bundle must not reuse an onion key that another contact already uses (ours or theirs): a crafted bundle
+    /// could otherwise overwrite our client-auth credential for someone else's service (R6-L7).
+    fn onion_collision(&self, idx: usize, peer: &Bundle) -> bool {
+        let Some(v) = self.vf.as_ref() else { return false };
+        v.store.contacts.iter().enumerate().any(|(i, c)| {
+            c.identity.onion_public() == peer.onion_pub || (i != idx && c.peer.as_ref().is_some_and(|p| p.onion_pub == peer.onion_pub))
+        })
     }
 
     fn open_chat(&mut self) {
@@ -688,13 +709,34 @@ impl App {
         if v.len() > MAX_CHAT_LINES { v.remove(0); } // the dropped line is wiped (Zeroizing)
     }
 
+    /// Contacts may have been added/deleted while tor was starting: make the engine match the vault (R6-M4/L2).
+    fn reconcile(&mut self) {
+        let now: HashSet<[u8; 8]> = self.vf.as_ref().map(|v| v.store.contacts.iter().filter(|c| c.peer.is_some()).map(|c| c.id).collect()).unwrap_or_default();
+        let Some(e) = &self.engine else { return };
+        for id in self.started_ids.difference(&now) { e.remove(*id); }
+        if let Some(v) = self.vf.as_ref() {
+            for c in v.store.contacts.iter().filter(|c| !self.started_ids.contains(&c.id)) {
+                if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone())); }
+            }
+        }
+        self.started_ids = now;
+    }
+
+    fn known(&self, id: &[u8; 8]) -> bool { self.vf.as_ref().is_some_and(|v| v.store.contacts.iter().any(|c| c.id == *id)) }
+
     fn poll_online(&mut self) {
+        if let Some(rx) = self.stop_rx.take() {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => self.stop_rx = Some(rx),
+                _ => { self.online = Online::Offline; self.ok("Offline. Connections closed, onion services and credentials removed."); }
+            }
+        }
         if let Some(rx) = self.start_rx.take() {
             let mut keep = true;
             loop {
                 match rx.try_recv() {
                     Ok(StartMsg::Progress(p)) => self.online = Online::Starting(p),
-                    Ok(StartMsg::Ready(e)) => { self.engine = Some(e); self.online = Online::Online; keep = false; self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
+                    Ok(StartMsg::Ready(e)) => { self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
                     Ok(StartMsg::Failed(m)) => { self.online = Online::Failed(m.clone()); keep = false; self.err(format!("Could not go online: {m}")); break; }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => { self.online = Online::Failed("start thread died".into()); keep = false; break; }
@@ -704,6 +746,9 @@ impl App {
         }
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
+            // events for contacts that no longer exist must not create hidden chat state (R6-L1)
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
                 Event::Disconnected { id } => { self.linked.remove(&id); }
@@ -749,6 +794,8 @@ impl App {
 
     fn finish_pair(&mut self, id: [u8; 8], contact: ImportedContact, sn: String) {
         let (peer, trust) = contact.into_parts();
+        let pos = self.vf.as_ref().and_then(|v| v.store.contacts.iter().position(|c| c.id == id));
+        if let Some(i) = pos { if self.onion_collision(i, &peer) { self.err("Refused: the paired bundle reuses an onion address that another contact (or you) already has."); return; } }
         let Some(c) = self.vf().store.contacts.iter_mut().find(|c| c.id == id) else { self.err("Contact vanished during pairing."); return };
         if c.peer.is_some() { self.err("Contact already has a peer key; discarded the paired one."); return; }
         c.peer = Some(peer);
@@ -770,6 +817,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use seburity_chat::{Timing, Transport};
+    use std::sync::atomic::AtomicBool;
 
     pub fn type_str(a: &mut App, s: &str) { for c in s.chars() { a.handle(Key::Char(c)); } }
 
@@ -1028,7 +1076,7 @@ mod tests {
     // ---------- online + chat (over the in-memory network) ----------
     fn fast_timing() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(150), idle: Duration::from_secs(2),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5) }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
     }
 
     fn net_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet) -> App {
@@ -1121,7 +1169,9 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])), "hook did not add the contact to the engine");
         // go offline: connection closes on both sides; typing is refused
         a.handle(Key::Char('o'));
-        assert_eq!(a.online, Online::Offline);
+        assert_eq!(a.online, Online::Stopping, "teardown runs on a worker; the UI stays responsive");
+        a.handle(Key::Char('o')); assert!(a.error, "second press while stopping is refused");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline), "never finished stopping");
         assert!(pump_until(&mut [&mut a, &mut b], |x| !is_linked(x[1])), "peer must notice");
         a.handle(Key::Enter); type_str(&mut a, "x"); a.handle(Key::Enter);
         assert!(a.error && a.status.contains("offline") && a.chat_lines().is_empty());
@@ -1166,6 +1216,96 @@ mod tests {
         b.handle(Key::Char('d')); type_str(&mut b, "yes"); b.handle(Key::Enter);
         assert_eq!(b.contacts_len(), 0);
         assert!(b.chats.is_empty() && b.linked.is_empty() && b.unread.is_empty());
+    }
+
+    /// A transport factory that blocks until released: lets a test change contacts while tor is still "starting".
+    fn gated_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet, gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> App {
+        let mut c = cfg(Some(dir.join(name)));
+        let net = net.clone();
+        c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| {
+            while !gate.load(Ordering::SeqCst) { thread::sleep(Duration::from_millis(20)); }
+            Ok(Box::new(net.transport()) as Box<dyn Transport>)
+        }));
+        c.timing = fast_timing();
+        let mut a = App::new(c);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        a
+    }
+
+    fn pump_for(apps: &mut [&mut App], d: Duration) { let t = Instant::now(); while t.elapsed() < d { for a in apps.iter_mut() { a.poll(); } thread::sleep(Duration::from_millis(20)); } }
+
+    /// R6-M4/L1: a contact deleted while tor is still starting must not stay live in the engine.
+    #[test]
+    fn contact_deleted_while_starting_is_removed_from_the_engine() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let mut a = gated_app(d.path(), "a.vault", &net, gate.clone()); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        go_online(&mut b);
+        assert!(pump_until(&mut [&mut b], |x| x[0].online == Online::Online));
+        go_online(&mut a);                                        // Starting: blocked on the gate
+        assert!(matches!(a.online, Online::Starting(_)));
+        a.handle(Key::Char('d')); type_str(&mut a, "yes"); a.handle(Key::Enter);
+        assert_eq!(a.contacts_len(), 0);
+        gate.store(true, Ordering::SeqCst);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        pump_for(&mut [&mut a, &mut b], Duration::from_millis(1500));
+        assert!(!is_linked(&b), "the deleted contact must not be reachable any more");
+        assert!(a.chats.is_empty() && a.unread.is_empty(), "no hidden chat state for a deleted contact");
+    }
+
+    /// R6-L2: a contact whose keys arrive while tor is starting must still connect.
+    #[test]
+    fn contact_linked_while_starting_connects_after_ready() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let mut a = gated_app(d.path(), "a.vault", &net, gate.clone()); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        go_online(&mut b);
+        go_online(&mut a);
+        assert!(matches!(a.online, Online::Starting(_)));
+        link_apps(&mut a, &mut b, d.path());                      // keys exchanged while starting
+        gate.store(true, Ordering::SeqCst);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])), "contact added during startup never connected");
+    }
+
+    /// R6-L7: a bundle that reuses another contact's onion address is refused.
+    #[test]
+    fn bundle_reusing_another_contacts_onion_address_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob"); add(&mut a, "carol");
+        let victim_onion = a.vf.as_ref().unwrap().store.contacts[0].identity.onion_public();
+        let mal = ContactIdentity::generate();
+        let mut bad = Bundle::from_identity(&mal);
+        bad.onion_pub = victim_onion;                             // valid point, validly signed by mal, but not mal's own address
+        let f = d.path().join("evil.sbc");
+        fs::write(&f, file::armor(&bad.encode(&mal))).unwrap();
+        a.sel = 1;
+        a.handle(Key::Char('i')); type_str(&mut a, f.to_str().unwrap()); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("Refused"), "{}", a.status);
+        assert!(a.selected_detail().unwrap().2.is_none(), "nothing was stored");
+    }
+
+    /// R6-L5: wide characters must wrap, not silently fall off the right edge.
+    #[test]
+    fn wide_characters_wrap_instead_of_disappearing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.vf.as_mut().unwrap().store.contacts[0].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
+        a.chat_with = Some(id);
+        a.screen = Screen::Chat;
+        let msg: String = "漢".repeat(60);
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false });
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &a)).unwrap();
+        let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert_eq!(screen.matches('漢').count(), 120, "every character of both messages must be visible");
     }
 
     #[test]

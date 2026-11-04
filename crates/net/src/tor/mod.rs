@@ -127,6 +127,8 @@ pub struct Tor {
     ctl: Controller<Box<dyn Stream>>,
     socks: Addr,
     hosted: Vec<String>,
+    /// Peer services whose client-auth credential we installed in this tor (removed again on forget/drop).
+    dialed: Vec<String>,
     /// Random per-process SOCKS username (isolation); never a recognisable constant.
     iso_user: String,
     _spawned: Option<spawn::SpawnedTor>,
@@ -136,7 +138,7 @@ impl Tor {
     pub(crate) fn from_parts(ctl: Controller<Box<dyn Stream>>, socks: Addr, spawned: Option<spawn::SpawnedTor>) -> Self {
         let mut r = [0u8; 8];
         getrandom::fill(&mut r).expect("OS RNG unavailable");
-        Self { ctl, socks, hosted: vec![], iso_user: r.iter().map(|b| format!("{b:02x}")).collect(), _spawned: spawned }
+        Self { ctl, socks, hosted: vec![], dialed: vec![], iso_user: r.iter().map(|b| format!("{b:02x}")).collect(), _spawned: spawned }
     }
 
     /// EXTERNAL mode: authenticate to an already running tor. SOCKS defaults to what tor itself reports.
@@ -200,7 +202,19 @@ impl Tor {
 
     /// Give tor our private client-auth key for the PEER's onion service (needed before dialing it).
     pub fn allow_dial(&mut self, me: &ContactIdentity, peer: &Bundle) -> Result<(), TorError> {
-        self.ctl.client_auth_add(&service_id(&peer.onion_pub), &me.auth_secret_bytes())
+        let id = service_id(&peer.onion_pub);
+        self.ctl.client_auth_add(&id, &me.auth_secret_bytes())?;
+        if !self.dialed.contains(&id) { self.dialed.push(id); }
+        Ok(())
+    }
+
+    /// Remove the credential installed by `allow_dial` (best effort).
+    pub fn forget_dial(&mut self, peer_onion_pub: &[u8; 32]) {
+        let id = service_id(peer_onion_pub);
+        if let Some(i) = self.dialed.iter().position(|d| *d == id) {
+            let id = self.dialed.remove(i);
+            let _ = self.ctl.client_auth_remove(&id);
+        }
     }
 
     /// A cheap, thread-safe handle that can dial through this tor's SOCKS port without the control connection.
@@ -228,6 +242,7 @@ impl Dialer {
 impl Drop for Tor {
     fn drop(&mut self) {
         for id in std::mem::take(&mut self.hosted) { let _ = self.ctl.del_onion(&id); }
+        for id in std::mem::take(&mut self.dialed) { let _ = self.ctl.client_auth_remove(&id); }
     }
 }
 
@@ -235,6 +250,30 @@ impl Drop for Tor {
 mod tests {
     use super::*;
     use std::{io::{Read, Write}, os::unix::net::UnixListener, thread};
+
+    /// R6-M3: client-auth secrets must not outlive the contact/session inside a shared tor.
+    #[test]
+    fn dialed_credentials_are_removed_on_forget_and_on_drop() {
+        let me = ContactIdentity::generate();
+        let (p1, p2) = (Bundle::from_identity(&ContactIdentity::generate()), Bundle::from_identity(&ContactIdentity::generate()));
+        let (id1, id2) = (service_id(&p1.onion_pub), service_id(&p2.onion_pub));
+        let (ctl, h) = control::tests::fake(vec![
+            ("ONION_CLIENT_AUTH_ADD ", "250 OK\r\n".into()),
+            ("ONION_CLIENT_AUTH_ADD ", "250 OK\r\n".into()),
+            ("ONION_CLIENT_AUTH_REMOVE ", "250 OK\r\n".into()),
+            ("ONION_CLIENT_AUTH_REMOVE ", "250 OK\r\n".into()),
+        ]);
+        let (sock, _keep) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut tor = Tor::from_parts(Controller::new(Box::new(ctl.into_inner()) as Box<dyn Stream>), Addr::Unix("/nonexistent".into()), None);
+        drop(sock);
+        tor.allow_dial(&me, &p1).unwrap();
+        tor.allow_dial(&me, &p2).unwrap();
+        tor.forget_dial(&p1.onion_pub);   // contact deleted
+        drop(tor);                        // session over: the other one goes too
+        let seen = h.join().unwrap();
+        assert_eq!(seen[2], format!("ONION_CLIENT_AUTH_REMOVE {id1}"));
+        assert_eq!(seen[3], format!("ONION_CLIENT_AUTH_REMOVE {id2}"));
+    }
 
     #[test]
     fn addr_parsing() {

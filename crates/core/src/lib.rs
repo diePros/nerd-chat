@@ -7,6 +7,7 @@ pub mod identity;
 pub mod message;
 pub mod onion;
 pub mod session;
+pub mod text;
 pub mod trust;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

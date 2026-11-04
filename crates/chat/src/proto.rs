@@ -35,19 +35,17 @@ pub fn encode_text(text: &str) -> Vec<Zeroizing<Vec<u8>>> {
     out
 }
 
-/// Peer-supplied text can never steer a terminal or spoof direction: control and bidi/invisible characters become '?'.
-pub fn clean(text: &str) -> Zeroizing<String> {
-    let bad = |c: char| c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
-    let mut s = Zeroizing::new(String::with_capacity(text.len()));
-    for c in text.chars() { s.push(if bad(c) { '?' } else { c }); }
-    s
-}
+/// Peer-supplied text can never steer a terminal or spoof direction (see `seburity_core::text`).
+pub fn clean(text: &str) -> Zeroizing<String> { seburity_core::text::sanitize(text) }
 
-#[derive(Default)]
+/// Reassembles chunked texts. The buffer has its FINAL capacity from the start and never reallocates, so no
+/// partial plaintext is ever left behind in freed heap (R6-L3).
 pub struct Assembler { buf: Zeroizing<Vec<u8>> }
 
+impl Default for Assembler { fn default() -> Self { Self::new() } }
+
 impl Assembler {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self { Self { buf: Zeroizing::new(Vec::with_capacity(MAX_TEXT_BYTES)) } }
 
     pub fn feed(&mut self, body: &[u8]) -> Result<Incoming, ProtoError> {
         let (&kind, payload) = body.split_first().ok_or(ProtoError::Empty)?;
@@ -109,6 +107,15 @@ mod tests {
             Incoming::Text(t) => assert_eq!(&*t, "a?[2Jb?c?"),
             _ => panic!(),
         }
+        // invisible / hidden-payload characters the first version missed (R6-L4)
+        match a.feed(&[&[KIND_TEXT_FINAL][..], "x\u{061C}\u{2028}\u{E0041}\u{3164}\u{FE0F}y".as_bytes()].concat()).unwrap() {
+            Incoming::Text(t) => assert_eq!(&*t, "x?????y"),
+            _ => panic!(),
+        }
+        // the assembler never reallocates: its capacity is fixed from the start (no plaintext left in freed heap)
+        let before = a.buf.as_ptr();
+        for _ in 0..30 { let _ = a.feed(&[KIND_TEXT_CONT, b'z']); }
+        assert_eq!(a.buf.as_ptr(), before);
         // keepalives may interleave with chunks
         let mut a = Assembler::new();
         a.feed(&[KIND_TEXT_CONT, b'a']).unwrap();

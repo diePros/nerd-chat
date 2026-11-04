@@ -347,6 +347,12 @@ impl<S: Read + Write> Controller<S> {
         self.command(&format!("DEL_ONION {id}")).map(|_| ())
     }
 
+    /// Remove a client-authorization credential from tor (R6-M3: it must not outlive the contact/session).
+    pub fn client_auth_remove(&mut self, onion_id: &str) -> Result<(), TorError> {
+        if parse_onion_address(onion_id).is_err() { return Err(TorError::Protocol("bad onion id".into())); }
+        self.command(&format!("ONION_CLIENT_AUTH_REMOVE {onion_id}")).map(|_| ())
+    }
+
     /// Give tor our private client-authorization key for a peer's onion service (kept in memory only).
     pub fn client_auth_add(&mut self, onion_id: &str, x25519_secret: &[u8; 32]) -> Result<(), TorError> {
         if parse_onion_address(onion_id).is_err() { return Err(TorError::Protocol("bad onion id".into())); }
@@ -615,6 +621,17 @@ pub(crate) mod tests {
         for bad in ["relative/p", "/a b", "/a\"b", "/a\nb"] {
             assert!(c.add_onion(&id.onion_expanded_secret(), 1, &Target::Unix(bad.into()), &[peer_auth], &id.onion_public()).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn client_auth_remove_command_and_validation() {
+        let pk = [5u8; 32];
+        let id = service_id(&pk);
+        let (mut c, h) = fake(vec![("ONION_CLIENT_AUTH_REMOVE ", "250 OK\r\n".into())]);
+        c.client_auth_remove(&id).unwrap();
+        assert_eq!(h.join().unwrap()[0], format!("ONION_CLIENT_AUTH_REMOVE {id}"));
+        let (mut c, _h) = fake(vec![]);
+        assert!(c.client_auth_remove("nonsense").is_err() && c.client_auth_remove("x\r\nQUIT").is_err());
     }
 
     #[test]
