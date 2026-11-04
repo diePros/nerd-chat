@@ -44,6 +44,26 @@ Add a fresh contact on each side (`n`), then:
 - Both are asked "exchanged in person?": `y` => code-authenticated, `n` => stays UNVERIFIED.
 On two real machines use the LAN IP: `l` -> `192.168.x.y:4000` (listening is only allowed on loopback / private LAN addresses). The code works ONCE (burned on any failure); `x` cancels a pairing in progress.
 
+## 4b. Chat over Tor (two people, or two terminals on one machine)
+Prerequisite: `tor` installed (`sudo apt install tor`, then `sudo systemctl disable --now tor` — Seburity starts its own copy).
+After the contacts have each other's keys (section 3 or 4), in BOTH terminals:
+```bash
+# press  o   (go online): Seburity starts its own Tor in a private RAM directory; the title bar shows "starting tor NN%"
+# when it says ONLINE, the contact list shows a green dot next to a contact once the connection is up
+# Enter on a contact opens the chat: type, Enter sends, Esc goes back, o goes offline again
+```
+Connection can take 1-3 minutes the first time (Tor publishes the onion service; the dialing side retries by itself).
+Using a Tor that is already running (Tails/Whonix/system):
+```bash
+./seburity --vault ./alice.vault --tor-control unix:/run/tor/control      # add --tor-trust-control only if you vouch for its owner
+```
+Good to know:
+- Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. Messages typed while the other person is
+  offline are queued in RAM (max 50) and sent when they connect; they are lost if you quit first.
+- Who dials: the contact whose signing key is smaller dials, the other one hosts. So only one of you needs to publish an onion service.
+- An unverified contact shows a red warning in the chat header. Verify the safety number first (v).
+- There are no read receipts, typing indicators or timestamps (metadata). A small keepalive cell is sent every 30 s while idle.
+
 ## 5. RAM-only mode (nothing ever written)
 ```bash
 ~/Documents/Code/seburity/target/release/seburity --ram

@@ -93,6 +93,23 @@ A single always-active hotkey (e.g. Ctrl+\\, also reachable from every screen an
 **No-cache principle:** nothing is cached by design. No history file, no log, no temp files, no clipboard, no swap (mlock + swap guard), no core dumps; plaintext lives only in mlock'd zeroizing buffers; the vault is the only thing ever written to disk, and in RAM-only mode not even that. Caveat to document: zeroizing userspace memory cannot clear CPU caches/DRAM remanence or terminal-emulator memory outside our process; on a live OS the strongest panic is power-off (Tails wipes RAM at shutdown). Optionally offer "panic + poweroff" where permitted.
 Implementation lives with the `vault-mem` crate (locked secret memory) in milestone 4; the zeroize-on-drop discipline starts now.
 
+## Roadmap item (last): secure file sharing with metadata removal
+Send files over the same signed + encrypted session, in fixed-size chunks (so file size/timing leak as little as possible), with:
+- **Metadata stripping before sending**, on the sender's machine, by default and not optional per file type:
+  images (EXIF/GPS/maker notes/ICC/thumbnails/XMP, re-encode instead of copy so hidden data in unknown segments is dropped),
+  PDF and Office/ODF documents (author, revision history, comments, tracked changes, embedded files, XMP, creation tools),
+  audio/video (ID3/tags, chapters, encoder strings), archives (member timestamps/owners/paths), and filesystem metadata
+  (timestamps, permissions, owner, xattrs). Unknown formats are refused unless the user explicitly sends them as an opaque blob
+  (clearly labelled "NOT cleaned"). Show a before/after report of what was removed.
+- **Neutral file names** (random by default, the real name only inside the encrypted channel and only if the user keeps it),
+  no MIME sniffing from peers, size caps, strict parsers in a sandboxed process (seccomp/Landlock), never auto-open.
+- **Receiver side**: files land in RAM first (or a user-chosen directory with neutral names), integrity verified end-to-end
+  (hash inside the signed session), a quarantine step that re-checks and re-strips, and no preview rendering of untrusted formats.
+- **Padding/chunking** to hide exact sizes, optional cover traffic while a transfer runs, resume after reconnect inside the session only.
+- Later: stripped-copy verification tooling (`seburity strip FILE` as a standalone command), reproducible test corpus
+  (files with planted metadata) proving each stripper, and an audit of every parser used.
+Honest limit: stripping cannot remove information that is in the content itself (faces, handwriting, writing style, visible text).
+
 ## Verification
 - `cargo test` + `cargo fuzz` on bundle/cell/handshake parsers; known-answer tests for KDF/AEAD.
 - `ldd bin/seburity` → "not a dynamic executable"; run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).

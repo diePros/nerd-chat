@@ -138,6 +138,7 @@ impl SpawnedTor {
     }
 
     pub fn cookie_path(&self) -> PathBuf { self.dir.join("cookie") }
+    pub fn dir(&self) -> &Path { &self.dir }
 }
 
 impl Drop for SpawnedTor {

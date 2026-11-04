@@ -1,10 +1,13 @@
 //! UI state machine (no rendering, no terminal): driven by key events, fully testable.
-use crate::secret::SecretBuf;
+use crate::secret::{ComposeBuf, SecretBuf};
+use seburity_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use seburity_net::tor::{control::AuthPref, spawn::{find_tor, SpawnConfig}, Addr};
 use seburity_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
 use seburity_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
 use seburity_store::{read_regular_file, StoreError, VaultFile};
 use seburity_vault::Profile;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream},
@@ -18,13 +21,63 @@ use zeroize::Zeroizing;
 pub const MIN_PW_CHARS: usize = 12;
 const MAX_IMPORT_BYTES: u64 = 8 * 1024;
 
+/// How to get a Tor. `control` set => use that running tor (Tails, Whonix, system tor); otherwise start our own.
+#[derive(Clone, Default)]
+pub struct TorCfg {
+    pub tor_path: Option<PathBuf>,
+    pub control: Option<Addr>,
+    pub cookie: Option<PathBuf>,
+    pub socks: Option<Addr>,
+    /// The user vouches for whoever owns the control port (see docs/TRANSPORT.md).
+    pub trust_control: bool,
+}
+
+/// Builds the transport when the user goes online (reports progress 0..=100). Tests inject an in-memory network.
+pub type TransportFactory = std::sync::Arc<dyn Fn(&mut dyn FnMut(u8)) -> Result<Box<dyn Transport>, String> + Send + Sync>;
+
 pub struct Config {
     /// None = RAM-only: nothing is ever written to disk.
     pub path: Option<PathBuf>,
     pub counter: Option<PathBuf>,
     pub keyfile: Option<Zeroizing<Vec<u8>>>,
     pub profile: Profile,
+    pub tor: TorCfg,
+    pub transport: Option<TransportFactory>,
+    pub timing: Timing,
 }
+
+impl Config {
+    pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
+        Self { path, counter, keyfile, profile, tor: TorCfg::default(), transport: None, timing: Timing::default() }
+    }
+}
+
+fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<dyn Transport>, String> {
+    let setup = match &c.control {
+        Some(ctl) => TorSetup::External {
+            control: ctl.clone(),
+            auth: AuthPref { password: None, cookie_path: c.cookie.clone(), peer_verified: false },
+            socks: c.socks.clone(),
+            trust_control: c.trust_control,
+        },
+        None => {
+            let path = c.tor_path.clone().or_else(find_tor)
+                .ok_or("no tor binary found: install tor, pass --tor-path, or use --tor-control to use a running tor (Tails/Whonix)")?;
+            TorSetup::Spawn(SpawnConfig::new(path))
+        }
+    };
+    TorTransport::start(setup, |p| progress(p)).map(|t| Box::new(t) as Box<dyn Transport>)
+}
+
+/// Where the engine is. (UI reads this.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Online { Offline, Starting(u8), Online, Failed(String) }
+
+enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
+
+/// One line of conversation. RAM only, wiped when dropped.
+pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool }
+const MAX_CHAT_LINES: usize = 500;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, F12, CtrlBackslash }
@@ -46,6 +99,7 @@ pub enum Screen {
     Prompt(Prompt),
     Verify,
     Help,
+    Chat,
     /// After a panic: everything wiped, nothing to show.
     Wiped,
 }
@@ -90,6 +144,14 @@ pub struct App {
     failures: u32,
     locked_until: Option<Instant>,
     lockout: std::sync::Arc<Lockout>,
+    engine: Option<Engine>,
+    start_rx: Option<Receiver<StartMsg>>,
+    pub online: Online,
+    chats: HashMap<[u8; 8], Vec<ChatLine>>,
+    linked: HashSet<[u8; 8]>,
+    unread: HashMap<[u8; 8], u32>,
+    chat_with: Option<[u8; 8]>,
+    compose: ComposeBuf,
 }
 
 impl App {
@@ -101,6 +163,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
+            engine: None, start_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
             else if exists { "Enter your password to unlock.".into() }
@@ -113,8 +176,25 @@ impl App {
     }
     pub fn contacts_len(&self) -> usize { self.vf.as_ref().map_or(0, |v| v.store.contacts.len()) }
     /// Borrowed rows: no per-frame copies of contact names.
-    pub fn contact_rows(&self) -> Vec<(&str, Trust, bool)> {
-        self.vf.as_ref().map_or(vec![], |v| v.store.contacts.iter().map(|c| (c.name.as_str(), c.trust, c.peer.is_some())).collect())
+    pub fn contact_rows(&self) -> Vec<(&str, Trust, bool, bool, u32)> {
+        self.vf.as_ref().map_or(vec![], |v| v.store.contacts.iter()
+            .map(|c| (c.name.as_str(), c.trust, c.peer.is_some(), self.linked.contains(&c.id), self.unread.get(&c.id).copied().unwrap_or(0))).collect())
+    }
+    /// (name, trust, connected) of the open chat.
+    pub fn chat_header(&self) -> Option<(&str, Trust, bool)> {
+        let id = self.chat_with?;
+        let c = self.vf.as_ref()?.store.contacts.iter().find(|c| c.id == id)?;
+        Some((c.name.as_str(), c.trust, self.linked.contains(&id)))
+    }
+    pub fn chat_lines(&self) -> &[ChatLine] { self.chat_with.and_then(|id| self.chats.get(&id)).map_or(&[], |v| v.as_slice()) }
+    pub fn compose_text(&self) -> &str { self.compose.as_str() }
+    pub fn online_label(&self) -> String {
+        match &self.online {
+            Online::Offline => "offline".into(),
+            Online::Starting(p) => format!("starting tor {p}%"),
+            Online::Online => "ONLINE".into(),
+            Online::Failed(_) => "offline (failed)".into(),
+        }
     }
     pub fn selected_detail(&self) -> Option<(&str, Trust, Option<String>)> {
         let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
@@ -141,6 +221,15 @@ impl App {
             let end = Instant::now() + Duration::from_millis(400);
             while !c.handle.is_finished() && Instant::now() < end { thread::sleep(Duration::from_millis(10)); }
         }
+        // chat: engine first (it owns identity clones and sockets), then every message and the half-typed line
+        if let Some(e) = self.engine.take() { e.shutdown_within(Duration::from_millis(400)); }
+        self.start_rx = None;
+        self.online = Online::Offline;
+        self.chats.clear();
+        self.linked.clear();
+        self.unread.clear();
+        self.chat_with = None;
+        self.compose.clear();
         self.code_buf.clear();
         self.vf = None;
         self.view = None;
@@ -166,6 +255,7 @@ impl App {
             Screen::Prompt(_) => { self.key_prompt(k); Action::None }
             Screen::Verify => { self.key_verify(k); Action::None }
             Screen::Help => { self.screen = Screen::Main; Action::None }
+            Screen::Chat => { self.key_chat(k); Action::None }
         }
     }
 
@@ -283,6 +373,8 @@ impl App {
             Key::Char('l') => if self.require_no_peer() { self.open_prompt(Prompt::Listen, "127.0.0.1:0") },
             Key::Char('c') => if self.require_no_peer() { self.open_prompt(Prompt::JoinAddr, "") },
             Key::Char('x') => self.cancel_pairing(),
+            Key::Char('o') => self.toggle_online(),
+            Key::Enter => self.open_chat(),
             Key::Char('v') => self.start_verify(),
             Key::Char('d') => if self.sel_name().is_some() { self.open_prompt(Prompt::ConfirmDelete, "") },
             _ => {}
@@ -387,7 +479,7 @@ impl App {
                             let c = self.cur().expect("selected");
                             c.peer = Some(peer);
                             c.trust = trust;
-                            if self.save() { self.ok("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel."); }
+                            if self.save() { let i = self.sel; self.engine_add(i); self.ok("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel."); }
                         }
                     },
                 }
@@ -395,6 +487,11 @@ impl App {
             Prompt::ConfirmDelete => {
                 if text.trim().eq_ignore_ascii_case("yes") {
                     let i = self.sel;
+                    let gone = self.vf().store.contacts.get(i).map(|c| c.id);
+                    if let Some(id) = gone {
+                        if let Some(e) = &self.engine { e.remove(id); }
+                        self.chats.remove(&id); self.linked.remove(&id); self.unread.remove(&id);
+                    }
                     self.vf().store.remove(i);
                     self.sel = self.sel.saturating_sub(1);
                     if self.save() { self.ok("Contact and its keys deleted."); }
@@ -510,6 +607,115 @@ impl App {
         self.ok("Pairing...");
     }
 
+    // ---------- going online + chat ----------
+    fn toggle_online(&mut self) {
+        match self.online.clone() {
+            Online::Starting(_) => self.err("Already starting; wait for it to finish."),
+            Online::Online => {
+                if let Some(e) = self.engine.take() { e.shutdown(); }
+                self.online = Online::Offline;
+                self.linked.clear();
+                self.ok("Offline. Connections closed, onion services removed.");
+            }
+            Online::Offline | Online::Failed(_) => self.start_online(),
+        }
+    }
+
+    fn start_online(&mut self) {
+        let Some(vf) = self.vf.as_ref() else { return };
+        let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| c.peer.as_ref().map(|p| ContactCfg::new(c.id, &c.identity, p.clone()))).collect();
+        let (factory, tor, timing) = (self.cfg.transport.clone(), self.cfg.tor.clone(), self.cfg.timing);
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let txp = tx.clone();
+            let mut progress = move |p: u8| { let _ = txp.send(StartMsg::Progress(p)); };
+            let r = match factory { Some(f) => f(&mut progress), None => build_tor_transport(&tor, &mut progress) };
+            let _ = match r {
+                Ok(t) => tx.send(StartMsg::Ready(Engine::start(t, contacts, timing))),
+                Err(e) => tx.send(StartMsg::Failed(e)),
+            };
+        });
+        self.start_rx = Some(rx);
+        self.online = Online::Starting(0);
+        let how = if self.cfg.transport.is_some() { "test network" } else if self.cfg.tor.control.is_some() { "the running Tor" } else { "your own Tor (takes a minute)" };
+        self.ok(format!("Going online through {how} ..."));
+    }
+
+    /// Tell the running engine about a contact that just got a peer key.
+    fn engine_add(&mut self, idx: usize) {
+        let Some(e) = &self.engine else { return };
+        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)) else { return };
+        if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone())); }
+    }
+
+    fn open_chat(&mut self) {
+        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)) else { return self.err("No contact selected. Press n to add one.") };
+        if c.peer.is_none() { return self.err("No peer key yet: import their file (i) or pair (l / c) first."); }
+        let id = c.id;
+        self.chat_with = Some(id);
+        self.unread.remove(&id);
+        self.compose.clear();
+        self.screen = Screen::Chat;
+        if self.online == Online::Offline { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type; messages are sent only while online."); }
+    }
+
+    fn key_chat(&mut self, k: Key) {
+        match k {
+            Key::Esc | Key::Tab => { self.compose.clear(); self.chat_with = None; self.screen = Screen::Main; }
+            Key::Backspace => self.compose.pop(),
+            Key::Char(c) => { self.compose.push(c); }
+            Key::Enter => self.send_compose(),
+            _ => {}
+        }
+    }
+
+    fn send_compose(&mut self) {
+        let Some(id) = self.chat_with else { return };
+        if self.compose.is_empty() { return; }
+        if self.engine.is_none() { return self.err("You are offline: press Esc, then o. (Nothing was sent.)"); }
+        let text = self.compose.take_string();
+        let queued = !self.linked.contains(&id);
+        // keep a wiped-on-drop copy for the screen, hand the other to the engine
+        let shown = Zeroizing::new((*text).clone());
+        if let Some(e) = &self.engine { e.send(id, text); }
+        self.push_line(id, ChatLine { mine: true, text: shown, queued });
+        if queued { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
+    }
+
+    fn push_line(&mut self, id: [u8; 8], l: ChatLine) {
+        let v = self.chats.entry(id).or_default();
+        v.push(l);
+        if v.len() > MAX_CHAT_LINES { v.remove(0); } // the dropped line is wiped (Zeroizing)
+    }
+
+    fn poll_online(&mut self) {
+        if let Some(rx) = self.start_rx.take() {
+            let mut keep = true;
+            loop {
+                match rx.try_recv() {
+                    Ok(StartMsg::Progress(p)) => self.online = Online::Starting(p),
+                    Ok(StartMsg::Ready(e)) => { self.engine = Some(e); self.online = Online::Online; keep = false; self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
+                    Ok(StartMsg::Failed(m)) => { self.online = Online::Failed(m.clone()); keep = false; self.err(format!("Could not go online: {m}")); break; }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => { self.online = Online::Failed("start thread died".into()); keep = false; break; }
+                }
+            }
+            if keep { self.start_rx = Some(rx); }
+        }
+        let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
+        for ev in evs {
+            match ev {
+                Event::Connected { id } => { self.linked.insert(id); }
+                Event::Disconnected { id } => { self.linked.remove(&id); }
+                Event::Message { id, text } => {
+                    self.push_line(id, ChatLine { mine: false, text, queued: false });
+                    if !(self.screen == Screen::Chat && self.chat_with == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
+                }
+                Event::Notice { text, .. } => self.status = text,
+            }
+        }
+    }
+
     fn cancel_pairing(&mut self) {
         match self.pair_ctl.take() {
             Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.ok("Pairing cancelled."); }
@@ -519,6 +725,7 @@ impl App {
 
     /// Call every UI tick: collects a finished pairing.
     pub fn poll(&mut self) {
+        self.poll_online();
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {}
@@ -547,6 +754,7 @@ impl App {
         c.peer = Some(peer);
         c.trust = trust;
         if self.save() {
+            if let Some(i) = self.vf().store.contacts.iter().position(|c| c.id == id) { self.engine_add(i); }
             let how = if trust == Trust::CodeAuthenticated { "code-authenticated (in person)" } else { "UNVERIFIED - compare the safety number (v)" };
             self.ok(format!("Paired: {how}. Safety number {sn}"));
         }
@@ -561,11 +769,12 @@ fn pair_result(r: Result<seburity_exchange::pair::Paired, ExchangeError>, _me: &
 mod tests {
     use super::*;
     use std::time::Duration;
+    use seburity_chat::{Timing, Transport};
 
     pub fn type_str(a: &mut App, s: &str) { for c in s.chars() { a.handle(Key::Char(c)); } }
 
     fn cfg(path: Option<PathBuf>) -> Config {
-        Config { path, counter: None, keyfile: None, profile: Profile::InsecureTest }
+        Config::new(path, None, None, Profile::InsecureTest)
     }
 
     fn create_app(dir: &std::path::Path, name: &str) -> App {
@@ -814,6 +1023,149 @@ mod tests {
         let mut a = create_app(d.path(), "v"); add(&mut a, "secretname");
         a.handle(Key::Char('e'));
         assert!(!a.input.contains("secretname") && a.input.starts_with("bundle-") && a.input.ends_with(".sbc"), "{}", a.input);
+    }
+
+    // ---------- online + chat (over the in-memory network) ----------
+    fn fast_timing() -> Timing {
+        Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(150), idle: Duration::from_secs(2),
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5) }
+    }
+
+    fn net_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet) -> App {
+        let mut c = cfg(Some(dir.join(name)));
+        let net = net.clone();
+        c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(net.transport()) as Box<dyn Transport>)));
+        c.timing = fast_timing();
+        let mut a = App::new(c);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert_eq!(a.screen, Screen::Main, "{}", a.status);
+        a
+    }
+
+    /// Exchange bundle files between the selected contacts of a and b (the offline path).
+    fn link_apps(a: &mut App, b: &mut App, dir: &std::path::Path) {
+        let (fa, fb) = (dir.join(format!("{:?}-a.sbc", a as *const _)), dir.join(format!("{:?}-b.sbc", b as *const _)));
+        for (app, f) in [(&mut *a, &fa), (&mut *b, &fb)] {
+            app.handle(Key::Char('e')); app.input.clear(); type_str(app, f.to_str().unwrap()); app.handle(Key::Enter);
+            assert!(!app.error, "{}", app.status);
+        }
+        for (app, f) in [(&mut *a, &fb), (&mut *b, &fa)] {
+            app.handle(Key::Char('i')); type_str(app, f.to_str().unwrap()); app.handle(Key::Enter);
+            assert!(!app.error, "{}", app.status);
+        }
+    }
+
+    fn pump_until(apps: &mut [&mut App], mut done: impl FnMut(&[&mut App]) -> bool) -> bool {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(15) {
+            for a in apps.iter_mut() { a.poll(); }
+            if done(apps) { return true; }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn go_online(a: &mut App) { a.handle(Key::Char('o')); }
+    fn is_linked(a: &App) -> bool { a.contact_rows().first().is_some_and(|r| r.3) }
+
+    #[test]
+    fn two_users_chat_through_the_screens() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        assert_eq!(a.online, Online::Offline);
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online), "{:?}", a.status);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])), "never connected");
+        // alice's side: open chat, type, send
+        a.handle(Key::Enter);
+        assert_eq!(a.screen, Screen::Chat);
+        type_str(&mut a, "hello bob, this is private"); a.handle(Key::Enter);
+        assert!(a.compose_text().is_empty() && a.chat_lines().len() == 1 && a.chat_lines()[0].mine && !a.chat_lines()[0].queued);
+        // bob sees an unread marker, opens the chat, sees the line
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].contact_rows()[0].4 == 1), "no unread marker");
+        b.handle(Key::Enter);
+        assert_eq!(&*b.chat_lines()[0].text, "hello bob, this is private");
+        assert!(!b.chat_lines()[0].mine);
+        assert_eq!(b.contact_rows()[0].4, 0, "unread cleared by opening");
+        // what bob actually sees on screen
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 24)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &b)).unwrap();
+        let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("hello bob, this is private") && screen.contains("them>") && screen.contains("connected"), "{screen}");
+        assert!(screen.contains("WARNING: identity not verified"), "unverified contacts carry a visible warning");
+        type_str(&mut b, "got it"); b.handle(Key::Enter);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 2), "reply never arrived");
+        assert_eq!(&*a.chat_lines()[1].text, "got it");
+        // a message that arrives while the chat is OPEN is not counted as unread
+        type_str(&mut b, "second"); b.handle(Key::Enter);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 3));
+        assert_eq!(a.contact_rows()[0].4, 0);
+    }
+
+    #[test]
+    fn contact_added_while_online_connects_and_offline_is_refused_cleanly() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        // typing while offline: refused, nothing sent
+        a.handle(Key::Char('l')); a.handle(Key::Esc); // (cancelled prompt, harmless)
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online));
+        // engines are up but have NO contacts yet; now exchange keys: the hook adds them to the running engines
+        link_apps(&mut a, &mut b, d.path());
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])), "hook did not add the contact to the engine");
+        // go offline: connection closes on both sides; typing is refused
+        a.handle(Key::Char('o'));
+        assert_eq!(a.online, Online::Offline);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !is_linked(x[1])), "peer must notice");
+        a.handle(Key::Enter); type_str(&mut a, "x"); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("offline") && a.chat_lines().is_empty());
+    }
+
+    #[test]
+    fn online_failure_is_reported_and_retry_is_possible() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(Some(d.path().join("v")));
+        c.transport = Some(std::sync::Arc::new(|_p: &mut dyn FnMut(u8)| Err("no tor binary found".to_string())));
+        let mut a = App::new(c);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        go_online(&mut a);
+        assert!(matches!(a.online, Online::Starting(_)));
+        assert!(pump_until(&mut [&mut a], |x| matches!(x[0].online, Online::Failed(_))));
+        assert!(a.error && a.status.contains("no tor binary"));
+        go_online(&mut a); // can retry
+        assert!(matches!(a.online, Online::Starting(_)));
+    }
+
+    #[test]
+    fn delete_while_online_and_panic_wipe_everything_in_the_chat() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        a.handle(Key::Enter); type_str(&mut a, "secret words"); a.handle(Key::Enter);
+        type_str(&mut a, "half typed secret");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].contact_rows()[0].4 == 1));
+        // PANIC on a: engine stopped, messages gone, half-typed line gone, quick
+        let t = Instant::now();
+        assert_eq!(a.handle(Key::F12), Action::Panic);
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert!(a.chat_lines().is_empty() && a.compose_text().is_empty() && a.engine.is_none() && a.chats.is_empty());
+        assert_eq!(a.online, Online::Offline);
+        assert!(pump_until(&mut [&mut b], |x| !is_linked(x[0])), "peer sees the connection drop");
+        // b deletes the contact while online: chat, link and engine entry are removed
+        b.handle(Key::Char('d')); type_str(&mut b, "yes"); b.handle(Key::Enter);
+        assert_eq!(b.contacts_len(), 0);
+        assert!(b.chats.is_empty() && b.linked.is_empty() && b.unread.is_empty());
     }
 
     #[test]

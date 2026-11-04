@@ -23,6 +23,9 @@ fn usage() -> ! {
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
   --keyfile PATH       second factor file (>= 32 bytes), keep it on a SEPARATE device\n\
   --counter-file PATH  rollback counter file (default <vault>.counter; best on the keyfile device)\n\
+  --tor-path PATH      tor binary to start when going online (default: `tor` from PATH)\n\
+  --tor-control ADDR   use an already running tor (127.0.0.1:9051 or unix:/run/tor/control) instead of starting one;\n\
+                       with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
                        add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override;\n\
                        --tor-trust-control = you vouch for whoever owns the control port (e.g. a filtered port on Tails)");
@@ -56,12 +59,18 @@ fn parse_args() -> Config {
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
     let mut path = Some(PathBuf::from("seburity.vault"));
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
+    let mut tor = app::TorCfg::default();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--vault" => path = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--ram" => path = None,
             "--low-mem" => profile = Profile::LowMem,
+            "--tor-path" => tor.tor_path = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--tor-control" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-socks" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-cookie" => tor.cookie = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--tor-trust-control" => tor.trust_control = true,
             "--counter-file" => counter = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--keyfile" => {
                 let p = it.next().unwrap_or_else(|| usage());
@@ -73,7 +82,9 @@ fn parse_args() -> Config {
             _ => usage(),
         }
     }
-    Config { path, counter, keyfile, profile }
+    let mut cfg = Config::new(path, counter, keyfile, profile);
+    cfg.tor = tor;
+    cfg
 }
 
 fn map_key(k: event::KeyEvent) -> Option<Key> {

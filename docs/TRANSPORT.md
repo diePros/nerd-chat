@@ -73,6 +73,21 @@ The report states for every control port whether its owner check passed (`owner 
   torrc validated, empty `--defaults-torrc`, cleared environment, `PATH` lookup ignores relative entries, stale directories
   of dead processes are swept, `SocksPort ... ExtendedErrors OnionTrafficOnly` (readable onion errors, no clearnet dials).
 
+## Chat engine (crate `seburity-chat`)
+- **One connection per pair.** For each contact the party whose Ed25519 signing key is smaller DIALS, the other LISTENS (hosts its
+  onion service for that contact). Only listeners publish a service, so you are not visible online for contacts that never dial you.
+  A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).
+- **Known limitation:** if you are the designated listener but cannot host (e.g. a Tails whose control port refuses `ADD_ONION`),
+  that contact cannot reach you; if you are the designated dialer it works. Role negotiation is future work (tracker C6-roles).
+- **Per-contact guards:** one `HandshakeGuard` (rate limit + replay cache) per hosted service, locked only for the quick checks, never
+  across network I/O; at most 4 concurrent unauthenticated handshakes per contact.
+- **Connection lifetime:** cells are polled in 200 ms ticks (partial cells buffered); a keepalive cell every 30 s when idle; no cell for
+  100 s drops the connection; the dialer reconnects with jittered backoff 3 s -> 60 s.
+- **Messages:** RAM only. Texts are chunked into signed+encrypted 1 KiB cells (max 32 KiB per message), reassembled with hard caps,
+  control and bidi characters from the peer are replaced by '?'. Unknown message kinds are ignored (room for files later).
+- **Timing metadata:** keepalives and reconnect attempts are visible patterns to a network observer of your Tor entry; constant-rate
+  cover traffic is not implemented.
+
 ## Not done yet
-Chat engine + TUI screens (host/dial loops, reconnects, offline queue in RAM), pairing over an onion, embedded tor binary
+Pairing over an onion, role negotiation, delivery markers, constant-rate cover traffic, embedded tor binary
 (bundling a static tor into the single file), bridge flags, control password support, idle/cover traffic.

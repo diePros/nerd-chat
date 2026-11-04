@@ -58,14 +58,18 @@ pub enum Addr { Tcp(SocketAddr), Unix(PathBuf) }
 
 /// A byte stream with an adjustable timeout (TCP or Unix socket).
 pub trait Stream: Read + Write + Send {
-    fn set_timeout(&mut self, d: Option<Duration>) -> std::io::Result<()>;
+    fn set_timeout(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_read_timeout_(d)?; self.set_write_timeout_(d) }
+    fn set_read_timeout_(&mut self, d: Option<Duration>) -> std::io::Result<()>;
+    fn set_write_timeout_(&mut self, d: Option<Duration>) -> std::io::Result<()>;
 }
 impl Stream for TcpStream {
-    fn set_timeout(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_read_timeout(d)?; self.set_write_timeout(d) }
+    fn set_read_timeout_(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_read_timeout(d) }
+    fn set_write_timeout_(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_write_timeout(d) }
 }
 #[cfg(unix)]
 impl Stream for std::os::unix::net::UnixStream {
-    fn set_timeout(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_read_timeout(d)?; self.set_write_timeout(d) }
+    fn set_read_timeout_(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_read_timeout(d) }
+    fn set_write_timeout_(&mut self, d: Option<Duration>) -> std::io::Result<()> { self.set_write_timeout(d) }
 }
 
 impl Addr {
@@ -173,6 +177,17 @@ impl Tor {
 
     pub fn bootstrap_progress(&mut self) -> Result<u8, TorError> { self.ctl.bootstrap_progress() }
 
+    /// The private (0700, RAM) directory of our own spawned tor, if any: a safe place for our onion-target unix sockets.
+    pub fn spawn_dir(&self) -> Option<&std::path::Path> { self._spawned.as_ref().map(|s| s.dir()) }
+
+    /// Stop hosting a service (best effort).
+    pub fn unhost(&mut self, service_id: &str) {
+        if let Some(i) = self.hosted.iter().position(|h| h == service_id) {
+            let id = self.hosted.remove(i);
+            let _ = self.ctl.del_onion(&id);
+        }
+    }
+
     /// Host OUR onion service for this contact: reachable only by the peer's authorized client key.
     /// `target` is where our listener accepts the (Noise) connections tor forwards: prefer a unix socket in a 0700 dir
     /// when tor runs as us (spawn mode); external tors need TCP loopback.
@@ -188,12 +203,24 @@ impl Tor {
         self.ctl.client_auth_add(&service_id(&peer.onion_pub), &me.auth_secret_bytes())
     }
 
+    /// A cheap, thread-safe handle that can dial through this tor's SOCKS port without the control connection.
+    pub fn dialer(&self) -> Dialer { Dialer { socks: self.socks.clone(), user: self.iso_user.clone() } }
+
     /// Dial the peer's onion service. `isolation` makes tor use a separate circuit per value (use one per contact).
-    pub fn dial(&mut self, peer: &Bundle, isolation: &[u8; 16]) -> Result<Box<dyn Stream>, TorError> {
+    pub fn dial(&mut self, peer: &Bundle, isolation: &[u8; 16]) -> Result<Box<dyn Stream>, TorError> { self.dialer().dial(peer, isolation) }
+}
+
+/// Dials contact onion services through a tor's SOCKS port (clone it into worker threads).
+#[derive(Clone, Debug)]
+pub struct Dialer { socks: Addr, user: String }
+
+impl Dialer {
+    pub fn dial(&self, peer: &Bundle, isolation: &[u8; 16]) -> Result<Box<dyn Stream>, TorError> {
         let mut s = open(&self.socks, Duration::from_secs(10))?;
         s.set_timeout(Some(Duration::from_secs(120)))?; // circuit + rendezvous can be slow
         let pass: String = isolation.iter().map(|b| format!("{b:02x}")).collect();
-        socks::connect(&mut s, &peer.onion_address(), VIRT_PORT, Some((self.iso_user.as_bytes(), pass.as_bytes()))).map_err(|e| TorError::Other(e.to_string()))?;
+        socks::connect(&mut s, &peer.onion_address(), VIRT_PORT, Some((self.user.as_bytes(), pass.as_bytes())))
+            .map_err(|e| TorError::Other(e.to_string()))?;
         Ok(s)
     }
 }

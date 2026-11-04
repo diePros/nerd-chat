@@ -139,3 +139,13 @@ CONFIRMED CORRECT against real tor: ADD_ONION syntax (V3Auth + ClientAuthV3 + ED
 | R5-I1 | Host onion on `unix:` target instead of 127.0.0.1 (tor accepts it — confirmed live) | FIXED (spawn mode) | `Target::Unix` in a 0700 dir; External mode still needs TCP loopback |
 | R5-I2 | Stale doc comment in book.rs; SBS1 vaults fail as Corrupt (no migration) | FIXED / ACCEPTED | dev-only data |
 | R5-I3 | Duplicate dependency versions (hmac/sha2/digest/base64/curve25519) | OPEN | add to cargo-deny (D-4) |
+
+## Chat stage (self-notes before review 6)
+- New: `seburity-chat` (proto, transport, conn, engine) + TUI chat screens, online/offline toggle, `--tor-*` flags.
+- C6-roles OPEN: fixed roles (smaller signing key dials). A designated listener that cannot host cannot be reached; needs negotiation/fallback.
+- C6-timing OPEN: 30 s keepalives + reconnect backoff are observable timing patterns; no constant-rate cover traffic.
+- C6-queued-label OPEN (cosmetic): a line shown as "(queued)" is not updated when it is finally delivered; there are no delivery receipts by design.
+- C6-flood OPEN (low): an authenticated peer can send messages as fast as the link allows; engine events channel is unbounded (UI drains every 200 ms; chat history capped at 500 lines; each message <= 32 KiB).
+- C6-copies PARTIAL: message text lives in `Zeroizing<String>` (engine events, chat lines, outbox) and a fixed-capacity compose buffer; the on-screen copy of a sent message is a second wiped-on-drop String. NOT covered: ratatui's cell buffers (blanked at panic, but live while a chat is open), crossterm input buffer (R4-M2), `snow`'s internal buffers (R2-M3).
+- Panic: engine shutdown is awaited for at most 400 ms; connection/acceptor threads end on their own afterwards; the process then exits.
+- Verified by tests: both directions, ordering, offline queue, chunking, text cleaning, reconnect after either side restarts, impostor handshakes rejected, silent-peer idle timeout, remove/shutdown, outbox/input limits, two UIs end-to-end over an in-memory network, panic wipe, delete-while-online.

@@ -32,13 +32,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     let mode = if app.is_ram_only() { "RAM-ONLY" } else { "vault" };
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(" SEBURITY ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
-        Span::raw(format!("  {mode}: {}", app.path_display())),
+        Span::raw(format!("  {mode}: {}   ", app.path_display())),
+        Span::styled(app.online_label(), Style::default().fg(match app.online { crate::app::Online::Online => Color::Green, crate::app::Online::Failed(_) => Color::Red, _ => Color::Yellow })),
     ])), rows[0]);
 
     match &app.screen {
         Screen::Unlock => secret_box(f, rows[1], "Unlock vault", "Password", app.pw.chars()),
         Screen::CreatePw => secret_box(f, rows[1], "Create new vault", "New password (long passphrase)", app.pw.chars()),
         Screen::CreateConfirm => secret_box(f, rows[1], "Create new vault", "Repeat password", 0),
+        Screen::Chat => chat_view(f, rows[1], app),
         _ => main_view(f, rows[1], app),
     }
 
@@ -51,7 +53,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows[2]);
     }
-    f.render_widget(Paragraph::new(" n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    f.render_widget(Paragraph::new(" Enter chat  o online/offline  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
@@ -74,9 +76,12 @@ fn secret_box(f: &mut Frame, area: Rect, title: &str, label: &str, n: usize) {
 
 fn main_view(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
-    let items: Vec<ListItem> = app.contact_rows().iter().map(|(n, t, p)| {
+    let items: Vec<ListItem> = app.contact_rows().iter().map(|(n, t, p, linked, unread)| {
         let (l, c) = trust_label(*t, *p);
-        ListItem::new(Line::from(vec![Span::raw(format!("{n}  ")), Span::styled(l, Style::default().fg(c))]))
+        let dot = if *linked { Span::styled("● ", Style::default().fg(Color::Green)) } else { Span::raw("  ") };
+        let mut v = vec![dot, Span::raw(format!("{n}  ")), Span::styled(l, Style::default().fg(c))];
+        if *unread > 0 { v.push(Span::styled(format!("  [{unread} new]"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))); }
+        ListItem::new(Line::from(v))
     }).collect();
     let mut st = ListState::default();
     if !items.is_empty() { st.select(Some(app.sel)); }
@@ -106,6 +111,44 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
         }
     };
     f.render_widget(Paragraph::new(detail).block(Block::bordered().title("Details")).wrap(Wrap { trim: false }), cols[1]);
+}
+
+fn chat_view(f: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default().direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(2), Constraint::Length(3)]).split(area);
+    let Some((name, trust, linked)) = app.chat_header() else { return };
+    let (tl, tc) = trust_label(trust, true);
+    let conn = if linked { Span::styled("● connected", Style::default().fg(Color::Green)) } else { Span::styled("○ not connected (messages queue in RAM)", Style::default().fg(Color::Yellow)) };
+    let mut head = vec![Line::from(vec![Span::styled(name, Style::default().add_modifier(Modifier::BOLD)), Span::raw("   "), Span::styled(tl, Style::default().fg(tc)), Span::raw("   "), conn])];
+    head.push(Line::from(if trust == Trust::SafetyVerified { "" } else { "WARNING: identity not verified with the safety number (Esc, then v). Anyone who intercepted the key exchange could read this." }));
+    f.render_widget(Paragraph::new(head).style(Style::default()), rows[0]);
+
+    // messages: newest at the bottom, wrapped by hand (no per-frame String copies of message text)
+    let w = rows[1].width.saturating_sub(4).max(8) as usize;
+    let h = rows[1].height.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for l in app.chat_lines().iter().rev() {
+        let (tag, style) = if l.mine { (if l.queued { "me (queued)> " } else { "me> " }, Style::default().fg(Color::Cyan)) } else { ("them> ", Style::default().fg(Color::Green)) };
+        let mut chunks: Vec<&str> = Vec::new();
+        let t: &str = &l.text;
+        let mut start = 0;
+        while start < t.len() {
+            let mut end = t[start..].char_indices().nth(w.saturating_sub(tag.len()).max(1)).map_or(t.len(), |(i, _)| start + i);
+            if end <= start { end = t.len(); }
+            chunks.push(&t[start..end]);
+            start = end;
+        }
+        for (i, c) in chunks.iter().enumerate().rev() {
+            lines.push(Line::from(vec![Span::styled(if i == 0 { tag.to_string() } else { " ".repeat(tag.len()) }, style), Span::raw(*c)]));
+        }
+        if lines.len() >= h { break; }
+    }
+    lines.reverse();
+    let skip = lines.len().saturating_sub(h);
+    f.render_widget(Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).block(Block::bordered().title("Conversation (RAM only, wiped on exit/panic)")), rows[1]);
+
+    let input = Line::from(vec![Span::styled("> ", Style::default().fg(Color::Yellow)), Span::raw(app.compose_text()), Span::styled("_", Style::default().add_modifier(Modifier::BOLD))]);
+    f.render_widget(Paragraph::new(vec![input, Line::from(Span::styled("Enter send  |  Esc back  |  F12 panic", Style::default().fg(Color::DarkGray)))]).block(Block::bordered()), rows[2]);
 }
 
 fn popup(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, w: u16, h: u16) {
@@ -167,7 +210,7 @@ mod tests {
     #[test]
     fn password_is_never_rendered_and_screens_draw() {
         let d = tempfile::tempdir().unwrap();
-        let mut a = App::new(Config { path: Some(d.path().join("v")), counter: None, keyfile: None, profile: Profile::InsecureTest });
+        let mut a = App::new(Config::new(Some(d.path().join("v")), None, None, Profile::InsecureTest));
         let mut t = Terminal::new(TestBackend::new(110, 30)).unwrap();
         for c in "hunter2hunter2".chars() { a.handle(Key::Char(c)); }
         t.draw(|f| draw(f, &a)).unwrap();
@@ -195,8 +238,26 @@ mod tests {
     }
 
     #[test]
+    fn chat_screen_renders_conversation_warning_and_wraps_long_lines() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut c = Config::new(Some(d.path().join("v")), None, None, Profile::InsecureTest);
+        let n = net.clone();
+        c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(n.transport()) as Box<dyn seburity_chat::Transport>)));
+        let mut a = App::new(c);
+        for _ in 0..2 { for c in "correct horse battery".chars() { a.handle(Key::Char(c)); } a.handle(Key::Enter); }
+        a.handle(Key::Char('n')); for c in "bob".chars() { a.handle(Key::Char(c)); } a.handle(Key::Enter);
+        // no peer yet: opening the chat is refused
+        a.handle(Key::Enter);
+        assert_ne!(a.screen, Screen::Chat);
+        let mut t = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        t.draw(|f| draw(f, &a)).unwrap();
+        assert!(text(&t).contains("offline"), "online indicator in the title bar");
+    }
+
+    #[test]
     fn wiped_screen_is_blank() {
-        let mut a = App::new(Config { path: None, counter: None, keyfile: None, profile: Profile::InsecureTest });
+        let mut a = App::new(Config::new(None, None, None, Profile::InsecureTest));
         a.handle(Key::Enter);
         a.handle(Key::F12);
         let mut t = Terminal::new(TestBackend::new(60, 10)).unwrap();

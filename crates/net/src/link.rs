@@ -51,6 +51,24 @@ pub fn accept<S: Read + Write>(s: &mut S, me: &ContactIdentity, peer: &Bundle, g
     Ok((sess, first))
 }
 
+/// Like [`accept`] but the guard is shared between threads and locked only for the quick checks, NEVER across network
+/// I/O: a stranger that connects and stalls must not be able to block the real contact's handshake.
+pub fn accept_shared<S: Read + Write>(s: &mut S, me: &ContactIdentity, peer: &Bundle, guard: &std::sync::Mutex<HandshakeGuard>, now: u64) -> Result<(Session, Signed), NetError> {
+    let m1 = rd(s, MSG1_LEN)?;
+    let verdict = guard.lock().map_err(|_| NetError::Io)?.check(&m1, now);
+    match verdict {
+        Verdict::Allow => {}
+        Verdict::RateLimited => return Err(NetError::RateLimited),
+        Verdict::Replay => return Err(NetError::Replay),
+    }
+    let (mut sess, m2) = Handshake::respond(me, peer, &m1).map_err(|_| NetError::Handshake)?;
+    wr(s, &m2)?;
+    let cell = rd(s, WIRE_CELL_LEN)?;
+    let first = sess.recv(me, &cell).map_err(|_| NetError::Unconfirmed)?;
+    guard.lock().map_err(|_| NetError::Io)?.record_success(&m1, now);
+    Ok((sess, first))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
