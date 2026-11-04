@@ -39,7 +39,7 @@ Ricochet Refresh, Cwtch, Briar (audited; multi-transport), Session/SimpleX (serv
 1. **File** (`.sbc`) via USB/sneakernet/air gap — authenticity from physical channel + fingerprint comparison.
 2. **QR** (show/scan; text QR fallback for TUI) for in-person.
 3. **Direct local link** over BLE / Wi-Fi Direct / LAN: encrypted with **CPace/SPAKE2 PAKE** from a short code read aloud/shown; then exchange bundles; finish with **SAS comparison** (anti-MITM). Never touches Internet.
-- Bundles hold only public keys; authenticity (not secrecy) is the requirement. Optional: wrap bundle with a shared passphrase.
+- Bundles hold only public keys, but since bundle v3 they also contain the onion address: **treat them as confidential** (an address lets anyone watch when the service is online, see docs/TRANSPORT.md). Optional: wrap bundle with a shared passphrase.
 
 ### Session protocol
 - Noise `KK`/`IK`-style handshake (via `snow`) using the pre-shared static keys + hybrid ML-KEM; **fresh ephemerals every connection** → forward secrecy; periodic in-session rekey (ratchet). Mutual auth at handshake level.

@@ -24,7 +24,8 @@ fn usage() -> ! {
   --keyfile PATH       second factor file (>= 32 bytes), keep it on a SEPARATE device\n\
   --counter-file PATH  rollback counter file (default <vault>.counter; best on the keyfile device)\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
-                       add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override");
+                       add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override;\n\
+                       --tor-trust-control = you vouch for whoever owns the control port (e.g. a filtered port on Tails)");
     std::process::exit(2)
 }
 
@@ -32,20 +33,21 @@ fn usage() -> ! {
 /// machine allows, then exit. Passive unless --probe-onion (creates and removes one throwaway onion service).
 fn probe_tor(args: &[String]) -> ! {
     use seburity_net::tor::{control::AuthPref, probe::{probe, Candidates}, Addr};
-    let (mut onion, mut ctl, mut cookie) = (false, None, None);
+    let (mut onion, mut ctl, mut cookie, mut trust) = (false, None, None, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--probe-tor" => {}
             "--probe-onion" => onion = true,
-            "--tor-control" => ctl = it.next().and_then(|s| Addr::parse(s)),
+            "--tor-control" => match it.next().and_then(|s| Addr::parse(s)) { Some(a) => ctl = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-trust-control" => trust = true,
             "--tor-cookie" => cookie = it.next().map(PathBuf::from),
             _ => usage(),
         }
     }
     let mut c = Candidates::standard();
     if let Some(a) = ctl { c.control = vec![a]; }
-    for l in probe(&c, onion, &AuthPref { password: None, cookie_path: cookie }) { println!("{l}"); }
+    for l in probe(&c, onion, &AuthPref { password: None, cookie_path: cookie, peer_verified: false }, trust) { println!("{l}"); }
     std::process::exit(0)
 }
 

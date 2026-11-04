@@ -116,3 +116,26 @@ No Critical/High. Pairing crypto verified (no substitution/reflection/role-desyn
 - Control password auth is not exposed in the CLI yet (code path exists, tested).
 - External-mode hosting forwards to a TCP 127.0.0.1 port: any local user can connect to it, so every inbound connection must pass the Noise handshake + HandshakeGuard (rate limit/replay) — the chat engine must wire one guard per onion service.
 - **Live Tor test PASSED** on the project owner's machine (Tor 0.4.9.11): ADD_ONION with `Flags=V3Auth` + `ClientAuthV3`, `ONION_CLIENT_AUTH_ADD` (base64 x25519), SAFECOOKIE auth, spawn mode (unix sockets, RAM dir), SOCKS dial with isolation, and the full Noise/ML-KEM handshake over a real onion circuit all work. Tails behaviour still untested (deferred; plan in docs/BUILD_AND_RUN.md §8).
+
+## Review 5 — Tor transport + onion identity (commit b4310a4); checked against a real tor 0.4.9.11 (DisableNetwork)
+CONFIRMED CORRECT against real tor: ADD_ONION syntax (V3Auth + ClientAuthV3 + ED25519-V3 base64 key), tor's returned ServiceID == our `service_id()` (proves expanded key, SHA3 checksum, base32), ONION_CLIENT_AUTH_ADD (bare id + base64), SAFECOOKIE. Not testable offline: descriptor publication, SOCKS error codes, Tails/Whonix behaviour, SpawnedTor end-to-end.
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R5-H1 | External mode: nothing proves the control socket is really tor; a local squatter on 127.0.0.1:9051 (or a relay to a real tor) receives onion secret key + client-auth secret | FIXED (fix stage 5) | all auth now requires `peer_verified`: unix peer uid via SO_PEERCRED / TCP listener uid via /proc/net/tcp must be us, root or the owner of the system tor cookie; NULL/password never to an unverified peer; cookie path only from an allow-list or `--tor-cookie`; explicit opt-in `--tor-trust-control`; no silent fallback |
+| R5-M1 | UTF-8 slicing panic on peer-controlled control reply (abort skips zeroize) | FIXED | byte-level parsing, tests with `ab€x`, `250€` |
+| R5-M2 | Shared tor: other controllers can read our client-auth secret (ONION_CLIENT_AUTH_VIEW), see HS_DESC/STREAM events (links all contacts, isolation password) | PARTIAL | docs warn + prefer Spawn; neutral random SOCKS username, random per-process token. ACCEPTED residual: anything with control access to the system tor sees our secrets (inherent to External mode) |
+| R5-M3 | `--probe-tor` double PROTOCOLINFO -> always "authentication FAILED" on real cookie tor | FIXED | `authenticate_with(info, ..)`; strict-server test |
+| R5-M4 | Client auth does NOT hide the service existence; anyone with the onion address (a bundle!) can watch presence forever; docs wrongly claimed otherwise; 7345 constant port | PARTIAL | docs corrected, bundles are now treated as CONFIDENTIAL; `PoWDefensesEnabled`+`MaxStreams` added (with fallback). OPEN: rotate per-contact onion/auth keys over the authenticated channel; vanguards; random virtual port per contact |
+| R5-L1 | Terminal escape injection via peer-supplied control strings in probe/UI | FIXED | control bytes rejected at the parser; all displayed strings sanitized |
+| R5-L2 | Onion/auth secrets left in un-wiped heap copies (format!/base64 temporaries, SHA-512 output) | FIXED | commands built in pre-sized Zeroizing buffers, encode_slice, hash wiped |
+| R5-L3 | Cookie path is attacker-chosen (probe for existence of 32-byte files, open device nodes) | FIXED | allow-list / explicit only, O_NOCTTY |
+| R5-L4 | SOCKS error codes never fire without `ExtendedErrors` in spawn mode | FIXED | `SocksPort ... ExtendedErrors OnionTrafficOnly` |
+| R5-L5 | No recovery after I/O error/timeout: stale reply read as the next answer | FIXED | controller marked broken after any I/O/protocol error |
+| R5-L6 | Spawn hygiene: torrc-defaults, inherited env, relative PATH entries, no tmpfs check, stale RAM dirs after abort/SIGKILL | FIXED | `--defaults-torrc` empty, `env_clear`, absolute PATH entries + exec bit, tmpfs/ramfs statfs check, stale-dir sweep |
+| R5-L7 | Socket path > 108 bytes makes tor fail generically | FIXED | validated up front |
+| R5-L8 | Unparsable `--tor-control` silently ignored (falls back to squattable defaults) | FIXED | usage error |
+| R5-L9 | `unquote` missed \r and octal escapes (non-ASCII cookie paths) | FIXED | |
+| R5-L10 | Password sent in clear to a fake port offering only HASHEDPASSWORD | FIXED | same peer_verified gate |
+| R5-I1 | Host onion on `unix:` target instead of 127.0.0.1 (tor accepts it — confirmed live) | FIXED (spawn mode) | `Target::Unix` in a 0700 dir; External mode still needs TCP loopback |
+| R5-I2 | Stale doc comment in book.rs; SBS1 vaults fail as Corrupt (no migration) | FIXED / ACCEPTED | dev-only data |
+| R5-I3 | Duplicate dependency versions (hmac/sha2/digest/base64/curve25519) | OPEN | add to cargo-deny (D-4) |

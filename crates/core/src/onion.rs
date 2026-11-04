@@ -75,9 +75,11 @@ pub fn parse_onion_address(s: &str) -> Result<[u8; 32], Error> {
 
 /// Tor's 64-byte expanded secret key for `ADD_ONION ED25519-V3:<base64>`: clamped SHA-512(seed) halves.
 pub fn expanded_secret(seed: &[u8; 32]) -> Zeroizing<[u8; 64]> {
-    let h = Sha512::digest(seed);
+    use zeroize::Zeroize;
+    let mut h = Sha512::digest(seed);
     let mut k = Zeroizing::new([0u8; 64]);
     k.copy_from_slice(&h);
+    h[..].zeroize(); // the digest IS the expanded secret key: do not leave a copy behind
     k[0] &= 248;
     k[31] &= 127;
     k[31] |= 64;

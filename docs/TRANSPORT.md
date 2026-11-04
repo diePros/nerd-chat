@@ -1,9 +1,18 @@
 # Transport: Tor in two modes (same code path above the Tor handle)
 
 Per contact there are two onion services, one hosted by each side. A hosts `a.onion` for B; B dials it. Each onion
-service REQUIRES v3 client authorization: only the contact whose auth key is in our bundle can even fetch the
-descriptor. Onion identity and auth keys are separate per-contact keys (the Ed25519 signing key never leaves
-Seburity). Both addresses and auth keys are inside the signed bundle, so the safety number covers them.
+service REQUIRES v3 client authorization: only the contact whose auth key is in our bundle can CONNECT (the part of the
+descriptor with the introduction points is encrypted to the authorized client keys). Onion identity and auth keys are
+separate per-contact keys (the Ed25519 signing key never leaves Seburity). Both addresses and auth keys are inside the
+signed bundle, so the safety number covers them.
+
+**What client authorization does NOT do (review 5):** it does not hide that the service exists. Anyone who learns the
+onion address can derive the blinded key, fetch the (outer-encrypted) descriptor from the HSDirs and so see WHEN the
+service is online, for as long as that address exists. Therefore **a bundle is not public**: treat bundle files,
+QR codes and pairing transcripts as confidential, deliver them over channels you would trust with "who I talk to", and
+delete them after import. Rotating per-contact onion/auth keys over the authenticated channel is planned (tracker R5-M4).
+All of a user's per-contact services also come online and go offline together (one tor), which a network observer of
+descriptor uploads can correlate; Tor's own protections apply, nothing here adds to them.
 
 ## The two modes
 | | EXTERNAL (Tails, Whonix, system tor, Tor Browser's tor) | SPAWN (any machine with a `tor` binary) |
@@ -24,24 +33,45 @@ What changes for Tails specifically:
    between two LAN machines. Untested.
 4. Persistence: put the vault in Tails' Persistent Storage; keep the keyfile/counter on a separate stick.
 
+## Who may we talk secrets to? (External mode, review 5)
+Hosting an onion service means sending tor the onion SECRET key; dialing sends the client-auth SECRET. SAFECOOKIE does not
+prove that the thing on the control socket is the tor you think it is (a local process squatting on 127.0.0.1:9051 can relay
+to a real tor and pass the proof through). So before authenticating, Seburity checks the OS-level owner of the endpoint:
+a unix socket's peer uid (SO_PEERCRED), or the uid of the LISTEN socket for a TCP port (/proc/net/tcp*). The owner must be
+**you, root, or the owner of the system tor's cookie file** (`/run/tor/control.authcookie`). Otherwise nothing is sent and the
+error says why. Cookie files are only read from that well-known location or from `--tor-cookie PATH`, never from a path
+the control port announces. NULL and password authentication are subject to the same rule.
+
+Two escape hatches, both explicit: `--tor-trust-control` ("I vouch for whoever owns this control port", e.g. a filtered
+port on Tails/Whonix) and spawn mode (we created the sockets in our own 0700 directory, so they are ours by construction).
+Residual risk you accept in External mode: **every program with control access to that tor** can read our client-auth
+keys (`ONION_CLIENT_AUTH_VIEW`) and watch our onion traffic metadata (HS_DESC/STREAM events). Prefer spawn mode wherever the
+network lets you run your own tor.
+
 ## Probe (run this on any machine, esp. Tails)
 ```
 seburity --probe-tor                # passive: finds control/SOCKS ports, auth methods, cookie readability
 seburity --probe-tor --probe-onion  # also creates + deletes ONE throwaway onion service (needs bootstrapped tor)
 seburity --probe-tor --tor-control unix:/run/tor/control --tor-cookie /run/tor/control.authcookie
+seburity --probe-tor --probe-onion --tor-trust-control   # you vouch for the control port's owner (Tails/Whonix filtered ports)
 ```
+The report states for every control port whether its owner check passed (`owner check: ... TRUSTED / NOT TRUSTED`) and why.
 
 ## Security properties implemented in `net::tor`
-- Control replies parsed strictly (size caps, mixed-code rejection, data blocks); every command argument validated so a
-  stray newline can never smuggle a second control command.
+- Control replies parsed strictly at byte level (size caps, mixed-code rejection, data blocks, control characters
+  refused so a fake port cannot drive your terminal); every command argument validated so a stray newline can never
+  smuggle a second control command; after any I/O error the connection is discarded (no stale replies).
 - SAFECOOKIE only: the control port must PROVE it knows the cookie before we answer (a fake control port is detected);
   legacy COOKIE (no server proof) is refused. The cookie path comes from the peer, so it must be an absolute path to a
   regular, non-symlink file of exactly 32 bytes.
-- `ADD_ONION` always with `Flags=V3Auth` + `ClientAuthV3`, never `Detach`; returned ServiceID must equal the address we derived.
+- `ADD_ONION` always with `Flags=V3Auth` + `ClientAuthV3`, never `Detach`; hardened with `MaxStreams=16 PoWDefensesEnabled=1`
+  (retried without those on older tors); returned ServiceID must equal the address we derived. Spawn mode forwards to a
+  UNIX socket in a private directory instead of a TCP port. (Checked against a real tor 0.4.9.11.)
 - SOCKS5: hostnames go to tor unresolved, per-contact isolation credentials, Tor's extended error codes mapped to
   readable causes (peer offline / peer hasn't authorized you / unreachable).
-- SPAWN: unix sockets only (no TCP listeners), 0700 RAM directory, `__OwningControllerProcess`, torrc validated, refuses
-  to put tor state on disk unless explicitly allowed.
+- SPAWN: unix sockets only (no TCP listeners), 0700 RAM directory (tmpfs/ramfs verified), `__OwningControllerProcess`,
+  torrc validated, empty `--defaults-torrc`, cleared environment, `PATH` lookup ignores relative entries, stale directories
+  of dead processes are swept, `SocksPort ... ExtendedErrors OnionTrafficOnly` (readable onion errors, no clearnet dials).
 
 ## Not done yet
 Chat engine + TUI screens (host/dial loops, reconnects, offline queue in RAM), pairing over an onion, embedded tor binary

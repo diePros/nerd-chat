@@ -7,6 +7,7 @@ pub mod control;
 pub mod probe;
 pub mod socks;
 pub mod spawn;
+pub mod trust;
 
 use std::{
     io::{Read, Write},
@@ -34,6 +35,23 @@ pub enum TorError {
 
 impl From<std::io::Error> for TorError { fn from(e: std::io::Error) -> Self { TorError::Io(e.to_string()) } }
 
+/// Where our onion service forwards accepted connections. Prefer `Unix` (inside a 0700 directory) when tor runs as us.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target { Tcp(SocketAddr), Unix(PathBuf) }
+
+impl Target {
+    /// The `Port=VIRT,<this>` target argument; refuses anything that could alter the command.
+    pub fn arg(&self) -> Result<String, TorError> {
+        match self {
+            Target::Tcp(a) => Ok(a.to_string()),
+            Target::Unix(p) => {
+                let s = p.to_str().filter(|s| s.starts_with('/') && s.len() <= 100 && s.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\'));
+                s.map(|s| format!("unix:{s}")).ok_or_else(|| TorError::Other("unsafe or too long unix socket path for an onion target".into()))
+            }
+        }
+    }
+}
+
 /// Where a Tor port lives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Addr { Tcp(SocketAddr), Unix(PathBuf) }
@@ -57,6 +75,24 @@ impl Addr {
             Some(p) if p.starts_with('/') && !p.contains('\0') => Some(Addr::Unix(PathBuf::from(p))),
             Some(_) => None,
             None => s.parse().ok().map(Addr::Tcp),
+        }
+    }
+}
+
+/// Open a CONTROL connection and check who owns the other end (R5-H1). The verdict decides whether we may authenticate.
+pub fn open_control(a: &Addr, timeout: Duration) -> Result<(Box<dyn Stream>, trust::PeerCheck), TorError> {
+    match a {
+        Addr::Tcp(sa) => {
+            let mut t = TcpStream::connect_timeout(sa, timeout)?;
+            t.set_timeout(Some(timeout))?;
+            let check = trust::check_tcp_listener(sa);
+            Ok((Box::new(t), check))
+        }
+        Addr::Unix(p) => {
+            let mut u = std::os::unix::net::UnixStream::connect(p)?;
+            u.set_timeout(Some(timeout))?;
+            let check = trust::check_unix_peer(&u, p);
+            Ok((Box::new(u), check))
         }
     }
 }
@@ -87,18 +123,28 @@ pub struct Tor {
     ctl: Controller<Box<dyn Stream>>,
     socks: Addr,
     hosted: Vec<String>,
+    /// Random per-process SOCKS username (isolation); never a recognisable constant.
+    iso_user: String,
     _spawned: Option<spawn::SpawnedTor>,
 }
 
 impl Tor {
     pub(crate) fn from_parts(ctl: Controller<Box<dyn Stream>>, socks: Addr, spawned: Option<spawn::SpawnedTor>) -> Self {
-        Self { ctl, socks, hosted: vec![], _spawned: spawned }
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).expect("OS RNG unavailable");
+        Self { ctl, socks, hosted: vec![], iso_user: r.iter().map(|b| format!("{b:02x}")).collect(), _spawned: spawned }
     }
 
     /// EXTERNAL mode: authenticate to an already running tor. SOCKS defaults to what tor itself reports.
-    pub fn connect_external(control: &Addr, auth: &AuthPref, socks: Option<Addr>) -> Result<Self, TorError> {
-        let mut ctl = Controller::new(open(control, Duration::from_secs(10))?);
-        ctl.authenticate(auth)?;
+    /// We only authenticate (and so only ever send onion secrets) if the control endpoint's OWNER is verified
+    /// (unix peer uid / TCP listener uid is us, root or the system tor account), or `trust_control` is set.
+    /// NOTE: everything with control access to this tor can read our client-auth keys and see our onion traffic.
+    pub fn connect_external(control: &Addr, auth: &AuthPref, socks: Option<Addr>, trust_control: bool) -> Result<Self, TorError> {
+        let (stream, check) = open_control(control, Duration::from_secs(10))?;
+        let pref = AuthPref { password: auth.password.clone(), cookie_path: auth.cookie_path.clone(), peer_verified: auth.peer_verified || check.verified || trust_control };
+        if !pref.peer_verified { return Err(TorError::Auth(format!("{} - refusing to talk secrets to it (override with --tor-trust-control only if you trust every local process)", control::sanitize(&check.detail)))); }
+        let mut ctl = Controller::new(stream);
+        ctl.authenticate(&pref)?;
         let socks = match socks {
             Some(s) => s,
             None => ctl.socks_listeners()?.into_iter().next().ok_or_else(|| TorError::Other("tor reports no SOCKS listener".into()))?,
@@ -109,7 +155,8 @@ impl Tor {
     /// SPAWN mode: start our own tor, wait until it has bootstrapped (reports progress 0..=100).
     pub fn spawn(cfg: &spawn::SpawnConfig, timeout: Duration, mut progress: impl FnMut(u8)) -> Result<Self, TorError> {
         let sp = spawn::SpawnedTor::start(cfg)?;
-        let pref = AuthPref { password: None, cookie_path: Some(sp.cookie_path()) };
+        // we created the sockets in our own 0700 directory: the endpoint is ours by construction
+        let pref = AuthPref { password: None, cookie_path: Some(sp.cookie_path()), peer_verified: true };
         let mut ctl = Controller::new(open(&sp.control, Duration::from_secs(10))?);
         ctl.authenticate(&pref)?;
         let end = std::time::Instant::now() + timeout;
@@ -127,9 +174,10 @@ impl Tor {
     pub fn bootstrap_progress(&mut self) -> Result<u8, TorError> { self.ctl.bootstrap_progress() }
 
     /// Host OUR onion service for this contact: reachable only by the peer's authorized client key.
-    /// `local` is where our listener accepts the (Noise) connections tor forwards.
-    pub fn host(&mut self, me: &ContactIdentity, peer: &Bundle, local: SocketAddr) -> Result<String, TorError> {
-        let id = self.ctl.add_onion(&me.onion_expanded_secret(), VIRT_PORT, local, &[peer.auth_pub], &me.onion_public())?;
+    /// `target` is where our listener accepts the (Noise) connections tor forwards: prefer a unix socket in a 0700 dir
+    /// when tor runs as us (spawn mode); external tors need TCP loopback.
+    pub fn host(&mut self, me: &ContactIdentity, peer: &Bundle, target: &Target) -> Result<String, TorError> {
+        let id = self.ctl.add_onion(&me.onion_expanded_secret(), VIRT_PORT, target, &[peer.auth_pub], &me.onion_public())?;
         debug_assert_eq!(id, service_id(&me.onion_public()));
         self.hosted.push(id.clone());
         Ok(id)
@@ -145,7 +193,7 @@ impl Tor {
         let mut s = open(&self.socks, Duration::from_secs(10))?;
         s.set_timeout(Some(Duration::from_secs(120)))?; // circuit + rendezvous can be slow
         let pass: String = isolation.iter().map(|b| format!("{b:02x}")).collect();
-        socks::connect(&mut s, &peer.onion_address(), VIRT_PORT, Some((b"seburity", pass.as_bytes()))).map_err(|e| TorError::Other(e.to_string()))?;
+        socks::connect(&mut s, &peer.onion_address(), VIRT_PORT, Some((self.iso_user.as_bytes(), pass.as_bytes()))).map_err(|e| TorError::Other(e.to_string()))?;
         Ok(s)
     }
 }
@@ -176,8 +224,9 @@ mod tests {
         let h = thread::spawn(move || {
             let (mut c, _) = l.accept().unwrap();
             let mut g = [0u8; 3]; c.read_exact(&mut g).unwrap(); assert_eq!(g, [5, 1, 2]); c.write_all(&[5, 2]).unwrap();
-            let mut a = [0u8; 2]; c.read_exact(&mut a).unwrap(); assert_eq!(a, [1, 8]);
-            let mut u = [0u8; 8]; c.read_exact(&mut u).unwrap(); assert_eq!(&u, b"seburity");
+            let mut a = [0u8; 2]; c.read_exact(&mut a).unwrap(); assert_eq!(a, [1, 16]);
+            let mut u = [0u8; 16]; c.read_exact(&mut u).unwrap();
+            assert!(u.iter().all(u8::is_ascii_hexdigit) && &u != b"seburity\0\0\0\0\0\0\0\0", "neutral random username");
             let mut pl = [0u8; 1]; c.read_exact(&mut pl).unwrap(); assert_eq!(pl[0], 32);
             let mut p = [0u8; 32]; c.read_exact(&mut p).unwrap(); assert_eq!(&p[..], "ab".repeat(16).as_bytes());
             c.write_all(&[1, 0]).unwrap();

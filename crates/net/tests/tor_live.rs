@@ -3,8 +3,8 @@
 //! It spawns tor (RAM dir), hosts contact A's onion service (authorizing contact B), dials it as B, runs the full
 //! handshake over the real Tor circuit and exchanges a message each way.
 use seburity_core::{bundle::Bundle, identity::ContactIdentity};
-use seburity_net::{guard::HandshakeGuard, link, tor::{spawn::{find_tor, SpawnConfig}, Tor}};
-use std::{net::TcpListener, thread, time::{Duration, Instant}};
+use seburity_net::{guard::HandshakeGuard, link, tor::{spawn::{find_tor, SpawnConfig}, Target, Tor}};
+use std::{os::unix::net::UnixListener, thread, time::{Duration, Instant}};
 
 #[test]
 #[ignore = "needs tor and network"]
@@ -15,9 +15,11 @@ fn two_contacts_chat_over_real_onion_service_with_client_auth() {
 
     let mut tor = Tor::spawn(&SpawnConfig::new(tor_path), Duration::from_secs(240), |p| eprintln!("bootstrap {p}%")).expect("spawn tor");
 
-    // A: listener that tor forwards to
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let local = listener.local_addr().unwrap();
+    // A: listener that tor forwards to: a UNIX socket in a private directory (no TCP port any local user could reach)
+    let dir = tempfile::Builder::new().prefix("sbt-").tempdir_in(if std::path::Path::new("/dev/shm").is_dir() { "/dev/shm" } else { "/tmp" }).unwrap();
+    let sock = dir.path().join("a.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let local = Target::Unix(sock);
     let a2 = ContactIdentity::from_secret_bytes(&a.secret_bytes()).unwrap();
     let bb2 = bb.clone();
     let server = thread::spawn(move || {
@@ -29,7 +31,7 @@ fn two_contacts_chat_over_real_onion_service_with_client_auth() {
         s.write_all(&sess.send(&a2, b"hello from A").unwrap()).unwrap();
     });
 
-    let id = tor.host(&a, &bb, local).expect("ADD_ONION");
+    let id = tor.host(&a, &bb, &local).expect("ADD_ONION");
     eprintln!("hosting {id}.onion for the contact");
     tor.allow_dial(&b, &ab).expect("client auth add");
 

@@ -134,6 +134,8 @@ sha256sum -c seburity.sha256
 chmod +x ./seburity            # if "Permission denied": copy it to /tmp or ~ and chmod there (noexec mounts)
 # 2. ask the environment:
 ./seburity --probe-tor --probe-onion > probe.txt; cat probe.txt
+# if the report says the control port's owner is NOT TRUSTED but you know it is Tails' own tor, repeat with:
+./seburity --probe-tor --probe-onion --tor-trust-control > probe2.txt; cat probe2.txt
 ```
 Interpret `probe.txt`:
 - `RESULT: control port works` and `ADD_ONION ... ALLOWED` -> EXTERNAL mode can host and dial: full chat possible.
@@ -185,6 +187,7 @@ Tor
 | `CounterExists` on create | a counter file from an old vault is in the way; delete it only if you are sure the old vault is gone |
 | live test hangs at `bootstrap 0%` | no Internet or Tor blocked; try bridges or another network |
 | `dial not yet: onion service not found` | descriptor still uploading; retries up to 3 min are normal |
+| `refusing to authenticate: the identity of the control port's owner was not verified` | the control socket is owned by some other account: check who runs it; use spawn mode, a unix socket owned by tor, or `--tor-trust-control` if you vouch for it |
 
 ## 11. Known limits (see docs/SECURITY_TRACKER.md for the full list)
 No locked memory/swap protection beyond refusing to depend on it (check `/proc/swaps` yourself), `snow` does not zeroize
