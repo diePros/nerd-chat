@@ -17,7 +17,7 @@ mkdir -p ~/seburity-demo && cd ~/seburity-demo
 ~/Documents/Code/seburity/target/release/seburity --vault ./alice.vault
 ```
 Type a passphrase of at least 12 characters, Enter, repeat it, Enter (takes ~4 s: that is the memory-hard KDF).
-Keys: `n` new contact, `e` export, `i` import, `l` listen, `c` connect, `v` verify, `d` delete, `?` help, `q` quit.
+Keys: `n` new contact, `e` export, `i` import, `l` listen, `c` connect, `x` cancel pairing, `v` verify, `d` delete, `?` help, `q` quit.
 **Panic: F12 or Ctrl+\\** — locks, clears screen + scrollback, exits immediately.
 
 ## 3. Try the file exchange with yourself (two terminals)
@@ -25,7 +25,7 @@ Terminal 1 (Alice):
 ```bash
 cd ~/seburity-demo && ~/Documents/Code/seburity/target/release/seburity --vault ./alice.vault
 ```
-`n` -> type `bob` -> Enter.  `e` -> Enter (accept `bob-mine.sbc`; rename it first: Backspace the default, type `alice-for-bob.sbc`).
+`n` -> type `bob` -> Enter.  `e` -> the default file name is a neutral random `bundle-xxxxxxxx.sbc` (your contact's name is never put in a file name); Backspace it away and type `alice-for-bob.sbc` for this demo.
 
 Terminal 2 (Bob):
 ```bash
@@ -42,7 +42,7 @@ Add a fresh contact on each side (`n`), then:
 - Terminal 1: `l` -> Enter (127.0.0.1:0). The status line shows `Listening on 127.0.0.1:PORT - CODE: 12345-67890`.
 - Terminal 2: `c` -> type `127.0.0.1:PORT` -> Enter -> type the code -> Enter.
 - Both are asked "exchanged in person?": `y` => code-authenticated, `n` => stays UNVERIFIED.
-On two real machines use the LAN IP: `l` -> `192.168.x.y:4000`. The code works ONCE (burned on any failure).
+On two real machines use the LAN IP: `l` -> `192.168.x.y:4000` (listening is only allowed on loopback / private LAN addresses). The code works ONCE (burned on any failure); `x` cancels a pairing in progress.
 
 ## 5. RAM-only mode (nothing ever written)
 ```bash
@@ -79,6 +79,11 @@ git ls-remote --tags https://gitlab.torproject.org/tpo/core/tor.git | tail -5   
 ```
 Static musl linking of tor additionally needs `musl-tools` and static libevent/zlib/openssl builds — I will script
 and verify that in the spike; do not install anything beyond the above until then.
+
+## What the app does for you automatically
+- Core dumps disabled and the process marked non-dumpable at startup.
+- SIGTERM / SIGHUP (closing the terminal) / SIGINT trigger the same wipe as the panic key.
+- Never follows symlinks and never blocks on FIFOs/devices when importing; refuses to create a new vault over an old rollback counter.
 
 ## Known limits right now
 See docs/SECURITY_TRACKER.md. Biggest: no locked memory / core-dump protection yet, `snow` does not zeroize,

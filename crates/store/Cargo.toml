@@ -10,6 +10,7 @@ seburity-vault = { path = "../vault" }
 zeroize = "1"
 thiserror = "2"
 getrandom = "0.3"
+libc = "0.2"
 
 [dev-dependencies]
 seburity-vault = { path = "../vault", features = ["insecure-test-kdf"] }

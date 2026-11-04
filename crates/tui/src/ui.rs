@@ -43,14 +43,22 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     let style = if app.error { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Cyan) };
-    let mut status = app.status.clone();
-    if let Some(p) = &app.pair_info { status = format!("{p}  |  {status}"); }
-    f.render_widget(Paragraph::new(status).style(style).wrap(Wrap { trim: true }), rows[2]);
-    f.render_widget(Paragraph::new(" n new  e export  i import  l listen  c connect  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    // Rendered straight from borrowed &str (no per-frame String copies of the pairing code).
+    if let Some(p) = &app.pair_info {
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
+        f.render_widget(Paragraph::new(&***p).style(Style::default().fg(Color::Yellow)), sub[0]);
+        f.render_widget(Paragraph::new(app.status.as_str()).style(style), sub[1]);
+    } else {
+        f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows[2]);
+    }
+    f.render_widget(Paragraph::new(" n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
-        Screen::Prompt(p) => prompt_popup(f, area, p, &app.input),
+        Screen::Prompt(p) => {
+            let shown = if matches!(p, Prompt::JoinCode(_)) { "•".repeat(app.code_chars().min(40)) } else { app.input.clone() };
+            prompt_popup(f, area, p, &shown)
+        }
         Screen::Verify => verify_popup(f, area, app.view_number().unwrap_or("")),
         Screen::Help => help_popup(f, area),
         _ => {}
@@ -113,7 +121,7 @@ fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str) {
         Prompt::Import => ("Import their bundle", "Path of their .sbc file:".into()),
         Prompt::Listen => ("Pair: listen", "Listen address (use your LAN IP and a port, e.g. 192.168.1.5:4000):".into()),
         Prompt::JoinAddr => ("Pair: connect", "Their address ip:port:".into()),
-        Prompt::JoinCode(a) => ("Pair: connect", format!("One-time code shown on their screen (connecting to {a}):")),
+        Prompt::JoinCode(a) => ("Pair: connect", format!("One-time code shown on their screen (hidden as you type; connecting to {a}):")),
         Prompt::ConfirmDelete => ("Delete contact", "Type yes to delete this contact AND its keys:".into()),
         Prompt::InPerson => ("Pairing succeeded", "Was the code exchanged IN PERSON (same room)? y/n  (n = stays UNVERIFIED):".into()),
     };

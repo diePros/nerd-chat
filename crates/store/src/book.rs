@@ -25,9 +25,19 @@ impl std::fmt::Debug for Contact {
 #[derive(Default, Debug)]
 pub struct Store { pub contacts: Vec<Contact> }
 
+/// Controls and invisible/bidirectional formatting characters can spoof what the user sees.
+fn bad_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
 fn valid_name(n: &str) -> bool {
     let t = n.trim();
-    !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(|c| c.is_control())
+    !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(bad_char)
+}
+
+impl Drop for Contact {
+    /// Contact names are sensitive metadata (who you talk to): wipe them.
+    fn drop(&mut self) { use zeroize::Zeroize; self.name.zeroize(); }
 }
 
 impl Store {
@@ -131,7 +141,7 @@ mod tests {
     #[test]
     fn names_validated_and_unique() {
         let mut s = Store::new();
-        for bad in ["", " x", "x ", "a\nb", &"x".repeat(MAX_NAME + 1)] {
+        for bad in ["", " x", "x ", "a\nb", "evil\u{202E}name", "zero\u{200B}width", &"x".repeat(MAX_NAME + 1)] {
             assert!(matches!(s.add_contact(bad), Err(StoreError::BadName)), "{bad:?}");
         }
         s.add_contact("ok").unwrap();

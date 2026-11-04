@@ -16,6 +16,8 @@ seburity-exchange = { path = "../exchange" }
 ratatui = "0.30"
 zeroize = "1"
 getrandom = "0.3"
+rustix = { version = "1", features = ["process"] }
+signal-hook = "0.3"
 
 [dev-dependencies]
 seburity-vault = { path = "../vault", features = ["insecure-test-kdf"] }

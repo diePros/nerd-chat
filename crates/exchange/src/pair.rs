@@ -3,13 +3,14 @@
 //! Roles: the OFFER side (shows the code, listens) is role A; the JOIN side (types the code) is role B.
 //! Two sessions of the same role can never complete, so cross-wiring a device's own sessions fails.
 //!
-//! 1. SPAKE2(code) -> K. A writes first, B reads first (no write/write deadlock).
+//! 1. SPAKE2(code) -> K. B (joiner) writes first, A (listener) stays silent until then.
 //! 2. Key confirmation tags (role-bound) over the length-prefixed transcript.
 //! 3. Self-signed bundles under XChaCha20-Poly1305 (AAD binds role + transcript).
 //! 4. Proof of possession: each side signs the transcript+both bundles with its Ed25519 key.
 //! 5. A full Noise/ML-KEM session handshake over the same stream (proves possession of the X25519 and
 //!    ML-KEM secrets) and an exchanged transcript-hash confirmation cell both ways. Only then is the
-//!    contact returned, so both sides commit or neither does.
+//!    contact returned. The last cell is A's, so a dropped final cell can leave A committed and B failed:
+//!    users should check the contact appeared on BOTH sides.
 //!
 //! One-time code: a `PairingOffer` is consumed by exactly ONE attempt (success or failure), has no
 //! constructor from digits, expires, and failures feed a process-wide backoff. An active MITM still
@@ -172,28 +173,38 @@ impl Role {
     fn other(self) -> Role { if self == Role::A { Role::B } else { Role::A } }
 }
 
-struct Clock(Instant);
-impl Clock {
-    fn arm<S: PairStream>(&self, s: &mut S) -> Result<(), ExchangeError> {
-        let left = self.0.saturating_duration_since(Instant::now());
-        if left.is_zero() { return Err(ExchangeError::Io); }
-        s.set_timeout(left).map_err(|_| ExchangeError::Io)
+/// Wraps a stream so EVERY read/write call re-arms the socket timeout with the time left until the
+/// overall deadline (a per-call timeout alone lets a slow-drip peer stretch a read forever).
+struct Bounded<'a, S: PairStream> { s: &'a mut S, end: Instant }
+
+impl<S: PairStream> Bounded<'_, S> {
+    fn arm(&mut self) -> std::io::Result<()> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() { return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "pairing deadline")); }
+        self.s.set_timeout(left)
     }
-    fn write<S: PairStream>(&self, s: &mut S, d: &[u8]) -> Result<(), ExchangeError> {
-        if d.len() > MAX_FRAME { return Err(ExchangeError::Malformed); }
-        self.arm(s)?;
-        s.write_all(&(d.len() as u16).to_be_bytes()).and_then(|_| s.write_all(d)).and_then(|_| s.flush()).map_err(|_| ExchangeError::Io)
-    }
-    fn read<S: PairStream>(&self, s: &mut S) -> Result<Vec<u8>, ExchangeError> {
-        self.arm(s)?;
-        let mut l = [0u8; 2];
-        s.read_exact(&mut l).map_err(|_| ExchangeError::Io)?;
-        let n = u16::from_be_bytes(l) as usize;
-        if n > MAX_FRAME { return Err(ExchangeError::Malformed); }
-        let mut v = vec![0u8; n];
-        s.read_exact(&mut v).map_err(|_| ExchangeError::Io)?;
-        Ok(v)
-    }
+}
+impl<S: PairStream> Read for Bounded<'_, S> {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.arm()?; self.s.read(b) }
+}
+impl<S: PairStream> Write for Bounded<'_, S> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.arm()?; self.s.write(b) }
+    fn flush(&mut self) -> std::io::Result<()> { self.arm()?; self.s.flush() }
+}
+
+fn write_frame<W: Write>(w: &mut W, d: &[u8]) -> Result<(), ExchangeError> {
+    if d.len() > MAX_FRAME { return Err(ExchangeError::Malformed); }
+    w.write_all(&(d.len() as u16).to_be_bytes()).and_then(|_| w.write_all(d)).and_then(|_| w.flush()).map_err(|_| ExchangeError::Io)
+}
+
+fn read_frame<R: Read>(r: &mut R) -> Result<Vec<u8>, ExchangeError> {
+    let mut l = [0u8; 2];
+    r.read_exact(&mut l).map_err(|_| ExchangeError::Io)?;
+    let n = u16::from_be_bytes(l) as usize;
+    if n > MAX_FRAME { return Err(ExchangeError::Malformed); }
+    let mut v = vec![0u8; n];
+    r.read_exact(&mut v).map_err(|_| ExchangeError::Io)?;
+    Ok(v)
 }
 
 fn lp(h: &mut Blake2b<U32>, x: &[u8]) { h.update((x.len() as u32).to_be_bytes()); h.update(x); }
@@ -229,27 +240,28 @@ fn check_point(msg: &[u8]) -> Result<(), ExchangeError> {
     let raw: [u8; 32] = msg[1..].try_into().unwrap();
     let c = CompressedEdwardsY(raw);
     let p = c.decompress().ok_or(ExchangeError::PairingFailed)?;
-    if p.is_small_order() || p.compress().to_bytes() != raw { return Err(ExchangeError::PairingFailed); }
+    if p.is_small_order() || !p.is_torsion_free() || p.compress().to_bytes() != raw { return Err(ExchangeError::PairingFailed); }
     Ok(())
 }
 
 /// `claimed`: test hook letting an adversarial peer present a DIFFERENT bundle than its identity's.
-fn run<S: PairStream>(role: Role, s: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
-    let clock = Clock(Instant::now() + deadline);
+///
+/// I/O order: B (the joiner) always speaks first, so a listener stays SILENT until a joiner
+/// writes (a port scanner gets no Seburity banner). Outcome note: the last message is A's confirmation
+/// cell, so if it is lost A may have committed while B failed; users should confirm on both sides.
+fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
+    let mut b = Bounded { s: stream, end: Instant::now() + deadline };
     let pw = Password::new(&code[..]);
     let (st, my_msg) = match role {
         Role::A => Spake2::<Ed25519Group>::start_a(&pw, &Identity::new(ID_A), &Identity::new(ID_B)),
         Role::B => Spake2::<Ed25519Group>::start_b(&pw, &Identity::new(ID_A), &Identity::new(ID_B)),
     };
-    // 1. PAKE messages (A writes first; B reads first)
-    let peer_msg = if role == Role::A {
-        clock.write(s, &my_msg)?;
-        clock.read(s)?
-    } else {
-        let p = clock.read(s)?;
-        clock.write(s, &my_msg)?;
-        p
+    // One exchange step: B writes first, A reads first.
+    let swap = |b: &mut Bounded<S>, out: &[u8]| -> Result<Vec<u8>, ExchangeError> {
+        if role == Role::B { write_frame(b, out)?; read_frame(b) } else { let r = read_frame(b)?; write_frame(b, out)?; Ok(r) }
     };
+    // 1. PAKE messages
+    let peer_msg = swap(&mut b, &my_msg)?;
     check_point(&peer_msg)?;
     let k = Zeroizing::new(st.finish(&peer_msg).map_err(|_| ExchangeError::PairingFailed)?);
     let (ma, mb) = if role == Role::A { (&my_msg, &peer_msg) } else { (&peer_msg, &my_msg) };
@@ -259,14 +271,7 @@ fn run<S: PairStream>(role: Role, s: &mut S, me: &ContactIdentity, code: &[u8; C
     // 2. Key confirmation
     let my_tag = tag(&k_conf, role, ma, mb);
     let their_expected = tag(&k_conf, role.other(), ma, mb);
-    let their_tag = if role == Role::A {
-        clock.write(s, &my_tag)?;
-        clock.read(s)?
-    } else {
-        let t = clock.read(s)?;
-        clock.write(s, &my_tag)?;
-        t
-    };
+    let their_tag = swap(&mut b, &my_tag)?;
     if !ct_eq(&their_tag, &their_expected) { return Err(ExchangeError::PairingFailed); }
 
     // 3. Bundle exchange (encrypted under K, role+transcript in AAD)
@@ -285,10 +290,7 @@ fn run<S: PairStream>(role: Role, s: &mut S, me: &ContactIdentity, code: &[u8; C
         let aad = [b"seburity-pair-frame".as_slice(), &[role.byte()], ma, mb].concat();
         cipher.decrypt(XNonce::from_slice(&f[..24]), Payload { msg: &f[24..], aad: &aad }).map(Zeroizing::new).map_err(|_| ExchangeError::PairingFailed)
     };
-    let exchange = |s: &mut S, out: Vec<u8>| -> Result<Vec<u8>, ExchangeError> {
-        if role == Role::A { clock.write(s, &out)?; clock.read(s) } else { let r = clock.read(s)?; clock.write(s, &out)?; Ok(r) }
-    };
-    let peer_enc_frame = exchange(s, seal(role, &my_enc)?)?;
+    let peer_enc_frame = swap(&mut b, &seal(role, &my_enc)?)?;
     let peer_enc = open(role.other(), &peer_enc_frame)?;
     if peer_enc.len() != BUNDLE_LEN { return Err(ExchangeError::Malformed); }
     let theirs = Bundle::decode(&peer_enc).map_err(|_| ExchangeError::Malformed)?;
@@ -299,33 +301,29 @@ fn run<S: PairStream>(role: Role, s: &mut S, me: &ContactIdentity, code: &[u8; C
     let t = transcript(ma, mb, ea, eb);
     let pop_msg = |r: Role| [b"seburity-pair-pop-v1".as_slice(), &[r.byte()], &t].concat();
     let my_pop = me.sign_domain(&pop_msg(role));
-    let peer_pop_frame = exchange(s, seal(role, &my_pop)?)?;
+    let peer_pop_frame = swap(&mut b, &seal(role, &my_pop)?)?;
     let peer_pop = open(role.other(), &peer_pop_frame)?;
     let peer_pop: [u8; 64] = peer_pop[..].try_into().map_err(|_| ExchangeError::ProofFailed)?;
     if !theirs.verify_domain(&pop_msg(role.other()), &peer_pop) { return Err(ExchangeError::ProofFailed); }
 
     // 5. Prove X25519 + ML-KEM possession with a real session handshake; confirm the transcript both ways.
-    // B dials, A accepts (stream timeouts are re-armed to the remaining time).
-    clock.arm(s)?;
+    // B dials, A accepts. Every read/write below is deadline-bounded by `Bounded`.
     let mut guard = HandshakeGuard::new(0);
     match role {
         Role::B => {
-            let mut sess = link::dial(s, me, &theirs, &t).map_err(|_| ExchangeError::ProofFailed)?;
-            clock.arm(s)?;
+            let mut sess = link::dial(&mut b, me, &theirs, &t).map_err(|_| ExchangeError::ProofFailed)?;
             let mut cell = vec![0u8; seburity_core::session::WIRE_CELL_LEN];
-            s.read_exact(&mut cell).map_err(|_| ExchangeError::Io)?;
+            b.read_exact(&mut cell).map_err(|_| ExchangeError::Io)?;
             let m = sess.recv(me, &cell).map_err(|_| ExchangeError::ProofFailed)?;
             if !ct_eq(&m.body, &t) { return Err(ExchangeError::ProofFailed); }
         }
         Role::A => {
-            let (mut sess, first) = link::accept(s, me, &theirs, &mut guard, 0).map_err(|_| ExchangeError::ProofFailed)?;
+            let (mut sess, first) = link::accept(&mut b, me, &theirs, &mut guard, 0).map_err(|_| ExchangeError::ProofFailed)?;
             if !ct_eq(&first.body, &t) { return Err(ExchangeError::ProofFailed); }
             let reply = sess.send(me, &t).map_err(|_| ExchangeError::ProofFailed)?;
-            clock.arm(s)?;
-            s.write_all(&reply).and_then(|_| s.flush()).map_err(|_| ExchangeError::Io)?;
+            b.write_all(&reply).and_then(|_| b.flush()).map_err(|_| ExchangeError::Io)?;
         }
     }
-    if Instant::now() >= clock.0 { return Err(ExchangeError::Io); }
     let sn = safety_number(&me_b, &theirs);
     Ok(Paired { contact: ImportedContact::from_pake(theirs), safety_number: sn })
 }
@@ -422,6 +420,36 @@ mod tests {
         let t = Instant::now();
         assert_eq!(j.join(&mut me, &ContactIdentity::generate()).err(), Some(ExchangeError::Io));
         assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn slow_drip_peer_cannot_stretch_the_deadline() {
+        // peer dribbles one byte every 100 ms; overall deadline is 400 ms
+        let (mut me, mut atk) = UnixStream::pair().unwrap();
+        let j = PairingJoin::parse_in("1111111111", lo()).unwrap().with_deadline(Duration::from_millis(400));
+        let t = thread::spawn(move || { let id = ContactIdentity::generate(); j.join(&mut me, &id).err() });
+        let start = Instant::now();
+        let feeder = thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let _ = atk.read(&mut buf); // joiner speaks first
+            let _ = atk.write_all(&[0x08, 0x00]); // announce a 2048-byte frame, then dribble it
+            for _ in 0..40 { if atk.write_all(&[0u8]).is_err() { break; } thread::sleep(Duration::from_millis(100)); }
+        });
+        assert_eq!(t.join().unwrap(), Some(ExchangeError::Io));
+        assert!(start.elapsed() < Duration::from_secs(2), "deadline not enforced: {:?}", start.elapsed());
+        let _ = feeder.join();
+    }
+
+    #[test]
+    fn listener_is_silent_until_the_joiner_speaks() {
+        let (mut srv, mut scanner) = UnixStream::pair().unwrap();
+        scanner.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let (o, _) = PairingOffer::generate_in(lo()).unwrap();
+        let o = o.with_deadline(Duration::from_millis(600));
+        let t = thread::spawn(move || o.accept(&mut srv, &ContactIdentity::generate()).err());
+        let mut b = [0u8; 1];
+        assert!(scanner.read(&mut b).is_err(), "listener must not send a banner");
+        assert!(t.join().unwrap().is_some());
     }
 
     #[test]

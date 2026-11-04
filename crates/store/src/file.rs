@@ -17,6 +17,8 @@ pub struct OpenInfo {
     /// No counter file existed, so rollback of the vault file could NOT be checked.
     pub rollback_unchecked: bool,
     pub counter: u64,
+    /// The counter file shares a filesystem with the vault: weak rollback protection.
+    pub counter_same_device: bool,
 }
 
 fn io<E: std::fmt::Display>(e: E) -> StoreError { StoreError::Io(e.to_string()) }
@@ -27,31 +29,74 @@ fn default_counter_path(p: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Write `data` atomically with 0600 permissions: temp file -> fsync -> rename -> fsync(dir).
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StoreError> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
+/// Read a REGULAR file safely: never follows a symlink, never blocks on a FIFO/device (so a hostile
+/// USB stick cannot freeze the UI or swallow keystrokes via /dev/tty), size-capped.
+pub fn read_regular_file(path: &Path, max: u64) -> Result<Vec<u8>, StoreError> {
+    use std::io::Read;
     let mut o = fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    o.read(true);
     #[cfg(unix)]
-    o.mode(0o600);
-    let mut f = o.open(&tmp).map_err(io)?;
-    f.write_all(data).map_err(io)?;
-    f.sync_all().map_err(io)?;
-    drop(f);
-    fs::rename(&tmp, path).map_err(io)?;
-    if let Some(dir) = path.parent() {
-        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-        if let Ok(d) = fs::File::open(dir) { let _ = d.sync_all(); }
-    }
-    Ok(())
+    o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let f = o.open(path).map_err(io)?;
+    let md = f.metadata().map_err(io)?;
+    if !md.is_file() { return Err(StoreError::Io("not a regular file".into())); }
+    if md.len() > max { return Err(StoreError::Io(format!("file larger than {max} bytes"))); }
+    let mut v = Vec::new();
+    f.take(max + 1).read_to_end(&mut v).map_err(io)?;
+    if v.len() as u64 > max { return Err(StoreError::Io(format!("file larger than {max} bytes"))); }
+    Ok(v)
 }
+
+const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Write `data` atomically: random temp name (create_new: never follows a planted symlink or reuses
+/// an attacker's file) -> chmod 0600 -> fsync -> rename -> fsync(dir). Temp file removed on error.
+fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StoreError> {
+    let mut rnd = [0u8; 8];
+    getrandom::fill(&mut rnd).expect("OS RNG unavailable");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", rnd.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    let tmp = PathBuf::from(tmp);
+    let r = (|| -> Result<(), StoreError> {
+        let mut o = fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let mut f = o.open(&tmp).map_err(io)?;
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; f.set_permissions(fs::Permissions::from_mode(0o600)).map_err(io)?; }
+        f.write_all(data).map_err(io)?;
+        f.sync_all().map_err(io)?;
+        drop(f);
+        fs::rename(&tmp, path).map_err(io)?;
+        if let Some(dir) = path.parent() {
+            let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+            if let Ok(d) = fs::File::open(dir) { let _ = d.sync_all(); }
+        }
+        Ok(())
+    })();
+    if r.is_err() { let _ = fs::remove_file(&tmp); }
+    r
+}
+
+/// True if both paths live on the same filesystem device (then the counter file adds little
+/// against someone who can restore the whole disk).
+#[cfg(unix)]
+fn same_device(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let dir = |p: &Path| p.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    match (fs::metadata(dir(a)), fs::metadata(dir(b))) { (Ok(x), Ok(y)) => x.dev() == y.dev(), _ => true }
+}
+#[cfg(not(unix))]
+fn same_device(_: &Path, _: &Path) -> bool { true }
 
 impl VaultFile {
     /// Brand-new vault. Refuses to overwrite an existing file. `path = None` -> RAM-only: never touches disk.
     pub fn create(path: Option<&Path>, counter_path: Option<&Path>, pw: &[u8], keyfile: Option<&[u8]>, profile: Profile) -> Result<Self, StoreError> {
         if let Some(p) = path { if p.exists() { return Err(StoreError::Exists); } }
+        // A leftover counter file means a vault existed: creating over it would silently reset rollback protection.
+        let cp = counter_path.map(Path::to_path_buf).or_else(|| path.map(default_counter_path));
+        if cp.as_ref().is_some_and(|c| c.exists()) { return Err(StoreError::CounterExists); }
         let vault = Vault::create(pw, keyfile, profile)?;
         let mut vf = Self {
             path: path.map(Path::to_path_buf),
@@ -64,17 +109,15 @@ impl VaultFile {
     }
 
     pub fn open(path: &Path, counter_path: Option<&Path>, pw: &[u8], keyfile: Option<&[u8]>) -> Result<(Self, OpenInfo), StoreError> {
-        let blob = fs::read(path).map_err(io)?;
+        let blob = read_regular_file(path, MAX_VAULT_BYTES)?;
         let cpath = counter_path.map(Path::to_path_buf).unwrap_or_else(|| default_counter_path(path));
-        let min = match fs::read(&cpath) {
-            Ok(b) if b.len() == 8 => Some(u64::from_le_bytes(b.try_into().unwrap())),
-            Ok(_) => return Err(StoreError::Corrupt),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(io(e)),
-        };
+        let min = if cpath.exists() {
+            let b = read_regular_file(&cpath, 8)?;
+            Some(u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?))
+        } else { None };
         let (vault, data) = Vault::open_checked(&blob, pw, keyfile, min.unwrap_or(0))?;
         let store = Store::decode(&data).map_err(|_| StoreError::Vault(VaultError::Malformed))?;
-        let info = OpenInfo { rollback_unchecked: min.is_none(), counter: vault.counter() };
+        let info = OpenInfo { rollback_unchecked: min.is_none(), counter: vault.counter(), counter_same_device: same_device(path, &cpath) };
         Ok((Self { path: Some(path.to_path_buf()), counter_path: Some(cpath), vault, store }, info))
     }
 
@@ -91,6 +134,9 @@ impl VaultFile {
     }
 
     pub fn is_ram_only(&self) -> bool { self.path.is_none() }
+    pub fn counter_same_device(&self) -> bool {
+        match (&self.path, &self.counter_path) { (Some(p), Some(c)) => same_device(p, c), _ => false }
+    }
     pub fn counter(&self) -> u64 { self.vault.counter() }
 
     /// Re-verifies the old password, rotates the data key, saves.
@@ -170,6 +216,53 @@ mod tests {
         assert!(VaultFile::open(&p, None, b"old", None).is_err());
         assert_eq!(VaultFile::open(&p, None, b"new", None).unwrap().0.store.contacts.len(), 1);
         assert!(vf.change_password(b"WRONG", None, b"x", None, P).is_err());
+    }
+
+    #[test]
+    fn create_refuses_when_counter_file_exists_and_no_temp_leftovers() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("v.vault");
+        fs::write(default_counter_path(&p), 5u64.to_le_bytes()).unwrap();
+        assert!(matches!(VaultFile::create(Some(&p), None, b"pw", None, P), Err(StoreError::CounterExists)));
+        fs::remove_file(default_counter_path(&p)).unwrap();
+        VaultFile::create(Some(&p), None, b"pw", None, P).unwrap();
+        let names: Vec<_> = fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hostile_files_cannot_block_or_redirect_reads() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        // symlink -> refused (O_NOFOLLOW)
+        let target = d.path().join("real"); fs::write(&target, b"x").unwrap();
+        let link = d.path().join("link"); symlink(&target, &link).unwrap();
+        assert!(read_regular_file(&link, 100).is_err());
+        // FIFO -> returns immediately with an error instead of blocking forever
+        let fifo = d.path().join("fifo");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let t = std::time::Instant::now();
+        assert!(read_regular_file(&fifo, 100).is_err());
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        // device, oversize, ok
+        assert!(read_regular_file(Path::new("/dev/zero"), 100).is_err());
+        fs::write(d.path().join("big"), vec![0u8; 101]).unwrap();
+        assert!(read_regular_file(&d.path().join("big"), 100).is_err());
+        assert_eq!(read_regular_file(&target, 100).unwrap(), b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_temp_symlink_is_not_followed() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim"); fs::write(&victim, b"precious").unwrap();
+        // attacker plants the OLD predictable temp name
+        symlink(&victim, d.path().join("v.vault.tmp")).unwrap();
+        let p = d.path().join("v.vault");
+        VaultFile::create(Some(&p), None, b"pw", None, P).unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"precious");
     }
 
     #[cfg(unix)]

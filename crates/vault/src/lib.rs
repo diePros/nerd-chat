@@ -16,6 +16,9 @@
 //! block is constant between credential changes, so two copies of the same vault are linkable.
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "insecure-test-kdf", not(debug_assertions)))]
+compile_error!("feature `insecure-test-kdf` must never be enabled in release builds (build/test release WITHOUT --all-targets/dev-dependencies)");
+
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};

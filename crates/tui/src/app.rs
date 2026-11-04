@@ -2,15 +2,15 @@
 use crate::secret::SecretBuf;
 use seburity_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
 use seburity_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
-use seburity_store::{StoreError, VaultFile};
+use seburity_store::{read_regular_file, StoreError, VaultFile};
 use seburity_vault::Profile;
 use std::{
     fs,
     io::Write,
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
-    sync::mpsc::{channel, Receiver, TryRecvError},
-    thread,
+    sync::{atomic::{AtomicBool, Ordering}, mpsc::{channel, Receiver, TryRecvError}, Arc, Mutex},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -52,6 +52,25 @@ pub enum Screen {
 
 enum PairMsg { Done { contact_id: [u8; 8], result: Result<(ImportedContact, String), ExchangeError> } }
 
+/// Handle on a running pairing worker so it can be cancelled (user `x`, or panic).
+struct PairCtl { cancel: Arc<AtomicBool>, stream: Arc<Mutex<Option<TcpStream>>>, handle: JoinHandle<()> }
+
+impl PairCtl {
+    /// Ask the worker to stop and cut its socket so blocked reads return immediately.
+    fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(s) = self.stream.lock().unwrap().as_ref() { let _ = s.shutdown(Shutdown::Both); }
+    }
+}
+
+/// Listening is only allowed on loopback or private LAN addresses (never 0.0.0.0 / public).
+fn listen_addr_ok(a: &SocketAddr) -> bool {
+    match a.ip() {
+        IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local(),
+        IpAddr::V6(v) => v.is_loopback() || v.is_unique_local() || v.is_unicast_link_local(),
+    }
+}
+
 pub struct App {
     cfg: Config,
     pub screen: Screen,
@@ -64,7 +83,9 @@ pub struct App {
     vf: Option<VaultFile>,
     view: Option<SafetyView>,
     pair_rx: Option<Receiver<PairMsg>>,
-    pub pair_info: Option<String>,
+    pub pair_info: Option<Zeroizing<String>>,
+    pair_ctl: Option<PairCtl>,
+    code_buf: SecretBuf,
     pending_pair: Option<([u8; 8], ImportedContact, String)>,
     failures: u32,
     locked_until: Option<Instant>,
@@ -78,7 +99,7 @@ impl App {
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
-            pair_rx: None, pair_info: None, pending_pair: None, failures: 0, locked_until: None,
+            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
@@ -91,14 +112,19 @@ impl App {
         self.cfg.path.as_ref().map_or("RAM-only".into(), |p| p.display().to_string())
     }
     pub fn contacts_len(&self) -> usize { self.vf.as_ref().map_or(0, |v| v.store.contacts.len()) }
-    pub fn contact_rows(&self) -> Vec<(String, Trust, bool)> {
-        self.vf.as_ref().map_or(vec![], |v| v.store.contacts.iter().map(|c| (c.name.clone(), c.trust, c.peer.is_some())).collect())
+    /// Borrowed rows: no per-frame copies of contact names.
+    pub fn contact_rows(&self) -> Vec<(&str, Trust, bool)> {
+        self.vf.as_ref().map_or(vec![], |v| v.store.contacts.iter().map(|c| (c.name.as_str(), c.trust, c.peer.is_some())).collect())
     }
-    pub fn selected_detail(&self) -> Option<(String, Trust, Option<String>)> {
+    pub fn selected_detail(&self) -> Option<(&str, Trust, Option<String>)> {
         let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
         let sn = c.peer.as_ref().map(|p| safety_number(&Bundle::from_identity(&c.identity), p));
-        Some((c.name.clone(), c.trust, sn))
+        Some((c.name.as_str(), c.trust, sn))
     }
+    /// Number of typed characters in the (hidden) join-code buffer.
+    pub fn code_chars(&self) -> usize { self.code_buf.chars() }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pairing_active(&self) -> bool { self.pair_ctl.is_some() }
     pub fn view_number(&self) -> Option<&str> { self.view.as_ref().map(|v| v.number.as_str()) }
     pub fn is_ram_only(&self) -> bool { self.cfg.path.is_none() }
     #[cfg_attr(not(test), allow(dead_code))]
@@ -109,6 +135,13 @@ impl App {
 
     /// Everything wiped: vault dropped (secrets zeroize on drop), buffers cleared, screen -> Wiped.
     pub fn panic_wipe(&mut self) {
+        // Stop pairing workers FIRST (they hold identity clones and the code), give them a moment to drop them.
+        if let Some(c) = self.pair_ctl.take() {
+            c.cancel();
+            let end = Instant::now() + Duration::from_millis(400);
+            while !c.handle.is_finished() && Instant::now() < end { thread::sleep(Duration::from_millis(10)); }
+        }
+        self.code_buf.clear();
         self.vf = None;
         self.view = None;
         self.pending_pair = None;
@@ -163,6 +196,8 @@ impl App {
                         self.failures = 0;
                         if info.rollback_unchecked {
                             self.err("WARNING: no counter file - rollback of the vault cannot be detected (see docs).");
+                        } else if info.counter_same_device {
+                            self.err(format!("Unlocked. Vault save #{}. WARNING: the counter file is on the SAME device as the vault: weak rollback protection (use --counter-file on another device).", info.counter));
                         } else { self.ok(format!("Unlocked. Vault save #{}.", info.counter)); }
                     }
                     Err(StoreError::Vault(seburity_vault::VaultError::Rollback { found, expected })) =>
@@ -237,10 +272,17 @@ impl App {
             Key::Down | Key::Char('j') => { if self.sel + 1 < n { self.sel += 1 } }
             Key::Char('?') => self.screen = Screen::Help,
             Key::Char('n') => self.open_prompt(Prompt::NewContact, ""),
-            Key::Char('e') => if let Some(name) = self.sel_name() { self.open_prompt(Prompt::Export, &format!("{name}-mine.sbc")) },
+            // Neutral random default: the contact's name must not leak into filesystem metadata.
+            Key::Char('e') => if self.sel_name().is_some() {
+                let mut r = [0u8; 4];
+                getrandom::fill(&mut r).expect("OS RNG unavailable");
+                let name = format!("bundle-{}.sbc", r.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                self.open_prompt(Prompt::Export, &name)
+            },
             Key::Char('i') => if self.require_no_peer() { self.open_prompt(Prompt::Import, "") },
             Key::Char('l') => if self.require_no_peer() { self.open_prompt(Prompt::Listen, "127.0.0.1:0") },
             Key::Char('c') => if self.require_no_peer() { self.open_prompt(Prompt::JoinAddr, "") },
+            Key::Char('x') => self.cancel_pairing(),
             Key::Char('v') => self.start_verify(),
             Key::Char('d') => if self.sel_name().is_some() { self.open_prompt(Prompt::ConfirmDelete, "") },
             _ => {}
@@ -267,6 +309,26 @@ impl App {
     }
 
     fn key_prompt(&mut self, k: Key) {
+        // The join code never touches `input: String` (it would leave un-wiped copies).
+        if matches!(self.screen, Screen::Prompt(Prompt::JoinCode(_))) {
+            match k {
+                Key::Char(c) if c.is_ascii_digit() || c == '-' || c == ' ' => { self.code_buf.push(c); return; }
+                Key::Backspace => { self.code_buf.pop(); return; }
+                Key::Esc => { self.code_buf.clear(); self.screen = Screen::Main; self.ok("Cancelled."); return; }
+                Key::Enter => {
+                    let Screen::Prompt(p) = std::mem::replace(&mut self.screen, Screen::Main) else { return };
+                    self.submit(p, String::new());
+                    return;
+                }
+                _ => return,
+            }
+        }
+        // Esc on the in-person question must NOT discard a pairing the peer already committed: treat as "no".
+        if k == Key::Esc && self.screen == Screen::Prompt(Prompt::InPerson) {
+            self.screen = Screen::Main;
+            self.submit(Prompt::InPerson, "n".into());
+            return;
+        }
         match k {
             Key::Esc => { self.input.clear(); self.pending_pair = None; self.screen = Screen::Main; self.ok("Cancelled."); }
             Key::Backspace => { self.input.pop(); }
@@ -311,7 +373,9 @@ impl App {
                 }
             }
             Prompt::Import => {
-                let r = fs::File::open(&text).and_then(|f| { use std::io::Read; let mut s = String::new(); f.take(MAX_IMPORT_BYTES).read_to_string(&mut s)?; Ok(s) });
+                // Never follows symlinks, never blocks on FIFOs/devices, size-capped.
+                let r = read_regular_file(std::path::Path::new(&text), MAX_IMPORT_BYTES)
+                    .and_then(|b| String::from_utf8(b).map_err(|_| StoreError::Corrupt));
                 match r {
                     Err(e) => self.err(format!("Cannot read {text}: {e}")),
                     Ok(s) => match file::dearmor(&s) {
@@ -338,7 +402,7 @@ impl App {
             }
             Prompt::Listen => self.start_listen(text),
             Prompt::JoinAddr => self.open_prompt(Prompt::JoinCode(text.trim().to_string()), ""),
-            Prompt::JoinCode(addr) => self.start_join(addr, text),
+            Prompt::JoinCode(addr) => { let _ = text; self.start_join(addr) }
             Prompt::InPerson => {
                 let Some((id, contact, sn)) = self.pending_pair.take() else { return };
                 let mut contact = contact;
@@ -381,19 +445,29 @@ impl App {
 
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
+        if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
         let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
         let expires = offer.expires_in();
-        thread::spawn(move || {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let slot: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
+        let (c2, s2) = (cancel.clone(), slot.clone());
+        let handle = thread::spawn(move || {
             listener.set_nonblocking(true).ok();
             let deadline = Instant::now() + expires;
             let result = loop {
+                if c2.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
                 match listener.accept() {
                     // ONE connection only: the listener is dropped right after, success or failure.
-                    Ok((mut s, _)) => { s.set_nonblocking(false).ok(); break pair_result(offer.accept(&mut s, &ident), &ident); }
+                    Ok((mut s, _)) => {
+                        s.set_nonblocking(false).ok();
+                        *s2.lock().unwrap() = s.try_clone().ok();
+                        if c2.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
+                        break pair_result(offer.accept(&mut s, &ident), &ident);
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline { break Err(ExchangeError::Expired); }
                         thread::sleep(Duration::from_millis(100));
@@ -404,25 +478,43 @@ impl App {
             let _ = tx.send(PairMsg::Done { contact_id: id, result });
         });
         self.pair_rx = Some(rx);
-        self.pair_info = Some(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt). Tell the other person the address and code IN PERSON.", &*code, expires.as_secs() / 60));
+        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
+        self.pair_info = Some(Zeroizing::new(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt; x = cancel). Tell the other person the address and code IN PERSON.", &*code, expires.as_secs() / 60)));
         self.ok("Waiting for the other device...");
     }
 
-    fn start_join(&mut self, addr: String, code: String) {
-        let sock: SocketAddr = match addr.parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected ip:port"); return } };
-        let join = match PairingJoin::parse_in(&code, self.lockout.clone()) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
+    fn start_join(&mut self, addr: String) {
+        let sock: SocketAddr = match addr.parse() { Ok(a) => a, Err(_) => { self.code_buf.clear(); self.err("Bad address, expected ip:port"); return } };
+        let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
+            .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
+        self.code_buf.clear();
+        let join = match parsed { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
-        thread::spawn(move || {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let slot: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
+        let (c2, s2) = (cancel.clone(), slot.clone());
+        let handle = thread::spawn(move || {
             let result = match TcpStream::connect_timeout(&sock, Duration::from_secs(10)) {
-                Ok(mut s) => pair_result(join.join(&mut s, &ident), &ident),
-                Err(_) => Err(ExchangeError::Io),
+                Ok(mut s) if !c2.load(Ordering::SeqCst) => {
+                    *s2.lock().unwrap() = s.try_clone().ok();
+                    if c2.load(Ordering::SeqCst) { Err(ExchangeError::Io) } else { pair_result(join.join(&mut s, &ident), &ident) }
+                }
+                _ => Err(ExchangeError::Io),
             };
             let _ = tx.send(PairMsg::Done { contact_id: id, result });
         });
         self.pair_rx = Some(rx);
-        self.pair_info = Some(format!("Connecting to {sock} ..."));
+        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
+        self.pair_info = Some(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")));
         self.ok("Pairing...");
+    }
+
+    fn cancel_pairing(&mut self) {
+        match self.pair_ctl.take() {
+            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.ok("Pairing cancelled."); }
+            None => self.ok("No pairing in progress."),
+        }
     }
 
     /// Call every UI tick: collects a finished pairing.
@@ -430,9 +522,10 @@ impl App {
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => { self.pair_rx = None; self.pair_info = None; self.err("Pairing thread died."); }
+            Err(TryRecvError::Disconnected) => { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; self.err("Pairing thread died."); }
             Ok(PairMsg::Done { contact_id, result }) => {
                 self.pair_rx = None;
+                self.pair_ctl = None;
                 self.pair_info = None;
                 match result {
                     Ok((contact, sn)) => {
@@ -629,7 +722,7 @@ mod tests {
         b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter);
         type_str(&mut b, &code); b.handle(Key::Enter);
         let t = Instant::now();
-        while (a.pair_rx.is_some() || b.pair_rx.is_some()) && t.elapsed() < Duration::from_secs(20) {
+        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) {
             a.poll(); b.poll(); thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(a.screen, Screen::Prompt(Prompt::InPerson), "{}", a.status);
@@ -642,6 +735,88 @@ mod tests {
     }
 
     #[test]
+    fn listen_refuses_public_and_unspecified_addresses() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        for bad in ["0.0.0.0:0", "8.8.8.8:4000", "[::]:0"] {
+            a.handle(Key::Char('l')); a.input.clear(); type_str(&mut a, bad); a.handle(Key::Enter);
+            assert!(a.error && !a.pairing_active() && a.status.contains("Refusing"), "{bad}: {}", a.status);
+        }
+        a.handle(Key::Char('l')); a.handle(Key::Enter); // default 127.0.0.1:0 is fine
+        assert!(a.pairing_active());
+    }
+
+    #[test]
+    fn cancel_and_panic_stop_pairing_workers() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        a.handle(Key::Char('l')); a.handle(Key::Enter);
+        assert!(a.pairing_active());
+        a.handle(Key::Char('x'));
+        assert!(!a.pairing_active() && a.pair_info.is_none());
+        // a second listen works again, and panic joins the worker quickly
+        a.handle(Key::Char('l')); a.handle(Key::Enter);
+        assert!(a.pairing_active());
+        let t = Instant::now();
+        a.handle(Key::F12);
+        assert!(!a.pairing_active() && t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn join_code_never_enters_the_plain_input_string() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        a.handle(Key::Char('c')); type_str(&mut a, "127.0.0.1:9"); a.handle(Key::Enter);
+        type_str(&mut a, "1234567890");
+        assert!(a.input.is_empty(), "code must live only in the fixed-capacity SecretBuf");
+        assert_eq!(a.code_chars(), 10);
+        a.handle(Key::Esc);
+        assert_eq!(a.code_chars(), 0, "wiped on cancel");
+    }
+
+    #[test]
+    fn esc_on_in_person_question_keeps_pairing_but_downgrades() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        let mut b = create_app(d.path(), "b.vault"); add(&mut b, "alice");
+        a.handle(Key::Char('l')); a.handle(Key::Enter);
+        let info = a.pair_info.clone().unwrap();
+        let addr = info.split_whitespace().nth(2).unwrap().to_string();
+        let code = info.split("CODE: ").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+        b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter); type_str(&mut b, &code); b.handle(Key::Enter);
+        let t = Instant::now();
+        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        a.handle(Key::Esc);
+        assert_eq!(a.screen, Screen::Main);
+        assert!(a.selected_detail().unwrap().2.is_some(), "pairing kept");
+        assert_eq!(a.selected_detail().unwrap().1, Trust::Unverified);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_from_fifo_or_symlink_does_not_hang_the_ui() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        let fifo = d.path().join("bob.sbc");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let t = Instant::now();
+        a.handle(Key::Char('i')); type_str(&mut a, fifo.to_str().unwrap()); a.handle(Key::Enter);
+        assert!(a.error && t.elapsed() < Duration::from_secs(2));
+        let link = d.path().join("tty.sbc");
+        std::os::unix::fs::symlink("/dev/tty", &link).unwrap();
+        a.handle(Key::Char('i')); type_str(&mut a, link.to_str().unwrap()); a.handle(Key::Enter);
+        assert!(a.error);
+    }
+
+    #[test]
+    fn default_export_name_is_neutral() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "secretname");
+        a.handle(Key::Char('e'));
+        assert!(!a.input.contains("secretname") && a.input.starts_with("bundle-") && a.input.ends_with(".sbc"), "{}", a.input);
+    }
+
+    #[test]
     fn wrong_code_pairing_fails_cleanly() {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
@@ -651,7 +826,7 @@ mod tests {
         b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter);
         type_str(&mut b, "0000000000"); b.handle(Key::Enter);
         let t = Instant::now();
-        while (a.pair_rx.is_some() || b.pair_rx.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
         assert!(a.error && b.error, "{} / {}", a.status, b.status);
         assert!(a.selected_detail().unwrap().2.is_none() && b.selected_detail().unwrap().2.is_none());
     }

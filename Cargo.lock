@@ -1618,6 +1618,7 @@ name = "seburity-store"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "libc",
  "seburity-core",
  "seburity-vault",
  "tempfile",
@@ -1631,10 +1632,12 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "ratatui",
+ "rustix",
  "seburity-core",
  "seburity-exchange",
  "seburity-store",
  "seburity-vault",
+ "signal-hook",
  "tempfile",
  "zeroize",
 ]

@@ -13,7 +13,7 @@ use ratatui::crossterm::{
     terminal::{Clear, ClearType},
 };
 use seburity_vault::Profile;
-use std::{io::stdout, path::PathBuf, time::Duration};
+use std::{io::stdout, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
 use zeroize::Zeroizing;
 
 fn usage() -> ! {
@@ -73,15 +73,46 @@ fn wipe_terminal() {
     let _ = execute!(stdout(), Clear(ClearType::All), Clear(ClearType::Purge), ratatui::crossterm::cursor::MoveTo(0, 0));
 }
 
+/// Process hardening that needs no `unsafe`: no core dumps (a dump of the unlocked heap would put
+/// keys on disk), and not ptrace/proc-mem readable by same-user processes.
+/// Returns human-readable warnings for anything that could not be applied.
+fn harden() -> Vec<String> {
+    use rustix::process::{setrlimit, Resource, Rlimit};
+    let mut w = Vec::new();
+    if setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) }).is_err() {
+        w.push("could not disable core dumps".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).is_err() {
+        w.push("could not mark the process non-dumpable".to_string());
+    }
+    w
+}
+
+fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
+    app.panic_wipe();
+    // Draw the blank Wiped screen twice so BOTH of ratatui's buffers are overwritten.
+    for _ in 0..2 { let _ = term.draw(|f| ui::draw(f, app)); }
+    let _ = term.clear();
+    wipe_terminal();
+    std::process::exit(0)
+}
+
 fn main() {
-    // Never leave a core dump with secrets: handled at the OS level in a later hardening stage (vault-mem).
+    for w in harden() { eprintln!("warning: {w}"); }
     let cfg = parse_args();
     if cfg.path.as_ref().is_some_and(|p| !p.exists()) {
         eprintln!("No vault at {:?}: a NEW one will be created.", cfg.path.as_ref().unwrap());
     }
+    // SIGTERM / SIGHUP (terminal closed) / SIGINT trigger the same wipe as the panic key.
+    let sig = Arc::new(AtomicBool::new(false));
+    for s in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP, signal_hook::consts::SIGINT] {
+        let _ = signal_hook::flag::register(s, sig.clone());
+    }
     let mut app = App::new(cfg);
     let mut term = ratatui::init(); // raw mode + alternate screen + panic hook that restores the terminal
     let result = loop {
+        if sig.load(Ordering::SeqCst) { panic_exit(&mut app, &mut term); }
         if let Err(e) = term.draw(|f| ui::draw(f, &app)) { break Err(e); }
         app.poll();
         match event::poll(Duration::from_millis(200)) {
@@ -90,7 +121,7 @@ fn main() {
                     match app.handle(k) {
                         Action::None => {}
                         Action::Quit => break Ok(()),
-                        Action::Panic => { drop(app); wipe_terminal(); std::process::exit(0); }
+                        Action::Panic => panic_exit(&mut app, &mut term),
                     }
                 },
                 Ok(_) => {}
@@ -100,7 +131,8 @@ fn main() {
             Err(e) => break Err(e),
         }
     };
-    drop(app); // locks: vault and keys zeroized on drop
+    if result.is_err() { panic_exit(&mut app, &mut term); } // lost terminal: wipe, don't just exit
+    app.panic_wipe(); // locks: vault and keys zeroized, workers stopped
+    drop(app);
     wipe_terminal();
-    if let Err(e) = result { eprintln!("terminal error: {e}"); std::process::exit(1); }
 }
