@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod cell;
 pub mod identity;
 pub mod message;
+pub mod onion;
 pub mod session;
 pub mod trust;
 

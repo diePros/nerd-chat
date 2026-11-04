@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 
 pub const MAX_CONTACTS: usize = 1024;
 pub const MAX_NAME: usize = 64;
-const MAGIC: &[u8; 4] = b"SBS1";
+const MAGIC: &[u8; 4] = b"SBS2";
 
 /// One contact = one fresh keypair set (unlinkable across contacts) + the peer's public bundle once known.
 pub struct Contact {
@@ -72,6 +72,8 @@ impl Store {
             if let Some(p) = &c.peer {
                 v.extend_from_slice(&p.sign_pub);
                 v.extend_from_slice(&p.dh_pub);
+                v.extend_from_slice(&p.onion_pub);
+                v.extend_from_slice(&p.auth_pub);
                 v.extend_from_slice(&p.kem_pub);
             }
         }
@@ -96,8 +98,10 @@ impl Store {
             let peer = if flags & 1 != 0 {
                 let sign: [u8; 32] = r.take(32)?.try_into().unwrap();
                 let dh: [u8; 32] = r.take(32)?.try_into().unwrap();
+                let onion: [u8; 32] = r.take(32)?.try_into().unwrap();
+                let auth: [u8; 32] = r.take(32)?.try_into().unwrap();
                 let kem: [u8; KEM_PUB_LEN] = r.take(KEM_PUB_LEN)?.try_into().unwrap();
-                Some(Bundle::from_parts(sign, dh, kem).map_err(|_| StoreError::Corrupt)?)
+                Some(Bundle::from_parts(sign, dh, onion, auth, kem).map_err(|_| StoreError::Corrupt)?)
             } else { None };
             let trust = match flags & 0b110 { 0b010 => Trust::CodeAuthenticated, 0b100 => Trust::SafetyVerified, _ => Trust::Unverified };
             s.contacts.push(Contact { id, name, identity, peer, trust });

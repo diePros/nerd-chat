@@ -9,14 +9,18 @@ use ml_kem::{EncapsulationKey768, KeyExport};
 
 pub const KEM_PUB_LEN: usize = 1184;
 
-const MAGIC: &[u8; 4] = b"SBC2";
-const BODY_LEN: usize = 4 + 32 + 32 + KEM_PUB_LEN;
+const MAGIC: &[u8; 4] = b"SBC3";
+const BODY_LEN: usize = 4 + 32 + 32 + 32 + 32 + KEM_PUB_LEN;
 pub const BUNDLE_LEN: usize = BODY_LEN + 64;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Bundle {
     pub sign_pub: [u8; 32],
     pub dh_pub: [u8; 32],
+    /// Public key of the onion service THIS party hosts for the contact (the other side dials it).
+    pub onion_pub: [u8; 32],
+    /// Client-authorization key: the OTHER party's onion service must authorize this key.
+    pub auth_pub: [u8; 32],
     pub kem_pub: [u8; KEM_PUB_LEN],
 }
 
@@ -25,6 +29,8 @@ impl Bundle {
         Self {
             sign_pub: id.verifying_key().to_bytes(),
             dh_pub: id.dh_public().to_bytes(),
+            onion_pub: id.onion_public(),
+            auth_pub: id.auth_public().to_bytes(),
             kem_pub: id.kem_public().to_bytes().as_slice().try_into().expect("ML-KEM-768 ek length"),
         }
     }
@@ -34,7 +40,9 @@ impl Bundle {
         b[..4].copy_from_slice(MAGIC);
         b[4..36].copy_from_slice(&self.sign_pub);
         b[36..68].copy_from_slice(&self.dh_pub);
-        b[68..].copy_from_slice(&self.kem_pub);
+        b[68..100].copy_from_slice(&self.onion_pub);
+        b[100..132].copy_from_slice(&self.auth_pub);
+        b[132..].copy_from_slice(&self.kem_pub);
         b
     }
 
@@ -52,12 +60,15 @@ impl Bundle {
         let me = Self {
             sign_pub: b[4..36].try_into().unwrap(),
             dh_pub: b[36..68].try_into().unwrap(),
-            kem_pub: b[68..BODY_LEN].try_into().unwrap(),
+            onion_pub: b[68..100].try_into().unwrap(),
+            auth_pub: b[100..132].try_into().unwrap(),
+            kem_pub: b[132..BODY_LEN].try_into().unwrap(),
         };
         // Reject a malformed/invalid ML-KEM key up front rather than at handshake time.
         me.kem_key()?;
         let vk = me.verifying_key()?;
         me.check_dh_pub()?;
+        me.check_onion_keys()?;
         let sig = Signature::from_bytes(b[BODY_LEN..].try_into().unwrap());
         vk.verify_strict(&[b"seburity-bundle-v1".as_slice(), &b[..BODY_LEN]].concat(), &sig)
             .map_err(|_| Error::BadSignature)?;
@@ -66,10 +77,11 @@ impl Bundle {
 
     /// Rebuild a bundle from stored public parts (e.g. from the authenticated vault) applying
     /// the same key validity checks as `decode`.
-    pub fn from_parts(sign_pub: [u8; 32], dh_pub: [u8; 32], kem_pub: [u8; KEM_PUB_LEN]) -> Result<Self, Error> {
-        let me = Self { sign_pub, dh_pub, kem_pub };
+    pub fn from_parts(sign_pub: [u8; 32], dh_pub: [u8; 32], onion_pub: [u8; 32], auth_pub: [u8; 32], kem_pub: [u8; KEM_PUB_LEN]) -> Result<Self, Error> {
+        let me = Self { sign_pub, dh_pub, onion_pub, auth_pub, kem_pub };
         me.verifying_key()?;
         me.check_dh_pub()?;
+        me.check_onion_keys()?;
         me.kem_key()?;
         Ok(me)
     }
@@ -88,6 +100,18 @@ impl Bundle {
             Err(_) => false,
         }
     }
+
+    /// The onion public key must be a valid, non-weak Ed25519 point; the auth key must be contributory.
+    pub fn check_onion_keys(&self) -> Result<(), Error> {
+        let vk = VerifyingKey::from_bytes(&self.onion_pub).map_err(|_| Error::Malformed)?;
+        if vk.is_weak() { return Err(Error::Malformed); }
+        let probe = StaticSecret::from([0x24u8; 32]);
+        if !probe.diffie_hellman(&XPublic::from(self.auth_pub)).was_contributory() { return Err(Error::Malformed); }
+        Ok(())
+    }
+
+    /// `<56 chars>.onion` this party hosts for the contact.
+    pub fn onion_address(&self) -> String { crate::onion::onion_address(&self.onion_pub) }
 
     /// Reject low-order X25519 points (they force an all-zero, public DH output).
     pub fn check_dh_pub(&self) -> Result<(), Error> {
@@ -168,6 +192,12 @@ mod tests {
         assert_eq!(bad.check_dh_pub(), Err(Error::Malformed));
         let mut bad = good.clone(); bad.sign_pub = { let mut p = [0u8; 32]; p[0] = 1; p };
         assert_eq!(bad.verifying_key().err(), Some(Error::Malformed));
+        let mut bad = good.clone(); bad.onion_pub = { let mut p = [0u8; 32]; p[0] = 1; p };
+        assert_eq!(bad.check_onion_keys(), Err(Error::Malformed));
+        let mut bad = good.clone(); bad.auth_pub = [0; 32];
+        assert_eq!(bad.check_onion_keys(), Err(Error::Malformed));
+        assert_eq!(good.onion_address().len(), 62);
+        assert_ne!(good.onion_pub, good.sign_pub, "onion identity is a separate key from the signing key");
         let other = Bundle::from_identity(&ContactIdentity::generate());
         assert_eq!(safety_number(&good, &other), safety_number(&other, &good));
         assert_ne!(safety_number(&good, &other), safety_number(&good, &good));

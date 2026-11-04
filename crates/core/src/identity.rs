@@ -10,9 +10,14 @@ pub struct ContactIdentity {
     pub(crate) dh: StaticSecret,
     pub(crate) kem: DecapsulationKey768,
     kem_seed: Zeroizing<[u8; 64]>,
+    /// Tor onion-service identity for THIS contact (separate from the signing key).
+    onion_seed: Zeroizing<[u8; 32]>,
+    /// Tor v3 client-authorization key: the peer's onion service authorizes our `auth_public`.
+    auth: StaticSecret,
 }
 
-pub const SECRET_LEN: usize = 32 + 32 + 64;
+/// ed25519 sign seed | x25519 dh | ML-KEM seed | onion ed25519 seed | onion client-auth x25519
+pub const SECRET_LEN: usize = 32 + 32 + 64 + 32 + 32;
 
 impl ContactIdentity {
     pub fn generate() -> Self {
@@ -21,12 +26,14 @@ impl ContactIdentity {
         Self::from_secret_bytes(&*b).expect("fixed length")
     }
 
-    /// 128 bytes: ed25519 seed || x25519 secret || ML-KEM-768 seed. For storage inside the vault only.
+    /// `SECRET_LEN` bytes, see the constant. For storage inside the vault only.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
         let mut v = Zeroizing::new(Vec::with_capacity(SECRET_LEN));
         v.extend_from_slice(&self.sign.to_bytes());
         v.extend_from_slice(&self.dh.to_bytes());
         v.extend_from_slice(&*self.kem_seed);
+        v.extend_from_slice(&*self.onion_seed);
+        v.extend_from_slice(&self.auth.to_bytes());
         v
     }
 
@@ -34,9 +41,11 @@ impl ContactIdentity {
         if b.len() != SECRET_LEN { return None; }
         let s: Zeroizing<[u8; 32]> = Zeroizing::new(b[..32].try_into().ok()?);
         let d: Zeroizing<[u8; 32]> = Zeroizing::new(b[32..64].try_into().ok()?);
-        let k: Zeroizing<[u8; 64]> = Zeroizing::new(b[64..].try_into().ok()?);
+        let k: Zeroizing<[u8; 64]> = Zeroizing::new(b[64..128].try_into().ok()?);
+        let o: Zeroizing<[u8; 32]> = Zeroizing::new(b[128..160].try_into().ok()?);
+        let a: Zeroizing<[u8; 32]> = Zeroizing::new(b[160..192].try_into().ok()?);
         let kem = DecapsulationKey768::from_seed(Seed::from(*k));
-        Some(Self { sign: SigningKey::from_bytes(&s), dh: StaticSecret::from(*d), kem, kem_seed: k })
+        Some(Self { sign: SigningKey::from_bytes(&s), dh: StaticSecret::from(*d), kem, kem_seed: k, onion_seed: o, auth: StaticSecret::from(*a) })
     }
 
     pub fn verifying_key(&self) -> VerifyingKey { self.sign.verifying_key() }
@@ -48,5 +57,13 @@ impl ContactIdentity {
         self.sign.sign(msg).to_bytes()
     }
     pub fn dh_public(&self) -> XPublic { XPublic::from(&self.dh) }
+    /// Public key of this contact's onion service (address = `onion::onion_address`).
+    pub fn onion_public(&self) -> [u8; 32] { SigningKey::from_bytes(&self.onion_seed).verifying_key().to_bytes() }
+    /// Tor's expanded secret key for `ADD_ONION ED25519-V3:`. Handle with care (wiped on drop).
+    pub fn onion_expanded_secret(&self) -> Zeroizing<[u8; 64]> { crate::onion::expanded_secret(&self.onion_seed) }
+    /// Public half of our client-authorization key (goes into the bundle; the peer authorizes it).
+    pub fn auth_public(&self) -> XPublic { XPublic::from(&self.auth) }
+    /// Private client-authorization key used to reach the PEER's onion service.
+    pub fn auth_secret_bytes(&self) -> Zeroizing<[u8; 32]> { Zeroizing::new(self.auth.to_bytes()) }
     pub fn kem_public(&self) -> EncapsulationKey768 { self.kem.encapsulation_key().clone() }
 }
