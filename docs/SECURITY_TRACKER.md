@@ -173,3 +173,16 @@ No Critical. Verified OK: only the pinned peer gets a session; no contact can im
 - Wire change: msg2 = ct_e || ct_i || noise2 (2224 bytes); psk2 label v2. Old binaries cannot talk to new ones: restart both sides.
 - Swap guard added (`--allow-swap` to override); parse tested; behaviour when /proc/swaps unreadable: allowed.
 - Still classical on purpose/for now: Tor itself (circuits, onion service keys), SPAKE2 pairing (transcript link only), Ed25519 message signatures (non-repudiation only).
+
+## Review 7 — PQ initiator authentication (commit 18d13de)
+No Critical/High/Medium. VERIFIED against snow 0.10 / ml-kem 0.3.4 sources: psk2 is mixed at the end of msg2 (`Token::Psk(2)` -> `mix_key_and_hash`), so the msg2 AEAD, the transport keys and the session id all depend on `ss_i`; every responder path (`accept`, `accept_shared`, pairing, chat) returns a session only after a valid first cell, which needs the initiator's static ML-KEM secret; KCI now needs two independent breaks; psk framing is unambiguous (fixed lengths, distinct labels); forged `ct_e`/`ct_i` fail identically (implicit rejection, constant-time select); no panic reachable from msg1/msg2; decrypting a recorded session needs (ephemeral ML-KEM secret or ML-KEM break) AND (ephemeral X25519 or DLog break) plus the static secrets.
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R7-L1 | `snow` never zeroizes (psk0/psk2, chaining key, DH outputs, transport keys stay in freed heap after a session) — now carries more secrets | OPEN (= R2-M3/D-3) | mitigations in place: swap guard, no core dumps, non-dumpable; real fix = patch/replace snow |
+| R7-L2 | PQ-impostor test only checked the impostor's own `finish` | FIXED | `link` test: responder returns `Unconfirmed` for an impostor with all classical keys that sends a cell anyway |
+| R7-L3 | `respond` returned a session that could already `send` | FIXED | unconfirmed sessions refuse `send` (`Error::Unconfirmed`) until the first valid cell arrives |
+| R7-I1 | `finish(me)` did not check it is the identity that initiated | FIXED | |
+| R7-I2 | Prologue/version not bumped after the msg2 format change (old initiators block until timeout) | FIXED | prologue `seburity-v2` (mixed versions now fail the handshake outright) |
+| R7-I3 | B answers msg1 from anyone who can build one: a classical-key-holding attacker with onion reachability learns "B is online and answers A" (never a session) | ACCEPTED | pre-existing |
+| R7-I4 | "ML-DSA not needed for authenticity" holds only INSIDE the session: Ed25519 signatures are forgeable by a quantum attacker, so signed material used OUTSIDE the session AEAD (exported transcripts, forwarded items, file sharing) would not be PQ-authentic | NOTE for file sharing | must authenticate via the session or add ML-DSA there |
+| R7-I5 | Not verified by the reviewer: constant-time of ml-kem internals beyond the final select (no KyberSlash audit); PQ security of how `kem_pub` is first established (SPAKE2 pairing and Tor are classical); no fuzzing | OPEN | external audit item |

@@ -54,7 +54,7 @@ fn derive_psk(label: &[u8], ss: &[u8], ct: &[u8], extra: &[u8], init: &Bundle, r
 fn ek_hash(ek: &[u8]) -> [u8; 32] { Blake2b::<U32>::digest(ek).into() }
 
 fn prologue(init: &Bundle, resp: &Bundle) -> Vec<u8> {
-    [b"seburity-v1".as_slice(), &init.sign_pub, &resp.sign_pub].concat()
+    [b"seburity-v2".as_slice(), &init.sign_pub, &resp.sign_pub].concat()
 }
 
 fn build(me: &ContactIdentity, peer: &Bundle, psk0: &[u8; 32], plog: &[u8], initiator: bool) -> Result<HandshakeState, Error> {
@@ -140,6 +140,7 @@ impl Handshake {
     /// called `initiate`: its STATIC ML-KEM key decapsulates `ct_i`, which is what authenticates us post-quantum.
     pub fn finish(mut self, me: &ContactIdentity, msg2: &[u8]) -> Result<Session, Error> {
         if msg2.len() != MSG2_LEN { return Err(Error::Malformed); }
+        if Bundle::from_identity(me) != self.me { return Err(Error::Malformed); } // must be the identity that called initiate
         let (cts, noise) = msg2.split_at(2 * KEM_CT_LEN);
         let ct_e: Ciphertext<MlKem768> = cts[..KEM_CT_LEN].try_into().map_err(|_| Error::Malformed)?;
         let ct_i: Ciphertext<MlKem768> = cts[KEM_CT_LEN..].try_into().map_err(|_| Error::Malformed)?;
@@ -171,6 +172,8 @@ impl Session {
     /// No sender clock is transmitted (it would fingerprint the sender across contacts).
     /// A failed call leaves the session state untouched.
     pub fn send(&mut self, me: &ContactIdentity, body: &[u8]) -> Result<Vec<u8>, Error> {
+        // a responder must not emit anything (even a liveness signal) before the initiator has proven itself with a valid cell
+        if !self.confirmed { return Err(Error::Unconfirmed); }
         let next = self.send_ctr.checked_add(1).ok_or(Error::Replay)?;
         let signed = message::seal(me, &self.peer, &self.id, next, 0, body)?;
         let cell = Zeroizing::new(cell::pad(&signed)?);
@@ -326,6 +329,20 @@ mod tests {
         // sanity: the real parties still work
         let (sa, _sb) = connect(&a, &ab, &b, &bb);
         assert!(sa.is_confirmed());
+    }
+
+    #[test]
+    fn unconfirmed_responder_session_cannot_send_and_wrong_identity_cannot_finish() {
+        let (a, ab, b, bb) = setup();
+        let (h, m1) = Handshake::initiate(&a, &bb).unwrap();
+        let (mut sb, m2) = Handshake::respond(&b, &ab, &m1).unwrap();
+        assert_eq!(sb.send(&b, b"too early").unwrap_err(), Error::Unconfirmed);
+        let other = ContactIdentity::generate();
+        assert!(Handshake::initiate(&a, &bb).unwrap().0.finish(&other, &m2).is_err(), "finish needs the initiating identity");
+        let mut sa = h.finish(&a, &m2).unwrap();
+        let cell = sa.send(&a, b"proof").unwrap();
+        sb.recv(&b, &cell).unwrap();
+        assert!(sb.send(&b, b"now fine").is_ok(), "confirmed after the first valid cell");
     }
 
     #[test]

@@ -22,4 +22,6 @@ pub enum Error {
     Replay,
     #[error("message not addressed to us / wrong session")]
     WrongContext,
+    #[error("session not confirmed yet: the peer has not proven it holds its keys")]
+    Unconfirmed,
 }

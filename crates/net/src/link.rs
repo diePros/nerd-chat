@@ -138,6 +138,27 @@ mod tests {
         assert_eq!(t.join().unwrap(), Some(NetError::Unconfirmed));
     }
 
+    /// Post-quantum authentication, checked where it matters: the RESPONDER must never accept an initiator that has all of A's
+    /// classical keys but not its ML-KEM key, even if that impostor ignores its own failure and sends a first cell anyway.
+    #[test]
+    fn responder_rejects_an_impostor_holding_only_the_classical_keys() {
+        use seburity_core::session::Handshake;
+        let p = pair();
+        let mut bytes = p.a.secret_bytes().to_vec();
+        bytes[64..128].copy_from_slice(&[0x5a; 64]); // same signing/DH keys, different ML-KEM seed
+        let fake = ContactIdentity::from_secret_bytes(&bytes).unwrap();
+        let (mut atk, mut srv) = UnixStream::pair().unwrap();
+        timeout(&srv); timeout(&atk);
+        let (b, ab) = (ContactIdentity::from_secret_bytes(&p.b.secret_bytes()).unwrap(), p.ab.clone());
+        let t = thread::spawn(move || accept(&mut srv, &b, &ab, &mut HandshakeGuard::new(0), 0).err());
+        let (h, m1) = Handshake::initiate(&fake, &p.bb).unwrap();
+        atk.write_all(&m1).unwrap();
+        let m2 = rd(&mut atk, MSG2_LEN).unwrap();
+        assert!(h.finish(&fake, &m2).is_err(), "the impostor cannot even finish");
+        atk.write_all(&vec![0x42; WIRE_CELL_LEN]).unwrap(); // sends a first cell regardless
+        assert_eq!(t.join().unwrap(), Some(NetError::Unconfirmed), "the responder must never confirm it");
+    }
+
     #[test]
     fn garbage_and_flood_are_cheap() {
         let p = pair();
