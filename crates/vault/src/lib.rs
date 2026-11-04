@@ -27,8 +27,10 @@ const WRAPPED: usize = 24 + 48;
 const PREFIX: usize = SALT + WRAPPED;
 const MIN_BLOB: usize = PREFIX + 24 + 16;
 const AAD_DOMAIN: &[u8] = b"seburity-vault-v1";
-/// Plaintext is padded to a multiple of this, hiding exact contact/message counts.
+/// The TOTAL file length is padded to a multiple of this, hiding exact contact/message counts.
 const PAD_BUCKET: usize = 4096;
+/// Bytes in the file besides the padded plaintext: prefix + data nonce + AEAD tag.
+const OVERHEAD: usize = PREFIX + 24 + 16;
 pub const MIN_KEYFILE_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +47,12 @@ pub enum VaultError {
     OutOfMemory,
     #[error("payload too large")]
     TooLarge,
+    #[error("empty password without a keyfile is not allowed")]
+    EmptyPassword,
+    #[error("key derivation failed")]
+    Kdf,
+    #[error("ROLLBACK: vault counter {found} is older than the expected minimum {expected} - an old copy was substituted")]
+    Rollback { found: u64, expected: u64 },
 }
 
 /// Fixed KDF profiles. Floors are enforced by construction: there is no way to
@@ -106,14 +114,25 @@ fn kek(pw: &[u8], keyfile: Option<&[u8; 32]>, p: Profile, salt: &[u8; SALT]) -> 
     };
     // Own the working memory so it is fallibly allocated and wiped (H1).
     let n = params.block_count();
+    // Linux overcommit makes try_reserve succeed even when RAM is short, and the OOM killer
+    // would then SIGKILL us (no zeroization). Refuse up front when MemAvailable is too low.
+    if let Some(avail_kib) = mem_available_kib() {
+        if (m as u64) + (m as u64) / 8 > avail_kib { return Err(VaultError::OutOfMemory); }
+    }
     let mut mem: Vec<Block> = Vec::new();
     mem.try_reserve_exact(n).map_err(|_| VaultError::OutOfMemory)?;
     mem.resize(n, Block::default());
     let mut out = Zeroizing::new([0u8; 32]);
     let r = a.hash_password_into_with_memory(pw, salt, &mut *out, &mut mem[..]);
     mem.zeroize();
-    r.map_err(|_| VaultError::OutOfMemory)?;
+    r.map_err(|_| VaultError::Kdf)?;
     Ok(out)
+}
+
+/// `MemAvailable` from /proc/meminfo in KiB; None if unreadable (then we just try).
+fn mem_available_kib() -> Option<u64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    t.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn aad_wrap(salt: &[u8; SALT]) -> Vec<u8> { [AAD_DOMAIN, b"wrap", salt].concat() }
@@ -134,7 +153,7 @@ fn wrap(kek: &[u8; 32], dk: &[u8; 32], salt: &[u8; SALT]) -> [u8; WRAPPED] {
 fn pad(counter: u64, data: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     if data.len() > (u32::MAX as usize) - PAD_BUCKET { return Err(VaultError::TooLarge); }
     let body = 8 + 4 + data.len();
-    let total = body.div_ceil(PAD_BUCKET) * PAD_BUCKET;
+    let total = (body + OVERHEAD).div_ceil(PAD_BUCKET) * PAD_BUCKET - OVERHEAD;
     let mut v = Zeroizing::new(Vec::with_capacity(total));
     v.extend_from_slice(&counter.to_le_bytes());
     v.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -146,6 +165,7 @@ fn pad(counter: u64, data: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
 impl Vault {
     /// Create a new vault. Nothing is returned to disk until `seal`.
     pub fn create(pw: &[u8], keyfile: Option<&[u8]>, profile: Profile) -> Result<Self, VaultError> {
+        if pw.is_empty() && keyfile.is_none() { return Err(VaultError::EmptyPassword); }
         let kf = keyfile.map(keyfile_secret).transpose()?;
         Self::fresh(pw, kf.as_deref(), profile, 0)
     }
@@ -188,7 +208,17 @@ impl Vault {
         Ok(out)
     }
 
+    /// Like [`open`] but fails closed if the vault is older than `min_counter`.
+    /// Persist the counter of the last save OUTSIDE the vault (e.g. on the keyfile device) and
+    /// pass it here to detect an attacker substituting an older copy.
+    pub fn open_checked(blob: &[u8], pw: &[u8], keyfile: Option<&[u8]>, min_counter: u64) -> Result<(Self, Zeroizing<Vec<u8>>), VaultError> {
+        let (v, d) = Self::open(blob, pw, keyfile)?;
+        if v.counter < min_counter { return Err(VaultError::Rollback { found: v.counter, expected: min_counter }); }
+        Ok((v, d))
+    }
+
     /// Open a vault blob. Returns the unlocked vault and its payload.
+    /// NOTE: does not detect rollback by itself; use [`open_checked`].
     pub fn open(blob: &[u8], pw: &[u8], keyfile: Option<&[u8]>) -> Result<(Self, Zeroizing<Vec<u8>>), VaultError> {
         if blob.len() < MIN_BLOB { return Err(VaultError::Malformed); }
         let kf = keyfile.map(keyfile_secret).transpose()?;
@@ -228,10 +258,17 @@ impl Vault {
         Ok((Self { profile, salt, wrapped, dk, counter }, data))
     }
 
-    /// Change password/keyfile/profile. Generates a FRESH data key and salt and returns the
-    /// new sealed blob; the caller MUST atomically replace the file with it. Requires the
-    /// current credentials to be re-verified by the caller (re-`open` first).
-    pub fn change_credentials(&mut self, new_pw: &[u8], new_keyfile: Option<&[u8]>, profile: Profile, data: &[u8]) -> Result<Vec<u8>, VaultError> {
+    /// Change password/keyfile/profile. Re-verifies the CURRENT credentials against the unlocked
+    /// vault's wrap (so an unattended unlocked session cannot silently re-key it), then
+    /// generates a FRESH data key and salt and returns the new sealed blob; the caller MUST
+    /// atomically replace the file with it.
+    pub fn change_credentials(&mut self, old_pw: &[u8], old_keyfile: Option<&[u8]>, new_pw: &[u8], new_keyfile: Option<&[u8]>, profile: Profile, data: &[u8]) -> Result<Vec<u8>, VaultError> {
+        let okf = old_keyfile.map(keyfile_secret).transpose()?;
+        let k = kek(old_pw, okf.as_deref(), self.profile, &self.salt)?;
+        XChaCha20Poly1305::new((&*k).into())
+            .decrypt(XNonce::from_slice(&self.wrapped[..24]), Payload { msg: &self.wrapped[24..], aad: &aad_wrap(&self.salt) })
+            .map_err(|_| VaultError::WrongCredentials)?;
+        if new_pw.is_empty() && new_keyfile.is_none() { return Err(VaultError::EmptyPassword); }
         let kf = new_keyfile.map(keyfile_secret).transpose()?;
         let fresh = Self::fresh(new_pw, kf.as_deref(), profile, self.counter)?;
         *self = fresh;
@@ -294,6 +331,20 @@ mod tests {
         let big = a.seal(&vec![1u8; 100]).unwrap();
         assert_eq!(x.len(), big.len(), "size must not reveal exact length");
         assert_ne!(a.seal(b"1").unwrap().len(), a.seal(&vec![0u8; PAD_BUCKET]).unwrap().len());
+        assert_eq!(x.len() % PAD_BUCKET, 0, "TOTAL file length must be a bucket multiple");
+        assert_eq!(a.seal(&vec![0u8; 5000]).unwrap().len() % PAD_BUCKET, 0);
+    }
+
+    #[test]
+    fn rollback_empty_password_and_credential_recheck() {
+        let mut v = Vault::create(b"pw", None, P).unwrap();
+        let b1 = v.seal(b"1").unwrap();
+        let b2 = v.seal(b"2").unwrap();
+        assert!(Vault::open_checked(&b2, b"pw", None, 2).is_ok());
+        assert!(matches!(Vault::open_checked(&b1, b"pw", None, 2), Err(VaultError::Rollback { found: 1, expected: 2 })));
+        assert!(matches!(Vault::create(b"", None, P), Err(VaultError::EmptyPassword)));
+        assert!(matches!(v.change_credentials(b"WRONG", None, b"n", None, P, b"x"), Err(VaultError::WrongCredentials)));
+        assert!(matches!(v.change_credentials(b"pw", None, b"", None, P, b"x"), Err(VaultError::EmptyPassword)));
     }
 
     /// C1 regression: an old copy + old password must NOT unlock or forge future vaults.
@@ -302,7 +353,7 @@ mod tests {
         let mut v = Vault::create(b"old", None, P).unwrap();
         let old = v.seal(b"v1").unwrap();
         let (_, _) = Vault::open(&old, b"old", None).unwrap();
-        let new = v.change_credentials(b"new", None, P, b"v2").unwrap();
+        let new = v.change_credentials(b"old", None, b"new", None, P, b"v2").unwrap();
         let old_dk = Vault::open(&old, b"old", None).unwrap().0.dk;
         // attacker with old DK tries to forge a body under the NEW file's prefix
         let nonce = [3u8; 24];

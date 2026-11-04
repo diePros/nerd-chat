@@ -32,7 +32,7 @@ Ricochet Refresh, Cwtch, Briar (audited; multi-transport), Session/SimpleX (serv
 ## Design
 
 ### Identity & keys
-- **One keypair set per contact** (unlinkable across contacts): Ed25519 (sign / also the per-contact **onion service identity**), X25519 (DH), ML-KEM-768 (hybrid post-quantum, Noise PSK-style mixing, PQXDH-like).
+- **One keypair set per contact** (unlinkable across contacts): Ed25519 (message signing ONLY; the Tor onion identity is a SEPARATE per-contact key so the signing key never reaches the C tor process), X25519 (DH), ML-KEM-768 (hybrid post-quantum, Noise PSK-style mixing, PQXDH-like).
 - Adding a contact = generate new set locally → create a **bundle**: `{version, ed25519_pub, x25519_pub, mlkem_pub, onion_addr, client_auth_pub, optional BLE/LAN hints, self-signature}` + short **fingerprint (word list + QR)** for verification.
 
 ### Contact exchange (all offline-first)
@@ -101,3 +101,14 @@ Implementation lives with the `vault-mem` crate (locked secret memory) in milest
 
 ## Open items to confirm during spikes
 Tails exec/Tor-control-port behavior; BLE availability in live environments; ML-KEM crate maturity; exact Argon2 parameters for low-RAM live systems.
+
+## Security review log & known open gaps
+Two adversarial Opus reviews done (vault; core+vault). Fixed: DK rotation, wiped Argon2 memory, no plaintext vault header, total-size padding, rollback check API (`open_checked`), PQ forward secrecy (ephemeral ML-KEM via `KKpsk0+psk2`), counter desync on failed send, msg1 replay (unconfirmed sessions), weak Ed25519 / low-order X25519 rejection, `verify_strict`, no sender timestamps on the wire, combined safety number, Zeroizing message buffers, prologue binding.
+**Still open (tracked):**
+- `snow` does not zeroize Noise state/keys on drop -> fork/patch snow (ZeroizeOnDrop) or hand-roll KK on zeroizing primitives, before claiming the panic-wipe guarantee.
+- Locked secret memory (`vault-mem` crate, mlock/memfd_secret) not written; vault `Vault`/identity secrets still on pageable heap.
+- Initiator authentication is classical only (add ML-DSA + reverse static KEM).
+- Rollback counter must be persisted OUTSIDE the vault by the app (keyfile device) and passed to `open_checked`.
+- Bundle must additionally carry/cover the onion address + client-auth key in the signature and safety number once the transport exists.
+- `ml-kem` crate is unaudited upstream.
+- Responder CPU cost per unauthenticated msg1 (1 decaps + 2 X25519): rely on onion client-auth + rate limiting.

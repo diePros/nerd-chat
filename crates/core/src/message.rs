@@ -3,7 +3,8 @@
 //! to another contact/session. The result is meant to be AEAD-encrypted by the
 //! session layer (sign-then-encrypt, signature never visible on the wire).
 use crate::{Error, bundle::Bundle, identity::ContactIdentity};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer};
+use zeroize::Zeroizing;
 
 const DOMAIN: &[u8] = b"seburity-msg-v1";
 const HEADER: usize = 32 + 32 + 32 + 8 + 8; // sender, recipient, session, counter, ts
@@ -12,12 +13,17 @@ pub const MAX_BODY: usize = crate::cell::CELL_PAYLOAD_MAX - HEADER - 2 - 64;
 /// Identify a party by its signing public key.
 pub type PartyId = [u8; 32];
 
-#[derive(Debug)]
-pub struct Signed { pub counter: u64, pub timestamp: u64, pub body: Vec<u8> }
+/// Decrypted, verified message. Body is wiped on drop; Debug never prints it.
+pub struct Signed { pub counter: u64, pub timestamp: u64, pub body: Zeroizing<Vec<u8>> }
+impl std::fmt::Debug for Signed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Signed {{ counter: {}, body: <{} bytes redacted> }}", self.counter, self.body.len())
+    }
+}
 
-pub fn seal(me: &ContactIdentity, peer: &Bundle, session: &[u8; 32], counter: u64, timestamp: u64, body: &[u8]) -> Result<Vec<u8>, Error> {
+pub fn seal(me: &ContactIdentity, peer: &Bundle, session: &[u8; 32], counter: u64, timestamp: u64, body: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     if body.len() > MAX_BODY { return Err(Error::TooLarge); }
-    let mut m = Vec::with_capacity(HEADER + 2 + body.len() + 64);
+    let mut m = Zeroizing::new(Vec::with_capacity(HEADER + 2 + body.len() + 64));
     m.extend_from_slice(&me.verifying_key().to_bytes());
     m.extend_from_slice(&peer.sign_pub);
     m.extend_from_slice(session);
@@ -25,7 +31,7 @@ pub fn seal(me: &ContactIdentity, peer: &Bundle, session: &[u8; 32], counter: u6
     m.extend_from_slice(&timestamp.to_be_bytes());
     m.extend_from_slice(&(body.len() as u16).to_be_bytes());
     m.extend_from_slice(body);
-    let sig = me.sign.sign(&[DOMAIN, &m].concat());
+    let sig = me.sign.sign(&Zeroizing::new([DOMAIN, &m].concat()));
     m.extend_from_slice(&sig.to_bytes());
     Ok(m)
 }
@@ -38,8 +44,8 @@ pub fn open(me: &ContactIdentity, peer: &Bundle, session: &[u8; 32], last_counte
     let blen = u16::from_be_bytes([m[HEADER], m[HEADER + 1]]) as usize;
     if m.len() != HEADER + 2 + blen { return Err(Error::Malformed); }
     // Verify the signature BEFORE trusting any field.
-    let vk = VerifyingKey::from_bytes(&peer.sign_pub).map_err(|_| Error::Malformed)?;
-    vk.verify(&[DOMAIN, m].concat(), &Signature::from_bytes(sig.try_into().unwrap()))
+    let vk = peer.verifying_key()?;
+    vk.verify_strict(&Zeroizing::new([DOMAIN, m].concat()), &Signature::from_bytes(sig.try_into().unwrap()))
         .map_err(|_| Error::BadSignature)?;
     if m[..32] != peer.sign_pub
         || m[32..64] != me.verifying_key().to_bytes()
@@ -48,7 +54,7 @@ pub fn open(me: &ContactIdentity, peer: &Bundle, session: &[u8; 32], last_counte
     }
     let counter = u64::from_be_bytes(m[96..104].try_into().unwrap());
     if last_counter.is_some_and(|l| counter <= l) { return Err(Error::Replay); }
-    Ok(Signed { counter, timestamp: u64::from_be_bytes(m[104..112].try_into().unwrap()), body: m[HEADER + 2..].to_vec() })
+    Ok(Signed { counter, timestamp: u64::from_be_bytes(m[104..112].try_into().unwrap()), body: Zeroizing::new(m[HEADER + 2..].to_vec()) })
 }
 
 #[cfg(test)]

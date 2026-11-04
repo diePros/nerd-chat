@@ -3,7 +3,8 @@
 //! real authenticity comes from comparing the fingerprint out-of-band.
 use crate::{identity::ContactIdentity, Error};
 use blake2::{Blake2b, Digest, digest::consts::U32};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
+use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 use ml_kem::{EncapsulationKey768, KeyExport};
 
 pub const KEM_PUB_LEN: usize = 1184;
@@ -55,11 +56,25 @@ impl Bundle {
         };
         // Reject a malformed/invalid ML-KEM key up front rather than at handshake time.
         me.kem_key()?;
-        let vk = VerifyingKey::from_bytes(&me.sign_pub).map_err(|_| Error::Malformed)?;
+        let vk = me.verifying_key()?;
+        me.check_dh_pub()?;
         let sig = Signature::from_bytes(b[BODY_LEN..].try_into().unwrap());
-        vk.verify(&[b"seburity-bundle-v1".as_slice(), &b[..BODY_LEN]].concat(), &sig)
+        vk.verify_strict(&[b"seburity-bundle-v1".as_slice(), &b[..BODY_LEN]].concat(), &sig)
             .map_err(|_| Error::BadSignature)?;
         Ok(me)
+    }
+
+    /// Ed25519 key, rejecting small-order ("weak") keys for which universal signatures exist.
+    pub fn verifying_key(&self) -> Result<VerifyingKey, Error> {
+        let vk = VerifyingKey::from_bytes(&self.sign_pub).map_err(|_| Error::Malformed)?;
+        if vk.is_weak() { return Err(Error::Malformed); }
+        Ok(vk)
+    }
+
+    /// Reject low-order X25519 points (they force an all-zero, public DH output).
+    pub fn check_dh_pub(&self) -> Result<(), Error> {
+        let probe = StaticSecret::from([0x42u8; 32]);
+        if probe.diffie_hellman(&XPublic::from(self.dh_pub)).was_contributory() { Ok(()) } else { Err(Error::Malformed) }
     }
 
     pub fn kem_key(&self) -> Result<EncapsulationKey768, Error> {
@@ -74,15 +89,30 @@ impl Bundle {
         h.finalize().into()
     }
 
-    /// Human-comparable fingerprint: 8 groups of 5 decimal digits (Signal-style),
-    /// derived from the first 40 hash bytes' worth of entropy we have (32 bytes -> 8x4 bytes).
-    pub fn fingerprint_digits(&self) -> String {
-        let f = self.fingerprint();
+    /// Human-comparable fingerprint: 8 groups of 5 decimal digits (~133 bits).
+    /// Prefer [`safety_number`], which both parties see identically.
+    pub fn fingerprint_digits(&self) -> String { digits(&self.fingerprint()) }
+}
+
+fn digits(f: &[u8; 32]) -> String {
+    {
         f.chunks(4)
             .map(|c| format!("{:05}", u32::from_be_bytes(c.try_into().unwrap()) % 100_000))
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// Combined, order-independent number over BOTH bundles. Both users read this aloud /
+/// compare it and it must be identical on both sides (so a MITM that swaps one bundle shows up).
+pub fn safety_number(a: &Bundle, b: &Bundle) -> String {
+    let (mut x, mut y) = (a.fingerprint(), b.fingerprint());
+    if x > y { std::mem::swap(&mut x, &mut y); }
+    let mut h = Blake2b::<U32>::new();
+    h.update(b"seburity-safety-number-v1");
+    h.update(x);
+    h.update(y);
+    digits(&h.finalize().into())
 }
 
 #[cfg(test)]
@@ -109,6 +139,20 @@ mod tests {
         let b = Bundle::from_identity(&ContactIdentity::generate());
         assert_ne!(a.fingerprint(), b.fingerprint());
         assert_eq!(a.fingerprint_digits().split(' ').count(), 8);
+    }
+
+    #[test]
+    fn rejects_weak_keys_and_safety_number_is_symmetric() {
+        let id = ContactIdentity::generate();
+        let good = Bundle::from_identity(&id);
+        // low-order X25519 point (zero) and identity Ed25519 point
+        let mut bad = good.clone(); bad.dh_pub = [0; 32];
+        assert_eq!(bad.check_dh_pub(), Err(Error::Malformed));
+        let mut bad = good.clone(); bad.sign_pub = { let mut p = [0u8; 32]; p[0] = 1; p };
+        assert_eq!(bad.verifying_key().err(), Some(Error::Malformed));
+        let other = Bundle::from_identity(&ContactIdentity::generate());
+        assert_eq!(safety_number(&good, &other), safety_number(&other, &good));
+        assert_ne!(safety_number(&good, &other), safety_number(&good, &good));
     }
 
     #[test]
