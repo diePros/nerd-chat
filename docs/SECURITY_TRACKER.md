@@ -10,7 +10,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 |---|---|---|---|
 | R1-C1 | Data key not rotated on credential change (old copy+old pw forges/reads future) | FIXED | `old_copy_cannot_read_or_forge_after_credential_change` |
 | R1-H1 | Argon2 memory/H0 not wiped | FIXED | owned buffer, zeroize feature, wiped |
-| R1-H2 | No locked/secret memory (mlock, memfd_secret, guard pages) | **OPEN** | needs `vault-mem` crate (only `unsafe`); due milestone 4, REQUIRED before panic-wipe claim |
+| R1-H2 | No locked/secret memory (mlock, memfd_secret, guard pages) | PARTIAL | MITIGATED by the swap guard (refuses to start with active swap unless `--allow-swap`; no swap => no hibernation image either) + no core dumps + non-dumpable. mlock/memfd_secret deferred: low added value once swap is off; cold-boot/RAM remanence is not addressed by mlock anyway. Dev machine note: a full swapfile means the guard fires until `sudo swapoff -a` |
 | R1-M1 | Fixed plaintext header / fingerprintable | FIXED | no header, fixed profiles |
 | R1-M1b | Wrap block constant between credential changes -> copies linkable | ACCEPTED | documented; fix needs KEK kept in RAM |
 | R1-M2 | Plaintext length visible | FIXED | total file length bucketed (4 KiB) |
@@ -39,7 +39,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 | R2-L3 | Timestamps trusted / fingerprint sender | FIXED | no timestamp on wire |
 | R2-L4 | File size distinguishable | FIXED | |
 | R2-L5 | Empty pw / error masking / old-cred check | FIXED | |
-| R2-L6 | Initiator auth classical only | **OPEN** | add ML-DSA + reverse static KEM |
+| R2-L6 | Initiator auth classical only | FIXED (session level) | responder now also encapsulates to the initiator's STATIC ML-KEM key (psk2 v2): both parties are PQ-authenticated by the session itself (test: classical key theft without the ML-KEM seed cannot impersonate either side). Per-message Ed25519 signatures stay as classical non-repudiation; ML-DSA not needed for authenticity. NEEDS REVIEW (composition) |
 | R2-I1 | Noise prologue for version binding | FIXED | |
 | R2-I2 | Counter overflow | FIXED | checked_add |
 | R2-I3 | One-sided fingerprint | FIXED | `safety_number` (must also cover onion addr + client-auth key once in bundle) |
@@ -168,3 +168,8 @@ No Critical. Verified OK: only the pinned peer gets a session; no contact can im
 | R6-I1 | Stale Up/DialFailed after remove+re-add of the same id attaches an old connection to the new entry | FIXED | per-contact epoch checked on Up/DialFailed |
 | R6-I2 | Spawn-mode unix socket files never unlinked (re-add fails with EADDRINUSE) | FIXED | |
 | R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | ACCEPTED | RAM-only by design, documented in the UI status text |
+
+## PQ-auth stage notes (before review 7)
+- Wire change: msg2 = ct_e || ct_i || noise2 (2224 bytes); psk2 label v2. Old binaries cannot talk to new ones: restart both sides.
+- Swap guard added (`--allow-swap` to override); parse tested; behaviour when /proc/swaps unreadable: allowed.
+- Still classical on purpose/for now: Tor itself (circuits, onion service keys), SPAKE2 pairing (transcript link only), Ed25519 message signatures (non-repudiation only).

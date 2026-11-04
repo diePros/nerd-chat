@@ -26,6 +26,7 @@ fn usage() -> ! {
   --tor-path PATH      tor binary to start when going online (default: `tor` from PATH)\n\
   --tor-control ADDR   use an already running tor (127.0.0.1:9051 or unix:/run/tor/control) instead of starting one;\n\
                        with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
+  --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
                        add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override;\n\
                        --tor-trust-control = you vouch for whoever owns the control port (e.g. a filtered port on Tails)");
@@ -60,12 +61,14 @@ fn parse_args() -> Config {
     let mut path = Some(PathBuf::from("seburity.vault"));
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
+    let mut allow_swap = false;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--vault" => path = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--ram" => path = None,
             "--low-mem" => profile = Profile::LowMem,
+            "--allow-swap" => allow_swap = true,
             "--tor-path" => tor.tor_path = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--tor-control" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
             "--tor-socks" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
@@ -84,6 +87,7 @@ fn parse_args() -> Config {
     }
     let mut cfg = Config::new(path, counter, keyfile, profile);
     cfg.tor = tor;
+    cfg.allow_swap = allow_swap;
     cfg
 }
 
@@ -136,9 +140,31 @@ fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
     std::process::exit(0)
 }
 
+/// Active swap devices/files from `/proc/swaps` text (everything after the header line).
+fn parse_swaps(text: &str) -> Vec<String> {
+    text.lines().skip(1).filter_map(|l| l.split_whitespace().next()).map(str::to_string).collect()
+}
+
+/// Refuse to run with swap active: the kernel may write our memory (keys, plaintext) to disk, where it survives power-off.
+/// (Without swap there is also no hibernation image.) `None` = unknown (can't read /proc/swaps): treated as OK.
+fn swap_problem() -> Option<Vec<String>> {
+    let active = parse_swaps(&std::fs::read_to_string("/proc/swaps").ok()?);
+    if active.is_empty() { None } else { Some(active) }
+}
+
 fn main() {
     for w in harden() { eprintln!("warning: {w}"); }
     let cfg = parse_args();
+    if !cfg.allow_swap {
+        if let Some(active) = swap_problem() {
+            eprintln!("REFUSING TO START: swap is active ({}).\n\
+The operating system may write parts of this program's memory (keys, messages) to that swap space, where it can\n\
+survive power-off and be recovered later. Turn swap off first:\n\
+    sudo swapoff -a\n\
+(on a live system booted from USB there is normally none). To start anyway at your own risk: --allow-swap", active.join(", "));
+            std::process::exit(2);
+        }
+    }
     if cfg.path.as_ref().is_some_and(|p| !p.exists()) {
         eprintln!("No vault at {:?}: a NEW one will be created.", cfg.path.as_ref().unwrap());
     }
@@ -173,4 +199,18 @@ fn main() {
     app.panic_wipe(); // locks: vault and keys zeroized, workers stopped
     drop(app);
     wipe_terminal();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swaps_are_parsed_from_proc_text() {
+        let none = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n";
+        assert!(parse_swaps(none).is_empty());
+        let some = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile                               file\t\t524284\t\t524280\t\t-1\n/dev/zram0                              partition\t1024\t0\t100\n";
+        assert_eq!(parse_swaps(some), vec!["/swapfile", "/dev/zram0"]);
+        assert!(parse_swaps("").is_empty());
+    }
 }

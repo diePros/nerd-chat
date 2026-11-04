@@ -44,11 +44,13 @@ pub struct Config {
     pub tor: TorCfg,
     pub transport: Option<TransportFactory>,
     pub timing: Timing,
+    /// Start even though swap is active (secrets could be written to the disk by the OS). Default: refuse.
+    pub allow_swap: bool,
 }
 
 impl Config {
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, profile, tor: TorCfg::default(), transport: None, timing: Timing::default() }
+        Self { path, counter, keyfile, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), allow_swap: false }
     }
 }
 

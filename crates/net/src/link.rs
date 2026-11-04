@@ -28,7 +28,7 @@ pub fn dial<S: Read + Write>(s: &mut S, me: &ContactIdentity, peer: &Bundle, fir
     let (hs, m1) = Handshake::initiate(me, peer).map_err(|_| NetError::Handshake)?;
     wr(s, &m1)?;
     let m2 = rd(s, MSG2_LEN)?;
-    let mut sess = hs.finish(&m2).map_err(|_| NetError::Handshake)?;
+    let mut sess = hs.finish(me, &m2).map_err(|_| NetError::Handshake)?;
     let cell = sess.send(me, first).map_err(|_| NetError::Handshake)?;
     wr(s, &cell)?;
     Ok(sess)

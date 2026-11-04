@@ -109,7 +109,7 @@ FAT/exFAT sticks ignore file permissions: the vault is encrypted, but treat the 
 
 ## 7. Generic live Linux (checklist, untested on real hardware)
 ```bash
-cat /proc/swaps                  # must print only the header. If not: sudo swapoff -a   (swap can write secrets to the host disk)
+cat /proc/swaps                  # must print only the header. Seburity REFUSES to start otherwise: sudo swapoff -a   (or --allow-swap at your own risk)
 free -m                          # little RAM? add --low-mem (128 MiB key derivation instead of 512 MiB)
 mount | grep -E "STICK|media"    # 'noexec' on the stick? then:
 cp /media/$USER/STICK-A/seburity /tmp/ && chmod +x /tmp/seburity && /tmp/seburity ...
