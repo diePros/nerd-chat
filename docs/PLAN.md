@@ -81,8 +81,17 @@ docs/THREAT_MODEL.md, docs/PROTOCOL.md
 1. `core` + `vault` with test vectors, property tests, fuzzing.
 2. Two clients chat over loopback, then over Tor onion services with client auth.
 3. Contact exchange: file → QR → PAKE/SAS local link.
-4. TUI, RAM-only mode, hardening (seccomp/Landlock), reproducible build.
+4. TUI, **panic shortcut + no-cache guarantees**, `vault-mem` crate (mlock/memfd_secret, the only `unsafe`), RAM-only mode, hardening (seccomp/Landlock), reproducible build.
 5. Threat-model review, external audit, then optional I2P/Nym transports and Arti swap.
+
+## Panic shortcut (added by user request)
+A single always-active hotkey (e.g. Ctrl+\\, also reachable from every screen and while typing) that, in this order and without confirmation:
+1. Locks the vault: zeroize DK/KEK and all per-contact secret keys, drop all sessions and Noise state.
+2. Wipes plaintext: zeroize message buffers, input line, scrollback model, fingerprint/QR buffers; clear the terminal and its scrollback (alternate screen + reset sequences).
+3. Tears down the network: kill embedded tor / close control port, removing the onion services.
+4. Exits via `abort`-safe path after wiping (unlock requires the password again). Also triggered by: SIGTERM/SIGHUP, USB-removal of the vault device (optional), idle timeout, 3 failed unlocks.
+**No-cache principle:** nothing is cached by design. No history file, no log, no temp files, no clipboard, no swap (mlock + swap guard), no core dumps; plaintext lives only in mlock'd zeroizing buffers; the vault is the only thing ever written to disk, and in RAM-only mode not even that. Caveat to document: zeroizing userspace memory cannot clear CPU caches/DRAM remanence or terminal-emulator memory outside our process; on a live OS the strongest panic is power-off (Tails wipes RAM at shutdown). Optionally offer "panic + poweroff" where permitted.
+Implementation lives with the `vault-mem` crate (locked secret memory) in milestone 4; the zeroize-on-drop discipline starts now.
 
 ## Verification
 - `cargo test` + `cargo fuzz` on bundle/cell/handshake parsers; known-answer tests for KDF/AEAD.

@@ -1,0 +1,15 @@
+[package]
+name = "seburity-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek = { version = "3", features = ["zeroize"] }
+x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
+getrandom = "0.3"
+blake2 = "0.11"
+zeroize = { version = "1", features = ["derive"] }
+thiserror = "2"
+snow = { version = "0.10", default-features = false, features = ["std", "default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
+ml-kem = { version = "0.3", features = ["zeroize", "getrandom"] }
