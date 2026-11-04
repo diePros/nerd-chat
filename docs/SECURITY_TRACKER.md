@@ -30,7 +30,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 | R2-H1 | No PQ forward secrecy (static KEM only) | FIXED | ephemeral ML-KEM via KKpsk0+psk2 |
 | R2-M1 | Failed send burns counter, desync | FIXED | `failed_send_does_not_desync` |
 | R2-M2 | msg1 replay yields live-looking session | FIXED | unconfirmed responder sessions; app MUST honour `is_confirmed()` |
-| R2-M2b | No msg1 replay cache | OPEN (low) | add recent-handshake cache at transport layer |
+| R2-M2b | No msg1 replay cache | FIXED (link layer) | `HandshakeGuard` replay cache (bounded, TTL, only after success) + confirmation-cell requirement in `net::link::accept`; app must keep ONE guard per onion service |
 | R2-M3 | Noise/ML-KEM/plaintext buffers not zeroized | PARTIAL | our buffers+Signed fixed; **`snow` does not zeroize** -> fork/replace before panic-wipe claim; verify ml-kem DecapsulationKey drop zeroizes |
 | R2-M4 | Rollback only informational | PARTIAL | see R1-M3 |
 | R2-M5 | OOM kill on low-RAM open | FIXED | MemAvailable check |
@@ -44,7 +44,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 | R2-I2 | Counter overflow | FIXED | checked_add |
 | R2-I3 | One-sided fingerprint | FIXED | `safety_number` (must also cover onion addr + client-auth key once in bundle) |
 | R2-I4 | Plan reused signing key as onion identity | FIXED (plan) | implement as separate key in transport stage |
-| R2-I5 | Responder CPU DoS per msg1 | OPEN | onion client-auth + rate limit at transport |
+| R2-I5 | Responder CPU DoS per msg1 | PARTIAL | token-bucket rate limit before any crypto in `HandshakeGuard`; still needs Tor onion client-auth (net/tor stage) and a global connection cap |
 
 ## Dependency / supply-chain risks (standing)
 | ID | Risk | Status | Notes |
