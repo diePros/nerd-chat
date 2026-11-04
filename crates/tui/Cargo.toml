@@ -1,0 +1,22 @@
+[package]
+name = "seburity-tui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seburity"
+path = "src/main.rs"
+
+[dependencies]
+seburity-core = { path = "../core" }
+seburity-vault = { path = "../vault" }
+seburity-store = { path = "../store" }
+seburity-exchange = { path = "../exchange" }
+ratatui = "0.30"
+zeroize = "1"
+getrandom = "0.3"
+
+[dev-dependencies]
+seburity-vault = { path = "../vault", features = ["insecure-test-kdf"] }
+tempfile = "3"

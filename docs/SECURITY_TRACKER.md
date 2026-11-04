@@ -78,3 +78,11 @@ No Critical/High. Crypto sound (no offline dictionary attack, no reflection, no 
 | R3-I5 | LAN attacker can burn codes (inherent DoS) | ACCEPTED | UI must say "pairing interrupted, possible attacker" |
 | R3-I6 | Bundle (~1.8 KB armored) too large for easy QR (v37+) | OPEN | QR path later: consider hash-only QR + file |
 | R3-I7 | KDF/tag use plain concat | OPEN (low) | move to keyed BLAKE2b/HKDF with length prefixes |
+
+## Store + TUI stage (self-notes before review 4)
+- R1-M3 now PARTIAL+: `VaultFile` persists/checks a counter file (default `<vault>.counter`, same disk => weak). Recommend `--counter-file` on the keyfile device. UI warns when no counter file existed.
+- R1-I2: measured Strong profile = ~3.8 s create/unlock on 8-core dev box, single-threaded Argon2 (lanes not parallel). Calibrate on target hardware.
+- Panic key: App drops vault (secrets zeroize on drop), buffers cleared, terminal screen+scrollback purged (ESC[3J) and process exits. NOT covered: `snow` state (R2-M3), RAM remanence, terminal-emulator memory, other processes' copies, swap (no mlock yet: R1-H2).
+- Password policy: >=12 chars (or keyfile); 3 wrong unlocks -> exponential UI delay (in-process only; offline attack unaffected — KDF is the defence).
+- Dev fixes: tests run with optimized deps; `insecure-test-kdf` feature must never be enabled in release builds (CI check TODO under D-4).
+- Not yet in TUI: chat, message history (by design none persisted), password change UI, QR export.
