@@ -1,6 +1,6 @@
 //! LIVE test: two engines, each with its OWN tor, chat over the real Tor network. Needs `tor` in PATH + Internet.
 //!   cargo test -p seburity-chat --test live_chat -- --ignored --nocapture
-use seburity_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing};
+use seburity_chat::{transport::{BoxStream, DialFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
 use seburity_core::{bundle::Bundle, identity::ContactIdentity};
 use seburity_net::tor::spawn::{find_tor, SpawnConfig};
 use std::{thread, time::{Duration, Instant}};
@@ -42,4 +42,44 @@ fn two_engines_chat_over_the_real_tor_network() {
     assert!(wait(&ea, Duration::from_secs(90), |e| matches!(e, Event::Message { text, .. } if &***text == "hello from B over tor")));
     ea.shutdown();
     eb.shutdown();
+}
+
+/// A real Tor that refuses to host onion services (what a Tails with a restricted control port would look like).
+struct NoHostTor(TorTransport);
+impl Transport for NoHostTor {
+    fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<std::sync::mpsc::Receiver<BoxStream>>, String> {
+        if listen { Err("this tor refuses ADD_ONION".into()) } else { self.0.add_contact(me, peer, false) }
+    }
+    fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.0.remove_contact(a, b) }
+    fn dial_fn(&self) -> DialFn { self.0.dial_fn() }
+}
+
+#[test]
+#[ignore = "needs tor and network"]
+fn chat_works_over_real_tor_when_the_designated_host_cannot_host() {
+    let tor = find_tor().expect("`tor` not found in PATH");
+    // make `host` the designated host (the LARGER signing key) and let it be the one whose tor refuses to host
+    let (host, dialer) = loop {
+        let (x, y) = (ContactIdentity::generate(), ContactIdentity::generate());
+        let (bx, by) = (Bundle::from_identity(&x), Bundle::from_identity(&y));
+        if bx.sign_pub > by.sign_pub { break (x, y); }
+        if by.sign_pub > bx.sign_pub { break (y, x); }
+    };
+    let (hb, db) = (Bundle::from_identity(&host), Bundle::from_identity(&dialer));
+    let start = |tor: std::path::PathBuf| thread::spawn(move || TorTransport::start(TorSetup::Spawn(SpawnConfig::new(tor)), |_| {}).expect("tor start"));
+    let (t1, t2) = (start(tor.clone()), start(tor));
+    let (t_host, t_dialer) = (t1.join().unwrap(), t2.join().unwrap());
+    let id = [9u8; 8];
+    let timing = Timing { host_fallback_after: 2, min_backoff: Duration::from_secs(2), ..Timing::default() };
+    let e_host = Engine::start(Box::new(NoHostTor(t_host)), vec![ContactCfg::new(id, &host, db)], timing);
+    let e_dialer = Engine::start(Box::new(t_dialer), vec![ContactCfg::new(id, &dialer, hb)], timing);
+    let limit = Duration::from_secs(420);
+    assert!(wait(&e_host, limit, |e| matches!(e, Event::Connected { .. })), "the side that cannot host never connected");
+    assert!(wait(&e_dialer, limit, |e| matches!(e, Event::Connected { .. })), "the hosting fallback never connected");
+    e_host.send(id, Zeroizing::new("from the side that cannot host".into()));
+    e_dialer.send(id, Zeroizing::new("from the side that hosts".into()));
+    assert!(wait(&e_dialer, Duration::from_secs(90), |e| matches!(e, Event::Message { text, .. } if &***text == "from the side that cannot host")));
+    assert!(wait(&e_host, Duration::from_secs(90), |e| matches!(e, Event::Message { text, .. } if &***text == "from the side that hosts")));
+    e_host.shutdown();
+    e_dialer.shutdown();
 }

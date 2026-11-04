@@ -36,6 +36,8 @@ pub struct MemNet(Arc<Mutex<HashMap<[u8; 32], Sender<BoxStream>>>>);
 impl MemNet {
     pub fn new() -> Self { Self::default() }
     pub fn transport(&self) -> MemTransport { MemTransport { net: self.clone(), hosted: vec![] } }
+    /// Is a service registered under this onion key? (tests)
+    pub fn is_hosted(&self, onion_pub: &[u8; 32]) -> bool { self.0.lock().unwrap().contains_key(onion_pub) }
 }
 
 pub struct MemTransport { net: MemNet, hosted: Vec<[u8; 32]> }

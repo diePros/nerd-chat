@@ -2,6 +2,9 @@
 //!
 //! Roles: for each contact the party whose Ed25519 signing key is SMALLER dials, the other listens (hosts its onion
 //! service for that contact). So exactly one connection exists per pair and only listeners publish a service.
+//! Role negotiation (no message needed, both sides can compute it): a listener that CANNOT host (e.g. a Tails whose control
+//! port refuses ADD_ONION) flips to dialing; a dialer whose dials keep failing starts hosting as well (lazy fallback), which is
+//! exactly what a flipped peer needs. At most one side ever dials a host-capable peer, so no duplicate connections arise.
 //! A new AUTHENTICATED inbound connection replaces a stale one; strangers cannot (they fail the handshake).
 //! Messages typed while the peer is offline wait in a bounded RAM outbox; nothing is ever written to disk.
 //!
@@ -40,12 +43,15 @@ pub struct Timing {
     pub handshake: Duration,
     /// Engine-wide cap on handshake attempts per second (bounds CPU against floods without ever refusing by contact).
     pub handshakes_per_sec: f64,
+    /// A DIALING contact whose dials failed this many times in a row starts hosting too, so a peer that cannot host
+    /// (and therefore flipped to dialing) can reach us. 0 = never (strictest metadata: we only publish when needed).
+    pub host_fallback_after: u32,
 }
 
 impl Default for Timing {
     fn default() -> Self {
         Self { poll: Duration::from_millis(200), keepalive: Duration::from_secs(30), idle: Duration::from_secs(100),
-               min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(45), handshakes_per_sec: 50.0 }
+               min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(45), handshakes_per_sec: 50.0, host_fallback_after: 5 }
     }
 }
 
@@ -152,6 +158,11 @@ struct Rt {
     next_dial: Instant,
     iso: [u8; 16],
     stop: Arc<AtomicBool>,
+    /// We currently host an onion service for this contact.
+    hosting: bool,
+    /// Consecutive failed dials (reset on a connection).
+    fails: u32,
+    fallback_tried: bool,
 }
 
 struct Core {
@@ -189,19 +200,44 @@ impl Core {
         getrandom::fill(&mut iso).expect("OS RNG unavailable");
         self.next_epoch += 1;
         let epoch = self.next_epoch;
+        let mut we_dial = we_dial;
+        let mut hosting = false;
         match self.transport.add_contact(&me, &cfg.peer, !we_dial) {
-            Err(e) => self.notice(Some(cfg.id), format!("cannot reach/host for this contact: {e}")),
-            Ok(Some(rx)) => self.spawn_acceptor(cfg.id, &cfg, rx, guard, stop.clone(), epoch),
+            Err(e) if !we_dial => {
+                // we are the designated host but cannot host: FLIP to dialing (the peer will host for us after its dials fail)
+                self.notice(Some(cfg.id), format!("cannot host for this contact ({e}): dialing it instead; it must be able to host"));
+                we_dial = true;
+                if let Err(e2) = self.transport.add_contact(&me, &cfg.peer, false) { self.notice(Some(cfg.id), format!("cannot prepare dialing either: {e2}")); }
+            }
+            Err(e) => self.notice(Some(cfg.id), format!("cannot prepare dialing for this contact: {e}")),
+            Ok(Some(rx)) => { hosting = true; self.spawn_acceptor(cfg.id, cfg.secret.clone(), cfg.peer.clone(), rx, guard, stop.clone(), epoch); }
             Ok(None) => {}
         }
         self.rts.insert(cfg.id, Rt {
             secret: cfg.secret, peer: cfg.peer, my_onion, we_dial, epoch, conn: None, pending: VecDeque::new(), dialing: false,
-            backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
+            backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop, hosting, fails: 0, fallback_tried: false,
         });
     }
 
-    fn spawn_acceptor(&self, id: [u8; 8], cfg: &ContactCfg, rx: Receiver<BoxStream>, guard: Arc<Mutex<HandshakeGuard>>, stop: Arc<AtomicBool>, epoch: u64) {
-        let (secret, peer) = (cfg.secret.clone(), cfg.peer.clone());
+    /// Lazy fallback: start hosting for a contact we normally only dial.
+    fn fallback_host(&mut self, id: [u8; 8]) {
+        let Some(rt) = self.rts.get_mut(&id) else { return };
+        if rt.hosting || rt.fallback_tried { return; }
+        rt.fallback_tried = true;
+        let (secret, peer, stop, epoch) = (rt.secret.clone(), rt.peer.clone(), rt.stop.clone(), rt.epoch);
+        let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return };
+        match self.transport.add_contact(&me, &peer, true) {
+            Ok(Some(rx)) => {
+                if let Some(rt) = self.rts.get_mut(&id) { rt.hosting = true; }
+                self.spawn_acceptor(id, secret, peer, rx, Arc::new(Mutex::new(HandshakeGuard::new(0))), stop, epoch);
+                self.notice(Some(id), "could not reach this contact for a while: now hosting for it too, so it can reach you if it cannot host itself");
+            }
+            Ok(None) => {}
+            Err(e) => self.notice(Some(id), format!("cannot host for this contact either: {e}")),
+        }
+    }
+
+    fn spawn_acceptor(&self, id: [u8; 8], secret: Zeroizing<Vec<u8>>, peer: Bundle, rx: Receiver<BoxStream>, guard: Arc<Mutex<HandshakeGuard>>, stop: Arc<AtomicBool>, epoch: u64) {
         let (in_tx, gen, started, t, budget) = (self.in_tx.clone(), self.gen.clone(), self.epoch, self.t, self.budget.clone());
         let slots: Slots = Arc::new(Mutex::new(Vec::new()));
         let next_slot = Arc::new(AtomicU64::new(0));
@@ -248,6 +284,7 @@ impl Core {
                 let had = rt.conn.is_some();
                 if let Some((_, old)) = rt.conn.replace((gen, tx.clone())) { let _ = old.send(Out::Close); }
                 rt.dialing = false;
+                rt.fails = 0;
                 rt.backoff = self.t.min_backoff;
                 while let Some(m) = rt.pending.pop_front() { let _ = tx.send(Out::Text(m)); }
                 if !had { let _ = self.ev.send(Event::Connected { id }); }
@@ -265,11 +302,15 @@ impl Core {
                 if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
             }
             In::Conn(ConnEvent::DialFailed { id, epoch }) => {
+                let mut fallback = false;
                 if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) {
                     rt.dialing = false;
+                    rt.fails += 1;
                     rt.backoff = (rt.backoff * 2).min(self.t.max_backoff);
                     rt.next_dial = Instant::now() + jitter(rt.backoff);
+                    fallback = self.t.host_fallback_after > 0 && rt.fails >= self.t.host_fallback_after && !rt.hosting;
                 }
+                if fallback { self.fallback_host(id); }
             }
         }
     }
@@ -347,7 +388,7 @@ mod tests {
 
     pub fn fast() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(100), idle: Duration::from_millis(700),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0, host_fallback_after: 3 }
     }
 
     fn ident() -> (ContactIdentity, Bundle) { let i = ContactIdentity::generate(); let b = Bundle::from_identity(&i); (i, b) }
@@ -592,5 +633,78 @@ mod tests {
         assert!(wait(&el, |e| matches!(e, Event::Connected { .. })));
         say(&ed, ID, "after re-add");
         assert!(got(&el, "after re-add"));
+    }
+
+    /// Transport that refuses to host (a Tails whose control port refuses ADD_ONION) but can dial.
+    struct NoHost(crate::transport::MemTransport);
+    impl Transport for NoHost {
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+            if listen { Err("hosting refused by this tor".into()) } else { self.0.add_contact(me, peer, false) }
+        }
+        fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.0.remove_contact(a, b) }
+        fn dial_fn(&self) -> DialFn { self.0.dial_fn() }
+    }
+
+    fn start_with(t: Box<dyn Transport>, me: &ContactIdentity, peer: &Bundle) -> Engine {
+        Engine::start(t, vec![ContactCfg::new(ID, me, peer.clone())], fast())
+    }
+
+    /// The case that motivated negotiation: the DESIGNATED HOST cannot host. It flips to dialing, the designated dialer starts
+    /// hosting after its dials fail, and chat works in both directions.
+    #[test]
+    fn a_peer_that_cannot_host_is_still_reachable_through_role_flip_and_lazy_hosting() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();                          // l = designated host, d = designated dialer
+        let el = start_with(Box::new(NoHost(net.transport())), &l, &db);
+        let ed = start(&net, &d, &lb, ID);
+        assert!(connected(&el) && connected(&ed), "no connection although one side cannot host");
+        assert!(net.is_hosted(&db.onion_pub), "the dialer started hosting as a fallback");
+        say(&el, ID, "from the side that cannot host");
+        say(&ed, ID, "from the side that hosts");
+        assert!(got(&ed, "from the side that cannot host"));
+        assert!(got(&el, "from the side that hosts"));
+        // and it survives a reconnect
+        ed.shutdown();
+        assert!(wait(&el, |e| matches!(e, Event::Disconnected { .. })));
+        let ed2 = start(&net, &d, &lb, ID);
+        assert!(connected(&ed2));
+        say(&ed2, ID, "again");
+        assert!(got(&el, "again"));
+    }
+
+    /// Normal case stays quiet: a dialer that connects at once never publishes a service.
+    #[test]
+    fn no_hosting_fallback_when_the_peer_hosts_fine() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let (el, ed) = (start(&net, &l, &db, ID), start(&net, &d, &lb, ID));
+        assert!(connected(&el) && connected(&ed));
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!net.is_hosted(&db.onion_pub), "the dialer must not publish a service when it does not need to");
+        assert!(net.is_hosted(&lb.onion_pub), "the designated host does");
+    }
+
+    /// A dialer whose peer is simply offline for a long time starts hosting (documented trade-off), and not before the threshold.
+    #[test]
+    fn dialer_hosts_only_after_repeated_failed_dials() {
+        let net = MemNet::new();
+        let ((_l, lb), (d, db)) = ordered();
+        let ed = start(&net, &d, &lb, ID);
+        assert!(!net.is_hosted(&db.onion_pub));
+        let end = Instant::now() + Duration::from_secs(10);
+        while !net.is_hosted(&db.onion_pub) && Instant::now() < end { std::thread::sleep(Duration::from_millis(50)); }
+        assert!(net.is_hosted(&db.onion_pub), "fallback hosting never started");
+        assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("now hosting"))));
+    }
+
+    #[test]
+    fn two_peers_that_both_cannot_host_get_a_clear_notice_and_no_crash() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = start_with(Box::new(NoHost(net.transport())), &l, &db);
+        let ed = start_with(Box::new(NoHost(net.transport())), &d, &lb);
+        assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("cannot host"))));
+        assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("cannot host for this contact either"))));
+        assert!(!wait_for(&el, Duration::from_millis(600), |e| matches!(e, Event::Connected { .. })));
     }
 }

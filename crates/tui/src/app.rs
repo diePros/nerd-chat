@@ -1078,7 +1078,7 @@ mod tests {
     // ---------- online + chat (over the in-memory network) ----------
     fn fast_timing() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(150), idle: Duration::from_secs(2),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0, host_fallback_after: 3 }
     }
 
     fn net_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet) -> App {

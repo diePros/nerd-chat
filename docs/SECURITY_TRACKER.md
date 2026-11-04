@@ -142,7 +142,7 @@ CONFIRMED CORRECT against real tor: ADD_ONION syntax (V3Auth + ClientAuthV3 + ED
 
 ## Chat stage (self-notes before review 6)
 - New: `seburity-chat` (proto, transport, conn, engine) + TUI chat screens, online/offline toggle, `--tor-*` flags.
-- C6-roles OPEN: fixed roles (smaller signing key dials). A designated listener that cannot host cannot be reached; needs negotiation/fallback.
+- C6-roles FIXED (see role-negotiation notes below): a designated host that cannot host flips to dialing; a dialer lazily hosts after repeated failed dials.
 - C6-timing OPEN: 30 s keepalives + reconnect backoff are observable timing patterns; no constant-rate cover traffic.
 - C6-queued-label OPEN (cosmetic): a line shown as "(queued)" is not updated when it is finally delivered; there are no delivery receipts by design.
 - C6-flood OPEN (low): an authenticated peer can send messages as fast as the link allows; engine events channel is unbounded (UI drains every 200 ms; chat history capped at 500 lines; each message <= 32 KiB).
@@ -186,3 +186,8 @@ No Critical/High/Medium. VERIFIED against snow 0.10 / ml-kem 0.3.4 sources: psk2
 | R7-I3 | B answers msg1 from anyone who can build one: a classical-key-holding attacker with onion reachability learns "B is online and answers A" (never a session) | ACCEPTED | pre-existing |
 | R7-I4 | "ML-DSA not needed for authenticity" holds only INSIDE the session: Ed25519 signatures are forgeable by a quantum attacker, so signed material used OUTSIDE the session AEAD (exported transcripts, forwarded items, file sharing) would not be PQ-authentic | NOTE for file sharing | must authenticate via the session or add ML-DSA there |
 | R7-I5 | Not verified by the reviewer: constant-time of ml-kem internals beyond the final select (no KyberSlash audit); PQ security of how `kem_pub` is first established (SPAKE2 pairing and Tor are classical); no fuzzing | OPEN | external audit item |
+
+## Role negotiation notes (before review 8)
+- Flip: designated host whose `add_contact(listen)` fails -> dials instead (credentials installed). Lazy hosting: dialer hosts after `host_fallback_after` (default 5) consecutive failed dials, once per contact per session; stays hosted until the contact is removed/offline.
+- PRIVACY TRADE-OFF (documented): a dialer whose peer is offline for a long time publishes a service for it; anyone holding that bundle (R5-M4) can then see it online. Setting `host_fallback_after = 0` disables it.
+- Verified: unit tests (flip + lazy host + reconnect, no fallback when the peer hosts fine, fallback only after the threshold, both-cannot-host notice) and a LIVE test over real Tor where one side's tor refuses to host.

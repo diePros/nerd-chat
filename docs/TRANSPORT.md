@@ -77,8 +77,12 @@ The report states for every control port whether its owner check passed (`owner 
 - **One connection per pair.** For each contact the party whose Ed25519 signing key is smaller DIALS, the other LISTENS (hosts its
   onion service for that contact). Only listeners publish a service, so you are not visible online for contacts that never dial you.
   A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).
-- **Known limitation:** if you are the designated listener but cannot host (e.g. a Tails whose control port refuses `ADD_ONION`),
-  that contact cannot reach you; if you are the designated dialer it works. Role negotiation is future work (tracker C6-roles).
+- **Role negotiation (no extra message needed):** if you are the designated host but CANNOT host (e.g. a Tails whose control port
+  refuses `ADD_ONION`), you flip to dialing and say so in a notice. The contact, being the designated dialer, starts hosting too after
+  5 failed dials in a row (about a minute), which is exactly what a flipped peer needs. The cost is visible: a dialer whose peer is
+  simply offline for a long time ALSO publishes a service for it (so people holding that bundle can see you online); set
+  `Timing.host_fallback_after = 0` to forbid that if you never need to be reachable by a peer that cannot host. If neither side can
+  host, nothing connects and both get a clear notice. At most one side dials a host-capable peer, so no duplicate connections arise.
 - **Handshake availability (review 6):** NO per-contact refusal before authentication (a token bucket let anyone who could connect
   lock the real peer out). Per hosted service only a replay cache runs before the handshake; CPU is bounded by ONE engine-wide budget
   (50 handshakes/s, burst 100); every handshake has a TOTAL deadline (45 s) instead of per-read timeouts; at most 4 unauthenticated

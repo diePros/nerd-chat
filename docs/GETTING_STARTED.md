@@ -60,7 +60,7 @@ Using a Tor that is already running (Tails/Whonix/system):
 Good to know:
 - Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. Messages typed while the other person is
   offline are queued in RAM (max 50) and sent when they connect; they are lost if you quit first.
-- Who dials: the contact whose signing key is smaller dials, the other one hosts. So only one of you needs to publish an onion service.
+- Who dials: the contact whose signing key is smaller dials, the other one hosts, so normally only one of you publishes an onion service. If the hosting side cannot host (e.g. Tails refusing it) it switches to dialing and the other side starts hosting after about a minute of failed dials; you will see a notice.
 - An unverified contact shows a red warning in the chat header. Verify the safety number first (v).
 - There are no read receipts, typing indicators or timestamps (metadata). A small keepalive cell is sent every 30 s while idle.
 
