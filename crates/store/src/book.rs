@@ -19,6 +19,9 @@ pub struct Contact {
     /// User choice: host an onion service for this contact even when the roles would make us only dial (e.g. the contact
     /// flipped to dialing because its Tor cannot host but its bundle claims it can). Exposes our presence to holders of the bundle.
     pub host_anyway: bool,
+    /// The `can_host` value WE put into the bundle we gave this contact (fixed at the first export/pairing). Roles use THIS, not
+    /// whatever flag we run with today, because the contact computes its roles from what we told it.
+    pub adv_can_host: Option<bool>,
 }
 
 impl std::fmt::Debug for Contact {
@@ -50,14 +53,14 @@ impl Store {
         if self.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Duplicate); }
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).expect("OS RNG unavailable");
-        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false });
+        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None });
         Ok(self.contacts.len() - 1)
     }
 
     pub fn remove(&mut self, idx: usize) { if idx < self.contacts.len() { self.contacts.remove(idx); } }
 
     /// Serialize (wiped on drop). Format: magic | count:u16 | per contact:
-    /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1/2 trust, bit3 host_anyway, bit4 peer can_host) | [sign[32] dh[32] kem[1184]]
+    /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1/2 trust, bit3 host_anyway, bit4 peer can_host, bit5/6 advertised can_host set/value) | [sign[32] dh[32] kem[1184]]
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         let mut v = Zeroizing::new(Vec::new());
         v.extend_from_slice(MAGIC);
@@ -68,7 +71,7 @@ impl Store {
             v.extend_from_slice(c.name.as_bytes());
             v.extend_from_slice(&c.identity.secret_bytes());
             let t = match c.trust { Trust::Unverified => 0, Trust::CodeAuthenticated => 1 << 1, Trust::SafetyVerified => 1 << 2 };
-            v.push(c.peer.is_some() as u8 | t | (c.host_anyway as u8) << 3 | (c.peer.as_ref().is_some_and(|p| p.can_host) as u8) << 4);
+            v.push(c.peer.is_some() as u8 | t | (c.host_anyway as u8) << 3 | (c.peer.as_ref().is_some_and(|p| p.can_host) as u8) << 4 | (c.adv_can_host.is_some() as u8) << 5 | ((c.adv_can_host == Some(true)) as u8) << 6);
             if let Some(p) = &c.peer {
                 v.extend_from_slice(&p.sign_pub);
                 v.extend_from_slice(&p.dh_pub);
@@ -95,10 +98,12 @@ impl Store {
             if !valid_name(&name) || s.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Corrupt); }
             let identity = ContactIdentity::from_secret_bytes(r.take(SECRET_LEN)?).ok_or(StoreError::Corrupt)?;
             let flags = r.take(1)?[0];
-            let allowed = if v3 { 0b1_1111 } else { 0b111 };
+            let allowed = if v3 { 0b111_1111 } else { 0b111 };
             if flags & !allowed != 0 || (flags & 0b110) == 0b110 { return Err(StoreError::Corrupt); }
             // trust or a capability without a peer is corrupt; host_anyway may exist without one
-            if flags & 1 == 0 && flags & !0b1000 != 0 { return Err(StoreError::Corrupt); }
+            if flags & 1 == 0 && flags & !0b110_1000 != 0 { return Err(StoreError::Corrupt); }
+            if flags & 0b100_0000 != 0 && flags & 0b10_0000 == 0 { return Err(StoreError::Corrupt); } // value without 'set'
+            let adv_can_host = if flags & 0b10_0000 != 0 { Some(flags & 0b100_0000 != 0) } else { None };
             let (host_anyway, peer_can_host) = (flags & 0b1000 != 0, !v3 || flags & 0b1_0000 != 0);
             let peer = if flags & 1 != 0 {
                 let sign: [u8; 32] = r.take(32)?.try_into().unwrap();
@@ -109,7 +114,7 @@ impl Store {
                 Some(Bundle::from_parts(sign, dh, onion, auth, peer_can_host, kem).map_err(|_| StoreError::Corrupt)?)
             } else { None };
             let trust = match flags & 0b110 { 0b010 => Trust::CodeAuthenticated, 0b100 => Trust::SafetyVerified, _ => Trust::Unverified };
-            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway });
+            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host });
         }
         if !r.0.is_empty() { return Err(StoreError::Corrupt); }
         Ok(s)
@@ -136,9 +141,12 @@ mod tests {
         let a = s.add_contact("alice").unwrap();
         let b = s.add_contact("bob").unwrap();
         s.contacts[a].host_anyway = true;                                              // allowed without a peer
+        s.contacts[a].adv_can_host = Some(false);
+        s.contacts[b].adv_can_host = Some(true);
         s.contacts[b].peer = Some(Bundle::from_identity(&ContactIdentity::generate()).with_can_host(false));
         let d = Store::decode(&s.encode()).unwrap();
         assert!(d.contacts[a].host_anyway && !d.contacts[b].host_anyway);
+        assert_eq!((d.contacts[a].adv_can_host, d.contacts[b].adv_can_host), (Some(false), Some(true)));
         assert!(!d.contacts[b].peer.as_ref().unwrap().can_host, "peer's 'cannot host' must survive the vault");
         // an SBS2 vault (written before these bits existed) loads with can_host = true, host_anyway = false
         let mut s2 = Store::new();

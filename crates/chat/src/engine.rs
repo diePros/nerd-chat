@@ -69,6 +69,12 @@ impl Budget {
     }
 }
 
+/// Who dials for a contact. From the signed capabilities: a side that cannot host never hosts (so it dials); if exactly one
+/// can host that one hosts; otherwise the smaller signing key dials.
+pub fn we_dial(my_sign_pub: &[u8; 32], peer: &Bundle, our_can_host: bool) -> bool {
+    match (our_can_host, peer.can_host) { (false, _) => true, (true, false) => false, (true, true) => my_sign_pub < &peer.sign_pub }
+}
+
 /// Everything the engine needs to serve one contact. The secret is wiped on drop.
 pub struct ContactCfg { pub id: [u8; 8], secret: Zeroizing<Vec<u8>>, pub peer: Bundle, our_can_host: bool, host_anyway: bool }
 
@@ -235,11 +241,12 @@ impl Core {
     fn notice(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into() }); }
 
     fn add(&mut self, cfg: ContactCfg) {
+        // a re-add (settings changed) must not silently drop messages queued for the contact
+        let carried = self.rts.get_mut(&cfg.id).map(|r| std::mem::take(&mut r.pending)).unwrap_or_default();
         self.remove(cfg.id);
         let Some(me) = ContactIdentity::from_secret_bytes(&cfg.secret) else { return self.notice(Some(cfg.id), "invalid contact key material") };
         // Roles from the signed capabilities; the smaller signing key dials only when both (or neither) can host.
-        let key_dial = me.verifying_key().to_bytes() < cfg.peer.sign_pub;
-        let mut we_dial = match (cfg.our_can_host, cfg.peer.can_host) { (true, false) => false, (false, true) => true, _ => key_dial };
+        let mut we_dial = we_dial(&me.verifying_key().to_bytes(), &cfg.peer, cfg.our_can_host);
         if !cfg.our_can_host && !cfg.peer.can_host {
             self.notice(Some(cfg.id), "neither you nor this contact can host an onion service: no connection is possible (one of you needs a Tor that allows hosting)");
         }
@@ -271,7 +278,7 @@ impl Core {
             }
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, we_dial, epoch, conn: None, pending: VecDeque::new(), dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, we_dial, epoch, conn: None, pending: carried, dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -941,6 +948,31 @@ mod tests {
         el.reply_file(ID, xid, true);
         let (_s2, _sess2) = connect(); // the same contact dials again: the old connection is replaced
         assert!(wait(&el, |e| matches!(e, Event::FileCancelled { .. })), "UI would keep 'arriving' forever and leak its RAM budget");
+    }
+
+    /// Review 12 (L1): `--cannot-host` means NEVER publish, even where the key order would make us the host.
+    #[test]
+    fn a_side_that_cannot_host_never_publishes_even_when_neither_can() {
+        let net = MemNet::new();
+        let ((l, lb), (_d, db)) = ordered();
+        let (lb, db) = (lb.with_can_host(false), db.with_can_host(false));
+        let _el = start_caps(Box::new(net.transport()), &l, &db, false, false);      // a transport that WOULD host
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!net.is_hosted(&lb.onion_pub), "published although our_can_host = false");
+    }
+
+    /// Review 12 (M2): changing a contact's settings (re-add) must not drop messages queued for it.
+    #[test]
+    fn re_adding_a_contact_keeps_its_queued_messages() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let ed = start(&net, &d, &lb, ID);                       // peer offline: messages queue
+        for t in ["q1", "q2"] { say(&ed, ID, t); }
+        std::thread::sleep(Duration::from_millis(200));
+        ed.add(ContactCfg::new(ID, &d, lb.clone()).with_caps(true, true));   // settings changed
+        std::thread::sleep(Duration::from_millis(200));
+        let el = start(&net, &l, &db, ID);
+        assert!(got(&el, "q1") && got(&el, "q2"), "queued messages were lost by the re-add");
     }
 
     #[test]

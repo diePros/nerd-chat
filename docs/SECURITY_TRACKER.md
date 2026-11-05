@@ -198,17 +198,17 @@ No Critical/High. Opus review integrated:
 | ID | Finding | Status | Notes |
 |---|---|---|---|
 | R8-M1 | A flipped side could later lazily host too (host+dial on both sides, duplicate connections) | FIXED | `fallback_tried` is set at the flip; test `a_flipped_side_never_starts_hosting_later`. OPEN (low): duplicate-connection tie-break is still "newest wins" (deterministic rule: keep the connection the smaller key dialed) |
-| R8-M2 | Any dial failure counted toward lazy hosting (own outage, attacker-induced handshake aborts, own setup failure) | PARTIAL | FIXED: only failures of the dial itself count (`unreachable`), handshake failures never do, no fallback if dial setup failed. OPEN: still counts SOCKS/network errors of our own (should count only onion-specific Tor extended errors 0xF0/F2/F3 and only when tor is healthy); own outage of ~90 s still makes us host. Part of R8-privacy |
-| R8-privacy | Lazy hosting reveals presence to anyone holding our bundle | OPEN (user: revisit later) | policy decision: opt-in per contact / UI prompt / threshold |
+| R8-M2 | Any dial failure counted toward lazy hosting (own outage, attacker-induced handshake aborts, own setup failure) | SUPERSEDED by R12 (lazy hosting code removed; PARTIAL before) | FIXED: only failures of the dial itself count (`unreachable`), handshake failures never do, no fallback if dial setup failed. OPEN: still counts SOCKS/network errors of our own (should count only onion-specific Tor extended errors 0xF0/F2/F3 and only when tor is healthy); own outage of ~90 s still makes us host. Part of R8-privacy |
+| R8-privacy | Lazy hosting reveals presence to anyone holding our bundle | RESOLVED (see R12/R13) | decided: capability bit + opt-in `h`; timer removed |
 | R8-L3 | Panic during `Working` leaves password copy, keyfile clone, Argon2 work area in freed RAM (exit skips destructors) | PARTIAL | `cfg.keyfile` now dropped in `panic_wipe`. Mitigation: boot with `init_on_free=1` (Tails has it). Could make panic wait for the worker (bounded) |
 | R8-L4 | Panic during vault CREATE: worker may still write the vault/counter after panic or be cut mid-write (stray .tmp, counter without vault -> CounterExists) | OPEN | cancel flag checked before `save`; sweep `*.tmp` at startup |
-| R8-L5 | ADD_ONION for lazy hosting runs synchronously on the engine thread; a broken control connection silently disables DEL_ONION/auth removal (client-auth secrets stay in a shared tor); shutdown gives up after 3 s but UI says removed | PARTIAL | FIXED: `Tor::healthy_ctl` opens a fresh authenticated control connection (ownership re-checked) before unhost/forget_dial/Drop when the old one is broken; test `cleanup_uses_a_fresh_control_connection_when_the_old_one_is_broken`. OPEN: ADD_ONION still synchronous on the engine thread; UI says "removed" after the 3 s give-up |
+| R8-L5 | ADD_ONION for lazy hosting runs synchronously on the engine thread; a broken control connection silently disables DEL_ONION/auth removal (client-auth secrets stay in a shared tor); shutdown gives up after 3 s but UI says removed | SUPERSEDED by R12 (lazy hosting code removed; PARTIAL before) | FIXED: `Tor::healthy_ctl` opens a fresh authenticated control connection (ownership re-checked) before unhost/forget_dial/Drop when the old one is broken; test `cleanup_uses_a_fresh_control_connection_when_the_old_one_is_broken`. OPEN: ADD_ONION still synchronous on the engine thread; UI says "removed" after the 3 s give-up |
 | R8-I6 | `Up` clears `dialing` while an outbound thread is in flight -> two overlapping dials | OPEN | track in-flight dial by id |
 | R8-I7 | After a flip the designated dialer keeps dialing the never-existing onion | OPEN | stop/slow dialing a peer known to have flipped (needs signalling) |
 | R8-I8 | "about a minute" is optimistic (SOCKS up to 120 s + 45 s handshake per attempt; sending resets backoff) | OPEN (docs) | |
 | R8-I9 | `Screen::Working` has no cancel/timeout on a hung filesystem | OPEN (info) | F12/signals work |
 | R8-I10 | `add_onion` error after a 250 reply leaves an untracked live service until control closes | OPEN | |
-| R8-tests | missing tests: lazily hosted service removal on remove/offline/shutdown, `fails` reset on connection, create-path KDF + panic, TorTransport cleanup after flip | OPEN | |
+| R8-tests | missing tests: lazily hosted service removal on remove/offline/shutdown, `fails` reset on connection, create-path KDF + panic, TorTransport cleanup after flip | SUPERSEDED by R12 (lazy hosting code removed; OPEN before) | |
 
 ## Review 9 — file sharing (commits 90355cf..42afdf1)
 No Critical. Opus review integrated:
@@ -260,3 +260,16 @@ Round 4 not run: remaining items are minor; run one before wider use.
 | R12-3 | A malicious contact can claim "cannot host" to make us host for them (presence visible to holders of their bundle). Inherent (no other way to connect); visible in the UI | ACCEPTED/documented | |
 | R12-4 | A wrong bit (claims can host, Tor refuses): the other side must switch on `h`; not automatic by design | ACCEPTED | |
 | R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | OPEN | could run the probe at export time when a control port is configured |
+
+## Review 12 — capability/host-anyway change (commit 8f85714); fixes
+No Critical/High. Integrated:
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R13-M1 | roles used today's `--cannot-host`, not what we told this contact: later flag changes gave silent no-connect or both-host/nobody-dials | FIXED | per-contact `adv_can_host` fixed at first export/pairing (vault bits 5/6), used for roles and for every later export; tests. OPEN: no UI warning when today's flag differs from what a contact was told; a corrected peer bundle still cannot be re-imported (delete + re-pair) |
+| R13-M2 | `h` re-added the contact: dropped the queued outbox, the live connection and republished | FIXED | re-add keeps `pending`; `h` re-adds only when we dial (the only case it changes anything); test |
+| R13-L1 | `--cannot-host` still published when neither could host | FIXED | a side that cannot host never listens; test |
+| R13-L2 | stale signed bundle with the other bit can be replayed (bit not in the safety number) | PARTIAL | exports for one contact always carry the same bit; a replayed OLD bundle file only exists if the user exported differently before this fix. ACCEPTED otherwise |
+| R13-L3 | failed save left memory and vault out of step; could not switch host-anyway OFF under --cannot-host | FIXED | revert on failure; OFF always allowed |
+| R13-L4 | stale lazy-hosting rows in this tracker | FIXED | marked superseded |
+| R13-I | UI did not show our actual role | FIXED | details show "YOU host for it while online" / "you only dial"; wasted dials by a host-anyway side to a flipped peer: OPEN (info) |
+Not re-reviewed after these fixes (small, test-covered).

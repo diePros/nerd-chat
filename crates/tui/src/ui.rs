@@ -94,7 +94,6 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
         Some((name, trust, sn)) => {
             let (l, c) = trust_label(trust, sn.is_some());
             let mut v = vec![Line::from(Span::styled(name, Style::default().add_modifier(Modifier::BOLD))), Line::from(Span::styled(l, Style::default().fg(c))), Line::from("")];
-            let paired = sn.is_some();
             match sn {
                 Some(n) => {
                     v.push(Line::from("Safety number (both of you must see the SAME digits):"));
@@ -109,11 +108,11 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
                     v.push(Line::from("      l / c = pair directly over LAN with a one-time code."));
                 }
             }
-            if let Some((peer_can_host, anyway)) = app.contact_caps() {
-                if paired {
-                    v.push(Line::from(""));
-                    v.push(Line::from(format!("Hosting: contact {} host; host anyway: {} (h)", if peer_can_host { "CAN" } else { "CANNOT" }, if anyway { "ON (your presence is visible to holders of their copy of your bundle)" } else { "off" })));
-                }
+            if let Some((peer_can_host, anyway, we_host)) = app.contact_roles() {
+                v.push(Line::from(""));
+                v.push(Line::from(format!("Roles: contact {} host; {}.", if peer_can_host { "CAN" } else { "CANNOT" },
+                    if we_host { "YOU host for it while online (holders of its copy of your bundle can see when you are online)" } else { "you only dial (your online status is not published for it)" })));
+                if anyway { v.push(Line::from("Host anyway: ON (h to switch off)")); }
             }
             if let Some(fs) = app.file_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(fs, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }
             v

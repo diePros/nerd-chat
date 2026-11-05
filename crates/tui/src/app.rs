@@ -522,25 +522,43 @@ impl App {
         self.open_prompt(Prompt::SaveFile, &name);
     }
 
-    /// Option C: host an onion service for the selected contact although the roles would make us only dial.
-    fn toggle_host_anyway(&mut self) {
-        let i = self.sel;
-        let can = self.cfg.can_host;
-        let Some(c) = self.vf.as_mut().and_then(|v| v.store.contacts.get_mut(i)) else { return self.err("No contact selected.") };
-        if c.peer.is_none() { return self.err("Pair or import this contact first."); }
-        if !can { return self.err("Your Tor cannot host (--cannot-host): 'host anyway' is impossible."); }
-        c.host_anyway = !c.host_anyway;
-        let on = c.host_anyway;
-        if self.save() {
-            self.engine_add(i);
-            if on { self.err("HOST ANYWAY is ON for this contact: while online you publish an onion service for them, so anyone holding THEIR copy of your bundle can see when you are online. Use only if they cannot host (their bundle said so wrongly)."); }
-            else { self.ok("Host anyway is off: you only host for this contact when the roles say so."); }
+    /// The capability WE advertise to this contact: fixed (and saved) at the first export/pairing, so the contact's roles and ours
+    /// are computed from the same facts even if we later start with a different `--cannot-host`.
+    fn advertised(&mut self, idx: usize) -> bool {
+        let now = self.cfg.can_host;
+        let Some(c) = self.vf.as_mut().and_then(|v| v.store.contacts.get_mut(idx)) else { return now };
+        match c.adv_can_host {
+            Some(b) => b,
+            None => { c.adv_can_host = Some(now); let _ = self.save(); now }
         }
     }
 
-    pub fn contact_caps(&self) -> Option<(bool, bool)> {
+    fn our_cap(&self, c: &seburity_store::Contact) -> bool { c.adv_can_host.unwrap_or(self.cfg.can_host) }
+
+    /// Option C: host an onion service for the selected contact although the roles would make us only dial.
+    fn toggle_host_anyway(&mut self) {
+        let i = self.sel;
+        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)) else { return self.err("No contact selected.") };
+        if c.peer.is_none() { return self.err("Pair or import this contact first."); }
+        let (can, was) = (self.our_cap(c), c.host_anyway);
+        if !can && !was { return self.err("The bundle you gave this contact says your Tor cannot host: 'host anyway' is impossible."); }
+        let on = !was;
+        self.vf().store.contacts[i].host_anyway = on;
+        if !self.save() { self.vf().store.contacts[i].host_anyway = was; return; } // keep memory and vault in step
+        // only roles where we DIAL are affected; otherwise leave the running connection alone (a re-add would drop it)
+        let dials = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)).and_then(|c| c.peer.as_ref().map(|p| seburity_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can))).unwrap_or(false);
+        if dials { self.engine_add(i); }
+        if on { self.err("HOST ANYWAY is ON for this contact: while online you publish an onion service for them, so anyone holding THEIR copy of your bundle can see when you are online. Use only if they cannot host (their bundle said so wrongly)."); }
+        else { self.ok("Host anyway is off: you only host for this contact when the roles say so."); }
+    }
+
+    /// (contact can host, host anyway, WE host for it now) for the details pane.
+    pub fn contact_roles(&self) -> Option<(bool, bool, bool)> {
         let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
-        Some((c.peer.as_ref().is_none_or(|p| p.can_host), c.host_anyway))
+        let p = c.peer.as_ref()?;
+        let can = self.our_cap(c);
+        let dials = seburity_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
+        Some((p.can_host, c.host_anyway, !dials || (c.host_anyway && can)))
     }
 
     fn sel_name(&mut self) -> Option<String> {
@@ -646,7 +664,8 @@ impl App {
                 }
             }
             Prompt::Export => {
-                let can_host = self.cfg.can_host;
+                let sel = self.sel;
+                let can_host = self.advertised(sel);
                 let Some(c) = self.cur() else { return };
                 let id = &c.identity;
                 let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
@@ -737,7 +756,7 @@ impl App {
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
         if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()).map(|(o, c)| (o.with_can_host(self.cfg.can_host), c)) { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
+        let (offer, code) = match { let sel = self.sel; let adv = self.advertised(sel); PairingOffer::generate_in(self.lockout.clone()).map(|(o, c)| (o.with_can_host(adv), c)) } { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
         let (ident, id) = self.identity_clone();
@@ -779,7 +798,7 @@ impl App {
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let join = match parsed.map(|j| j.with_can_host(self.cfg.can_host)) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
+        let join = match parsed.map(|j| { let sel = self.sel; j.with_can_host(self.advertised(sel)) }) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -822,7 +841,7 @@ impl App {
 
     fn start_online(&mut self) {
         let Some(vf) = self.vf.as_ref() else { return };
-        let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| c.peer.as_ref().map(|p| ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.cfg.can_host, c.host_anyway))).collect();
+        let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| c.peer.as_ref().map(|p| ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.our_cap(c), c.host_anyway))).collect();
         self.started_ids = contacts.iter().map(|c| c.id).collect();
         let (factory, tor, timing) = (self.cfg.transport.clone(), self.cfg.tor.clone(), self.cfg.timing);
         let (tx, rx) = channel();
@@ -845,7 +864,7 @@ impl App {
     fn engine_add(&mut self, idx: usize) {
         let Some(e) = &self.engine else { return };
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)) else { return };
-        if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.cfg.can_host, c.host_anyway)); }
+        if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(c.adv_can_host.unwrap_or(self.cfg.can_host), c.host_anyway)); }
     }
 
     /// A peer bundle must not reuse an onion key that another contact already uses (ours or theirs): a crafted bundle
@@ -904,7 +923,7 @@ impl App {
         for id in self.started_ids.difference(&now) { e.remove(*id); }
         if let Some(v) = self.vf.as_ref() {
             for c in v.store.contacts.iter().filter(|c| !self.started_ids.contains(&c.id)) {
-                if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.cfg.can_host, c.host_anyway)); }
+                if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(c.adv_can_host.unwrap_or(self.cfg.can_host), c.host_anyway)); }
             }
         }
         self.started_ids = now;
@@ -1540,6 +1559,18 @@ mod tests {
         a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
         let txt = std::fs::read_to_string(&f).unwrap();
         assert!(!seburity_exchange::file::dearmor(&txt).unwrap().can_host, "the exported bundle must say that this Tor cannot host");
+        // review 12 (M1/L2): what we told a contact is FIXED: a later run without --cannot-host exports the same bit, and roles use it
+        a.cfg.can_host = true;
+        let f2 = d.path().join("own2.sbc");
+        a.handle(Key::Char('e')); a.input = f2.to_str().unwrap().into(); a.handle(Key::Enter);
+        assert!(!seburity_exchange::file::dearmor(&std::fs::read_to_string(&f2).unwrap()).unwrap().can_host, "advertised capability must not change per export");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
+        let (_, _, a_hosts) = a.contact_roles().unwrap();
+        assert!(!a_hosts, "a cannot host (as advertised), so it must not claim to host");
+        // turning host-anyway OFF stays possible when the advertised capability is 'cannot host'
+        a.vf().store.contacts[0].host_anyway = true;
+        a.handle(Key::Char('h'));
+        assert!(!a.vf.as_ref().unwrap().store.contacts[0].host_anyway && !a.error, "{}", a.status);
     }
 
     #[test]
