@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows[2]);
     }
-    f.render_widget(Paragraph::new(" Enter chat  o online/offline  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  a/r accept/decline  s save  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
@@ -108,6 +108,7 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
                     v.push(Line::from("      l / c = pair directly over LAN with a one-time code."));
                 }
             }
+            if let Some(fs) = app.file_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(fs, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }
             v
         }
     };
@@ -169,6 +170,8 @@ fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str) {
         Prompt::JoinAddr => ("Pair: connect", "Their address ip:port:".into()),
         Prompt::JoinCode(a) => ("Pair: connect", format!("One-time code shown on their screen (hidden as you type; connecting to {a}):")),
         Prompt::ConfirmDelete => ("Delete contact", "Type yes to delete this contact AND its keys:".into()),
+        Prompt::SendFile => ("Send a file", "Path of the file (JPEG/PNG/text; metadata is stripped, others refused):".into()),
+        Prompt::SaveFile => ("Save received file", "Write to (never overwrites; neutral name suggested):".into()),
         Prompt::InPerson => ("Pairing succeeded", "Was the code exchanged IN PERSON (same room)? y/n  (n = stays UNVERIFIED):".into()),
     };
     popup(f, area, title, vec![Line::from(hint), Line::from(""), Line::from(Span::styled(format!("{input}_"), Style::default().add_modifier(Modifier::BOLD))), Line::from(""), Line::from("Enter = ok   Esc = cancel")], 76, 9);
@@ -190,12 +193,15 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "              i (import theirs)  ->  v (compare safety number)",
         "   or in person on one network:  l (listen) here, c (connect) there.",
         "",
+        "Files: f send (metadata stripped, unknown types refused), a/r accept/decline an offer, s save.",
+        "       Files live in RAM only until you save them; names are neutral.",
+        "",
         "PANIC: F12 or Ctrl+\\  locks, wipes the screen+scrollback and exits at once.",
         "q / Esc quits (locks) normally.",
         "",
         "Press any key.",
     ];
-    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 76, 14);
+    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 76, 17);
     let _ = Alignment::Left;
 }
 

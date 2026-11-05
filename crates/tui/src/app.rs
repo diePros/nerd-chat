@@ -80,6 +80,9 @@ enum KdfMsg { Opened(Result<(VaultFile, OpenInfo), StoreError>), Created(Result<
 
 enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 
+/// A received, re-cleaned file waiting in RAM until the user saves it (or it is wiped on panic/quit).
+struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
+
 /// One line of conversation. RAM only, wiped when dropped.
 pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool }
 const MAX_CHAT_LINES: usize = 500;
@@ -92,7 +95,7 @@ pub enum Action { None, Quit, Panic }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
-    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson,
+    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson, SendFile, SaveFile,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -162,6 +165,9 @@ pub struct App {
     unread: HashMap<[u8; 8], u32>,
     chat_with: Option<[u8; 8]>,
     compose: ComposeBuf,
+    /// pending incoming file offers (contact id -> (transfer id, size))
+    offers: HashMap<[u8; 8], (seburity_chat::file::Xid, u32)>,
+    inbox: HashMap<[u8; 8], Received>,
     kdf_rx: Option<Receiver<KdfMsg>>,
     /// screen to return to if the derivation fails
     kdf_back: Screen,
@@ -179,6 +185,7 @@ impl App {
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
+            offers: HashMap::new(), inbox: HashMap::new(),
             kdf_rx: None, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
@@ -251,6 +258,8 @@ impl App {
         self.chat_with = None;
         self.compose.clear();
         self.code_buf.clear();
+        self.offers.clear();
+        self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
         self.kdf_rx = None; // a running derivation finishes on its own; its result is dropped (zeroized)
         self.vf = None;
@@ -437,12 +446,49 @@ impl App {
             Key::Char('c') => if self.require_no_peer() { self.open_prompt(Prompt::JoinAddr, "") },
             Key::Char('x') => self.cancel_pairing(),
             Key::Char('o') => self.toggle_online(),
+            Key::Char('f') => if self.sel_linked() { self.open_prompt(Prompt::SendFile, "") },
+            Key::Char('a') => self.reply_offer(true),
+            Key::Char('r') => self.reply_offer(false),
+            Key::Char('s') => self.start_save(),
             Key::Enter => self.open_chat(),
             Key::Char('v') => self.start_verify(),
             Key::Char('d') => if self.sel_name().is_some() { self.open_prompt(Prompt::ConfirmDelete, "") },
             _ => {}
         }
         Action::None
+    }
+
+    fn sel_id(&self) -> Option<[u8; 8]> { self.vf.as_ref()?.store.contacts.get(self.sel).map(|c| c.id) }
+
+    fn sel_linked(&mut self) -> bool {
+        match self.sel_id() {
+            None => { self.err("No contact selected."); false }
+            Some(id) if self.linked.contains(&id) && self.engine.is_some() => true,
+            Some(_) => { self.err("Files are only sent to a CONNECTED contact (never queued). Go online (o) and wait for the green dot."); false }
+        }
+    }
+
+    /// Pending offer of the selected contact: (size bucket text) for the UI.
+    pub fn file_state(&self) -> Option<String> {
+        let id = self.sel_id()?;
+        if let Some((_, len)) = self.offers.get(&id) { return Some(format!("File offered ({} KiB, cleaned): a = accept, r = decline", (*len as usize).div_ceil(1024))); }
+        self.inbox.get(&id).map(|r| format!("File received ({} KiB, in RAM only, cleaned): s = save to a neutral name", r.data.len().div_ceil(1024)))
+    }
+
+    fn reply_offer(&mut self, accept: bool) {
+        let Some(id) = self.sel_id() else { return };
+        let Some((xid, _)) = self.offers.remove(&id) else { return self.err("No file offer from this contact.") };
+        if let Some(e) = &self.engine { e.reply_file(id, xid, accept); }
+        if accept { self.ok("Accepted: receiving into RAM. It is re-cleaned here before you can save it."); } else { self.ok("Declined: nothing is transferred."); }
+    }
+
+    fn start_save(&mut self) {
+        let Some(id) = self.sel_id() else { return };
+        let Some(r) = self.inbox.get(&id) else { return self.err("No received file for this contact.") };
+        let mut b = [0u8; 4];
+        getrandom::fill(&mut b).expect("OS RNG unavailable");
+        let name = format!("file-{}.{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>(), r.ext);
+        self.open_prompt(Prompt::SaveFile, &name);
     }
 
     fn sel_name(&mut self) -> Option<String> {
@@ -517,6 +563,30 @@ impl App {
                 }
                 Err(e) => self.err(format!("{e}")),
             },
+            Prompt::SendFile => {
+                let Some(id) = self.sel_id() else { return };
+                if !self.linked.contains(&id) { return self.err("Contact is no longer connected."); }
+                let raw = match read_regular_file(&PathBuf::from(&text), seburity_chat::file::MAX_FILE as u64 * 2) {
+                    Ok(v) => Zeroizing::new(v),
+                    Err(e) => return self.err(format!("Cannot read file: {e}")),
+                };
+                let Some(eng) = &self.engine else { return };
+                match eng.send_file(id, &raw) {
+                    Ok(report) if report.is_empty() => self.ok("Offered (nothing needed removing). Waiting for the contact to accept."),
+                    Ok(report) => self.ok(format!("Offered after cleaning: {}. Waiting for the contact to accept.", report.join("; "))),
+                    Err(e) => self.err(format!("NOT sent: {e}")),
+                }
+            }
+            Prompt::SaveFile => {
+                let Some(id) = self.sel_id() else { return };
+                let Some(r) = self.inbox.get(&id) else { return };
+                use std::os::unix::fs::OpenOptionsExt;
+                let path = PathBuf::from(&text);
+                match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).and_then(|mut f| f.write_all(&r.data).and_then(|_| f.sync_all())) {
+                    Ok(()) => { self.inbox.remove(&id); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
+                    Err(e) => self.err(format!("Cannot save: {e}")),
+                }
+            }
             Prompt::Export => {
                 let Some(c) = self.cur() else { return };
                 let id = &c.identity;
@@ -804,7 +874,7 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::File { id, .. } | Event::FileSent { id } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
@@ -814,6 +884,17 @@ impl App {
                     if !(self.screen == Screen::Chat && self.chat_with == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
                 Event::Notice { text, .. } => self.status = text,
+                Event::FileOffer { id, xid, len } => {
+                    self.offers.insert(id, (xid, len));
+                    self.status = "A contact offers a file: select them, then a = accept / r = decline.".into();
+                }
+                Event::File { id, data, format, report, resanitised } => {
+                    let ext = match format { seburity_strip::Format::Jpeg => "jpg", seburity_strip::Format::Png => "png", seburity_strip::Format::Text => "txt" };
+                    self.inbox.insert(id, Received { data, ext });
+                    self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ")) }
+                        else { "File received (RAM only). Select the contact, s = save under a neutral name.".into() };
+                }
+                Event::FileSent { .. } => self.status = "File delivered.".into(),
             }
         }
     }
@@ -1233,6 +1314,49 @@ mod tests {
         type_str(&mut b, "second"); b.handle(Key::Enter);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 3));
         assert_eq!(a.contact_rows()[0].4, 0);
+    }
+
+    #[test]
+    fn file_send_accept_save_with_neutral_name_and_panic_wipes_received_files() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        // a JPEG with planted metadata, named after something sensitive
+        let seg = |m: u8, body: &[u8]| { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v };
+        let mut jpg = vec![0xFF, 0xD8];
+        jpg.extend(seg(0xE1, b"Exif\0\0GPS-SECRET-LOCATION"));
+        jpg.extend(seg(0xDB, &[0; 65])); jpg.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); jpg.extend(seg(0xC4, &[0; 17])); jpg.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0]));
+        jpg.extend(vec![0x11u8; 5000]); jpg.extend_from_slice(&[0xFF, 0xD9]);
+        let src = d.path().join("protest-photo-2026.jpg");
+        std::fs::write(&src, &jpg).unwrap();
+        a.handle(Key::Char('f'));
+        type_str(&mut a, src.to_str().unwrap()); a.handle(Key::Enter);
+        assert!(a.status.contains("Offered after cleaning"), "{}", a.status);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("offered"))), "no offer");
+        b.handle(Key::Char('a'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))), "file never arrived");
+        b.handle(Key::Char('s'));
+        let Screen::Prompt(Prompt::SaveFile) = &b.screen else { panic!("no save prompt") };
+        assert!(b.input.starts_with("file-") && b.input.ends_with(".jpg") && !b.input.contains("protest"), "neutral name expected, got {}", b.input);
+        let dst = d.path().join(&b.input);
+        b.input = dst.to_str().unwrap().into();
+        b.handle(Key::Enter);
+        let saved = std::fs::read(&dst).unwrap();
+        assert!(!saved.windows(6).any(|w| w == b"Exif\0\0") && !saved.windows(10).any(|w| w == b"GPS-SECRET"), "metadata reached the disk");
+        assert!(b.file_state().is_none(), "file leaves RAM once saved");
+        // saving never overwrites
+        // (second file) then panic with a file still in RAM
+        a.handle(Key::Char('f'));
+        type_str(&mut a, src.to_str().unwrap()); a.handle(Key::Enter);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some()));
+        b.handle(Key::Char('a'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))));
+        b.panic_wipe();
+        assert!(b.inbox.is_empty() && b.offers.is_empty());
     }
 
     #[test]

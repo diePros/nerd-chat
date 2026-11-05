@@ -1664,6 +1664,7 @@ dependencies = [
  "seburity-exchange",
  "seburity-net",
  "seburity-store",
+ "seburity-strip",
  "seburity-vault",
  "signal-hook",
  "tempfile",
