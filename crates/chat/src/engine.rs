@@ -92,7 +92,8 @@ pub enum Event {
     Connected { id: [u8; 8] },
     Disconnected { id: [u8; 8] },
     Message { id: [u8; 8], text: Zeroizing<String> },
-    Notice { id: Option<[u8; 8]>, text: String },
+    /// `alert`: security-relevant (integrity failure, refused content): the UI keeps it until acknowledged.
+    Notice { id: Option<[u8; 8]>, text: String, alert: bool },
     /// The contact offers a file (ONLY the padded size bucket is known, never the exact length). Nothing is received until `reply_file(.., true)`.
     FileOffer { id: [u8; 8], xid: file::Xid, bucket: u32 },
     /// An offer or transfer ended without a file (expired, stalled, refused, failed its check): clear any "offered" state.
@@ -106,12 +107,14 @@ pub(crate) enum ConnEvent {
     Up { id: [u8; 8], gen: u64, epoch: u64, tx: Sender<Out> },
     Down { id: [u8; 8], gen: u64 },
     Msg { id: [u8; 8], gen: u64, text: Zeroizing<String> },
-    Notice { id: [u8; 8], gen: u64, text: String },
+    Notice { id: [u8; 8], gen: u64, text: String, alert: bool },
     FileOffer { id: [u8; 8], gen: u64, xid: file::Xid, bucket: u32 },
     FileCancelled { id: [u8; 8], gen: u64 },
     File { id: [u8; 8], gen: u64, data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8], gen: u64 },
     DialFailed { id: [u8; 8], epoch: u64 },
+    /// The outbound thread has really ended (always sent last): only now may another dial start (R8-I6).
+    DialEnded { id: [u8; 8], epoch: u64 },
 }
 pub(crate) enum In { Cmd(Command), Conn(ConnEvent) }
 
@@ -238,7 +241,8 @@ fn jitter(d: Duration) -> Duration {
 type Slots = Arc<Mutex<Vec<(u64, Arc<AtomicBool>)>>>;
 
 impl Core {
-    fn notice(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into() }); }
+    fn notice(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into(), alert: false }); }
+    fn alert(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into(), alert: true }); }
 
     fn add(&mut self, cfg: ContactCfg) {
         // a re-add (settings changed) must not silently drop messages queued for the contact
@@ -334,7 +338,6 @@ impl Core {
                 let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) else { let _ = tx.send(Out::Close); return };
                 let had = rt.conn.is_some();
                 if let Some((_, old)) = rt.conn.replace((gen, tx.clone())) { let _ = old.send(Out::Close); }
-                rt.dialing = false;
                 rt.backoff = self.t.min_backoff;
                 while let Some(m) = rt.pending.pop_front() { let _ = tx.send(Out::Text(m)); }
                 if !had { let _ = self.ev.send(Event::Connected { id }); }
@@ -344,7 +347,6 @@ impl Core {
                 let Some(rt) = self.rts.get_mut(&id) else { return };
                 if rt.conn.as_ref().is_some_and(|(g, _)| *g == gen) {
                     rt.conn = None;
-                    rt.dialing = false;
                     rt.next_dial = Instant::now() + jitter(self.t.min_backoff);
                     let _ = self.ev.send(Event::Disconnected { id });
                 }
@@ -352,14 +354,14 @@ impl Core {
             In::Conn(ConnEvent::Msg { id, gen, text }) => {
                 if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
             }
-            In::Conn(ConnEvent::Notice { id, gen, text }) => { if self.is_current(id, gen) { self.notice(Some(id), text); } }
+            In::Conn(ConnEvent::Notice { id, gen, text, alert }) => { if self.is_current(id, gen) { if alert { self.alert(Some(id), text) } else { self.notice(Some(id), text) } } }
             In::Conn(ConnEvent::FileOffer { id, gen, xid, bucket }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileOffer { id, xid, bucket }); } }
             In::Conn(ConnEvent::FileCancelled { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileCancelled { id }); } }
             In::Conn(ConnEvent::File { id, gen, data, format, report, resanitised }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::File { id, data, format, report, resanitised }); } }
             In::Conn(ConnEvent::FileSent { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileSent { id }); } }
+            In::Conn(ConnEvent::DialEnded { id, epoch }) => { if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) { rt.dialing = false; } }
             In::Conn(ConnEvent::DialFailed { id, epoch }) => {
                 if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) {
-                    rt.dialing = false;
                     rt.backoff = (rt.backoff * 2).min(self.t.max_backoff);
                     rt.next_dial = Instant::now() + jitter(rt.backoff);
                 }
@@ -423,6 +425,13 @@ fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guar
 
 #[allow(clippy::too_many_arguments)]
 fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
+    outbound_inner(dial, secret, peer, iso, &in_tx, gen, id, epoch, t, live);
+    let _ = in_tx.send(In::Conn(ConnEvent::DialEnded { id, epoch }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn outbound_inner(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: &Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
+    let in_tx = in_tx.clone();
     let fail = |in_tx: &Sender<In>| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id, epoch })); };
     let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return fail(&in_tx) };
     let Ok(mut stream) = dial(&peer, &iso) else { return fail(&in_tx) };
@@ -897,7 +906,7 @@ mod tests {
         let (el, mut s, mut sess, me) = raw_peer();
         // 1. content without an accepted offer: cancelled, engine alive
         raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[9; 8], &[1; 100]));
-        assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("unexpected file data"))));
+        assert!(wait(&el, |e| matches!(e, Event::Notice { text, alert: true, .. } if text.contains("unexpected file data"))));
         // 2. out-of-policy offers (0 bytes, > cap) are declined without bothering the user
         for bucket in [0u32, 100, 20_000, (file::MAX_FILE * 2) as u32] {
             raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [3; 8], bucket, mode: 0, hash: [0; 32] }));
@@ -909,7 +918,7 @@ mod tests {
         el.reply_file(ID, xid, true);
         raw_wait_accept(&mut s, &mut sess, &me, xid);
         for c in file::build_stream(b"x").unwrap().chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[4; 8], c)); }
-        assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("integrity"))), "bad file must not be delivered");
+        assert!(wait(&el, |e| matches!(e, Event::Notice { text, alert: true, .. } if text.contains("integrity"))), "bad file must not be delivered");
         assert!(!wait_for(&el, Duration::from_millis(300), |e| matches!(e, Event::File { .. })));
     }
 

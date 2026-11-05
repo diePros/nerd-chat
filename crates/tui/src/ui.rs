@@ -28,7 +28,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     if app.screen == Screen::Wiped { f.render_widget(Clear, area); return; }
     let rows = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(2), Constraint::Length(1)]).split(area);
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 }), Constraint::Length(1)]).split(area);
     let mode = if app.is_ram_only() { "RAM-ONLY" } else { "vault" };
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(" SEBURITY ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
@@ -45,16 +45,23 @@ pub fn draw(f: &mut Frame, app: &App) {
         _ => main_view(f, rows[1], app),
     }
 
+    // Security warnings are sticky: shown above the status line until acknowledged (z), never overwritten.
+    let rows2 = if let Some(a) = app.alerts.first() {
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
+        let more = if app.alerts.len() > 1 { format!(" (+{} more)", app.alerts.len() - 1) } else { String::new() };
+        f.render_widget(Paragraph::new(format!("! {a}{more}  [z = acknowledge]")).style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)), sub[0]);
+        sub[1]
+    } else { rows[2] };
     let style = if app.error { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Cyan) };
     // Rendered straight from borrowed &str (no per-frame String copies of the pairing code).
     if let Some(p) = &app.pair_info {
-        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows2);
         f.render_widget(Paragraph::new(&***p).style(Style::default().fg(Color::Yellow)), sub[0]);
         f.render_widget(Paragraph::new(app.status.as_str()).style(style), sub[1]);
     } else {
-        f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows[2]);
+        f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows2);
     }
-    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  h host-anyway  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  h host-anyway  z ack-alert  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
@@ -113,6 +120,10 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
                 v.push(Line::from(format!("Roles: contact {} host; {}.", if peer_can_host { "CAN" } else { "CANNOT" },
                     if we_host { "YOU host for it while online (holders of its copy of your bundle can see when you are online)" } else { "you only dial (your online status is not published for it)" })));
                 if anyway { v.push(Line::from("Host anyway: ON (h to switch off)")); }
+                if let Some(told) = app.cap_mismatch() {
+                    v.push(Line::from(Span::styled(format!("NOTE: this contact was told you {} host, but you started now with {}. Roles keep following what it was told; if that is wrong, delete the contact and pair again.",
+                        if told { "CAN" } else { "CANNOT" }, if told { "--cannot-host" } else { "hosting enabled" }), Style::default().fg(Color::Yellow))));
+                }
             }
             if let Some(fs) = app.file_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(fs, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }
             v

@@ -175,7 +175,11 @@ pub struct App {
     inbox: HashMap<[u8; 8], Received>,
     /// file being cleaned on a worker (cleaning is CPU-heavy on hostile input; the UI/panic key must stay live)
     prep_rx: Option<([u8; 8], Receiver<Result<(seburity_chat::FileOut, Vec<String>), seburity_strip::StripError>>)>,
+    /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
+    pub alerts: Vec<String>,
     kdf_rx: Option<Receiver<KdfMsg>>,
+    /// Set by the panic wipe: a running vault-creation worker must not touch the disk any more.
+    kdf_cancel: Arc<AtomicBool>,
     /// screen to return to if the derivation fails
     kdf_back: Screen,
     #[cfg(test)]
@@ -194,7 +198,7 @@ impl App {
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
-            kdf_rx: None, kdf_back: Screen::Unlock,
+            alerts: Vec::new(), kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
@@ -271,6 +275,8 @@ impl App {
         self.accepted.clear();
         self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
+        self.alerts.clear();
+        self.kdf_cancel.store(true, Ordering::SeqCst); // a creating worker stops before it writes anything (R8-L4)
         self.kdf_rx = None; // a running derivation finishes on its own; its result is dropped (zeroized)
         self.vf = None;
         self.view = None;
@@ -363,8 +369,9 @@ impl App {
         if random_pw { pw = Zeroizing::new(vec![0u8; 32]); getrandom::fill(&mut pw[..]).expect("OS RNG unavailable"); }
         self.pw.clear(); self.pw2.clear();
         let (path, counter, keyfile, profile) = (self.cfg.path.clone(), self.cfg.counter.clone(), self.cfg.keyfile.clone(), self.cfg.profile);
+        let cancel = self.kdf_cancel.clone();
         self.start_kdf(Screen::CreatePw, move || {
-            KdfMsg::Created(VaultFile::create(path.as_deref(), counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice()), profile))
+            KdfMsg::Created(VaultFile::create_cancellable(path.as_deref(), counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice()), profile, &cancel))
         });
     }
 
@@ -443,6 +450,7 @@ impl App {
             Key::Up | Key::Char('k') => self.sel = self.sel.saturating_sub(1),
             Key::Down | Key::Char('j') => { if self.sel + 1 < n { self.sel += 1 } }
             Key::Char('?') => self.screen = Screen::Help,
+            Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } }
             Key::Char('n') => self.open_prompt(Prompt::NewContact, ""),
             // Neutral random default: the contact's name must not leak into filesystem metadata.
             Key::Char('e') => if self.sel_name().is_some() {
@@ -559,6 +567,13 @@ impl App {
         let can = self.our_cap(c);
         let dials = seburity_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
         Some((p.can_host, c.host_anyway, !dials || (c.host_anyway && can)))
+    }
+
+    /// Our CURRENT `--cannot-host` setting differs from what this contact was told (roles follow what it was told).
+    pub fn cap_mismatch(&self) -> Option<bool> {
+        let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
+        c.peer.as_ref()?;
+        c.adv_can_host.filter(|v| *v != self.cfg.can_host)
     }
 
     fn sel_name(&mut self) -> Option<String> {
@@ -964,7 +979,11 @@ impl App {
                     self.push_line(id, ChatLine { mine: false, text, queued: false });
                     if !(self.screen == Screen::Chat && self.chat_with == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
-                Event::Notice { text, .. } => self.status = text.chars().take(300).collect(),
+                Event::Notice { text, alert, .. } => {
+                    let t: String = text.chars().take(300).collect();
+                    if alert { if self.alerts.len() >= 5 { self.alerts.remove(0); } self.alerts.push(t.clone()); }
+                    self.status = t;
+                }
                 Event::FileOffer { id, xid, bucket } => {
                     if self.offers.contains_key(&id) || self.accepted.contains_key(&id) || self.inbox.contains_key(&id) {
                         // never silently replace a pending offer or an unsaved file
@@ -1083,6 +1102,20 @@ mod tests {
     }
 
     fn add(a: &mut App, name: &str) { a.handle(Key::Char('n')); type_str(a, name); a.handle(Key::Enter); }
+
+    #[test]
+    fn security_alerts_are_sticky_until_acknowledged() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        a.alerts.push("received file failed its integrity check".into());
+        a.alerts.push("second".into());
+        a.ok("some later status message");
+        assert_eq!(a.alerts.len(), 2, "status text never clears an alert");
+        a.handle(Key::Char('z'));
+        assert_eq!(a.alerts, vec!["second".to_string()]);
+        a.panic_wipe();
+        assert!(a.alerts.is_empty(), "panic wipes alerts");
+    }
 
     #[test]
     fn create_rules_short_and_mismatch() {
@@ -1565,6 +1598,10 @@ mod tests {
         a.handle(Key::Char('e')); a.input = f2.to_str().unwrap().into(); a.handle(Key::Enter);
         assert!(!seburity_exchange::file::dearmor(&std::fs::read_to_string(&f2).unwrap()).unwrap().can_host, "advertised capability must not change per export");
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
+        assert_eq!(a.cap_mismatch(), Some(false), "today's flag differs from what the contact was told: the UI must say so");
+        a.cfg.can_host = false;
+        assert_eq!(a.cap_mismatch(), None);
+        a.cfg.can_host = true;
         let (_, _, a_hosts) = a.contact_roles().unwrap();
         assert!(!a_hosts, "a cannot host (as advertised), so it must not claim to host");
         // turning host-anyway OFF stays possible when the advertised capability is 'cannot host'

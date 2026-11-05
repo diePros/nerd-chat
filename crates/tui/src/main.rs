@@ -29,7 +29,7 @@ fn usage() -> ! {
   --cannot-host        our Tor cannot host onion services (Tails with a restricted control port): bundles you export/pair say so,\n\
                        so the contact hosts for you (check with --probe-tor --probe-onion)\n\
   --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n\
-  --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit\n\
+  --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit (same swap rule, --allow-swap)\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
                        add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override;\n\
                        --tor-trust-control = you vouch for whoever owns the control port (e.g. a filtered port on Tails)");
@@ -62,10 +62,13 @@ fn probe_tor(args: &[String]) -> ! {
 fn strip_cmd(args: &[String]) -> ! {
     use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
-    if args.iter().any(|a| a.starts_with("--") && a != "--text") { eprintln!("unknown option for --strip"); usage() }
+    if args.iter().any(|a| a.starts_with("--") && a != "--text" && a != "--allow-swap") { eprintln!("unknown option for --strip"); usage() }
     let text = args.iter().any(|a| a == "--text");
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let [input, output] = files[..] else { usage() };
+    // the file contents sit in this process' memory: same swap and core-dump rules as the chat itself
+    for w in harden() { eprintln!("warning: {w}"); }
+    if !args.iter().any(|a| a == "--allow-swap") { refuse_if_swap(); }
     let raw = match seburity_store::read_regular_file(&PathBuf::from(input), seburity_strip::MAX_INPUT as u64) {
         Ok(v) => Zeroizing::new(v),
         Err(e) => { eprintln!("cannot read {input}: {e}"); std::process::exit(1) }
@@ -186,19 +189,21 @@ fn swap_problem() -> Option<Vec<String>> {
     if active.is_empty() { None } else { Some(active) }
 }
 
-fn main() {
-    for w in harden() { eprintln!("warning: {w}"); }
-    let cfg = parse_args();
-    if !cfg.allow_swap {
-        if let Some(active) = swap_problem() {
-            eprintln!("REFUSING TO START: swap is active ({}).\n\
+fn refuse_if_swap() {
+    if let Some(active) = swap_problem() {
+        eprintln!("REFUSING TO START: swap is active ({}).\n\
 The operating system may write parts of this program's memory (keys, messages) to that swap space, where it can\n\
 survive power-off and be recovered later. Turn swap off first:\n\
     sudo swapoff -a\n\
 (on a live system booted from USB there is normally none). To start anyway at your own risk: --allow-swap", active.join(", "));
-            std::process::exit(2);
-        }
+        std::process::exit(2);
     }
+}
+
+fn main() {
+    for w in harden() { eprintln!("warning: {w}"); }
+    let cfg = parse_args();
+    if !cfg.allow_swap { refuse_if_swap(); }
     if cfg.path.as_ref().is_some_and(|p| !p.exists()) {
         eprintln!("No vault at {:?}: a NEW one will be created.", cfg.path.as_ref().unwrap());
     }

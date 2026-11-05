@@ -1,6 +1,6 @@
 use crate::{book::Store, StoreError};
 use seburity_vault::{Profile, Vault, VaultError};
-use std::{fs, io::Write, path::{Path, PathBuf}};
+use std::{fs, io::Write, path::{Path, PathBuf}, sync::atomic::{AtomicBool, Ordering}};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -96,18 +96,26 @@ fn same_device(_: &Path, _: &Path) -> bool { true }
 impl VaultFile {
     /// Brand-new vault. Refuses to overwrite an existing file. `path = None` -> RAM-only: never touches disk.
     pub fn create(path: Option<&Path>, counter_path: Option<&Path>, pw: &[u8], keyfile: Option<&[u8]>, profile: Profile) -> Result<Self, StoreError> {
+        Self::create_cancellable(path, counter_path, pw, keyfile, profile, &AtomicBool::new(false))
+    }
+
+    /// Like `create`, but `cancel` is checked after the (slow) key derivation and right before anything
+    /// touches the disk: a panic wipe that arrives while the worker derives the key must not leave a
+    /// vault, a counter file or a half-written temp file behind (R8-L4).
+    pub fn create_cancellable(path: Option<&Path>, counter_path: Option<&Path>, pw: &[u8], keyfile: Option<&[u8]>, profile: Profile, cancel: &AtomicBool) -> Result<Self, StoreError> {
         if let Some(p) = path { if p.exists() { return Err(StoreError::Exists); } }
         // A leftover counter file means a vault existed: creating over it would silently reset rollback protection.
         let cp = counter_path.map(Path::to_path_buf).or_else(|| path.map(default_counter_path));
         if cp.as_ref().is_some_and(|c| c.exists()) { return Err(StoreError::CounterExists); }
         let vault = Vault::create(pw, keyfile, profile)?;
+        if cancel.load(Ordering::SeqCst) { return Err(StoreError::Cancelled); }
         let mut vf = Self {
             path: path.map(Path::to_path_buf),
             counter_path: counter_path.map(Path::to_path_buf).or_else(|| path.map(default_counter_path)),
             vault,
             store: Store::new(),
         };
-        vf.save()?;
+        vf.save_unless(cancel)?;
         Ok(vf)
     }
 
@@ -126,10 +134,13 @@ impl VaultFile {
 
     /// Persist the store (atomic) and advance the external rollback counter.
     /// RAM-only vaults skip all disk I/O.
-    pub fn save(&mut self) -> Result<(), StoreError> {
+    pub fn save(&mut self) -> Result<(), StoreError> { self.save_unless(&AtomicBool::new(false)) }
+
+    fn save_unless(&mut self, cancel: &AtomicBool) -> Result<(), StoreError> {
         let data = self.store.encode();
         let blob = self.vault.seal(&data)?;
         if let Some(p) = &self.path {
+            if cancel.load(Ordering::SeqCst) { return Err(StoreError::Cancelled); }
             write_atomic(p, &blob)?;
             if let Some(c) = &self.counter_path { write_atomic(c, &self.vault.counter().to_le_bytes())?; }
         }
@@ -172,6 +183,17 @@ mod tests {
         assert_eq!(info.counter, vf.counter());
         assert!(matches!(VaultFile::open(&p, None, b"bad", None), Err(StoreError::Vault(VaultError::WrongCredentials))));
         assert!(matches!(VaultFile::create(Some(&p), None, b"pw", None, P), Err(StoreError::Exists)));
+    }
+
+    #[test]
+    fn a_cancelled_create_leaves_nothing_on_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("v.vault");
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(VaultFile::create_cancellable(Some(&p), None, b"pw", None, P, &cancel), Err(StoreError::Cancelled)));
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "no vault, counter or temp file");
+        // and a later normal create is not blocked by a stray counter file
+        VaultFile::create(Some(&p), None, b"pw", None, P).unwrap();
     }
 
     #[test]

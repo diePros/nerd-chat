@@ -201,9 +201,9 @@ No Critical/High. Opus review integrated:
 | R8-M2 | Any dial failure counted toward lazy hosting (own outage, attacker-induced handshake aborts, own setup failure) | SUPERSEDED by R12 (lazy hosting code removed; PARTIAL before) | FIXED: only failures of the dial itself count (`unreachable`), handshake failures never do, no fallback if dial setup failed. OPEN: still counts SOCKS/network errors of our own (should count only onion-specific Tor extended errors 0xF0/F2/F3 and only when tor is healthy); own outage of ~90 s still makes us host. Part of R8-privacy |
 | R8-privacy | Lazy hosting reveals presence to anyone holding our bundle | RESOLVED (see R12/R13) | decided: capability bit + opt-in `h`; timer removed |
 | R8-L3 | Panic during `Working` leaves password copy, keyfile clone, Argon2 work area in freed RAM (exit skips destructors) | PARTIAL | `cfg.keyfile` now dropped in `panic_wipe`. Mitigation: boot with `init_on_free=1` (Tails has it). Could make panic wait for the worker (bounded) |
-| R8-L4 | Panic during vault CREATE: worker may still write the vault/counter after panic or be cut mid-write (stray .tmp, counter without vault -> CounterExists) | OPEN | cancel flag checked before `save`; sweep `*.tmp` at startup |
+| R8-L4 | Panic during vault CREATE: worker may still write the vault/counter after panic or be cut mid-write (stray .tmp, counter without vault -> CounterExists) | FIXED (cycle 14) | `VaultFile::create_cancellable`: the panic wipe sets a cancel flag that is checked after the KDF and right before any write; test `a_cancelled_create_leaves_nothing_on_disk`. A write already in progress (microseconds) still completes; stray `*.tmp` sweep not done (blobs are encrypted) |
 | R8-L5 | ADD_ONION for lazy hosting runs synchronously on the engine thread; a broken control connection silently disables DEL_ONION/auth removal (client-auth secrets stay in a shared tor); shutdown gives up after 3 s but UI says removed | SUPERSEDED by R12 (lazy hosting code removed; PARTIAL before) | FIXED: `Tor::healthy_ctl` opens a fresh authenticated control connection (ownership re-checked) before unhost/forget_dial/Drop when the old one is broken; test `cleanup_uses_a_fresh_control_connection_when_the_old_one_is_broken`. OPEN: ADD_ONION still synchronous on the engine thread; UI says "removed" after the 3 s give-up |
-| R8-I6 | `Up` clears `dialing` while an outbound thread is in flight -> two overlapping dials | OPEN | track in-flight dial by id |
+| R8-I6 | `Up` clears `dialing` while an outbound thread is in flight -> two overlapping dials | FIXED (cycle 14) | `dialing` now means 'outbound thread alive' and is cleared only by `DialEnded`, which the thread always sends last |
 | R8-I7 | After a flip the designated dialer keeps dialing the never-existing onion | OPEN | stop/slow dialing a peer known to have flipped (needs signalling) |
 | R8-I8 | "about a minute" is optimistic (SOCKS up to 120 s + 45 s handshake per attempt; sending resets backoff) | OPEN (docs) | |
 | R8-I9 | `Screen::Working` has no cancel/timeout on a hung filesystem | OPEN (info) | F12/signals work |
@@ -222,7 +222,7 @@ No Critical. Opus review integrated:
 | R9-L2 | no RAM cap across contacts | FIXED | 24 MiB budget for received files (accepted + in RAM), one file per contact |
 | R9-L3 | stale offers, silent replacement of unsaved files, "cleaned" overclaim | FIXED | `FileCancelled` event, offers cleared on disconnect, auto-decline while an offer/unsaved file exists, `r` discards, wording fixed; test |
 | R9-L4 | failed save left partial file; relative default name | FIXED | unlink on error; absolute neutral path shown |
-| R9-L5 | peer-driven status spam / overwriting warnings | PARTIAL | max 6 notices/min per connection, 6 bad frames then disconnect (test). OPEN: security warnings are not sticky |
+| R9-L5 | peer-driven status spam / overwriting warnings | PARTIAL | max 6 notices/min per connection, 6 bad frames then disconnect (test). FIXED (cycle 14): integrity/refusal/unexpected-data notices are `alert`s kept in a sticky red bar until acknowledged with `z` (max 5, wiped on panic) |
 | R9-L6 | offer revealed exact length; decline timing is a presence oracle | PARTIAL | offer carries only the bucket (length inside the accepted stream). OPEN: manual vs auto-decline timing (documented) |
 | R9-I | TooLarge message, stale doc claims, single-key accept without contact name | FIXED | message says 8 MiB, docs rewritten, accept/decline status names the contact |
 | R9-open | fuzz harness / standalone strip / sandboxing | PARTIAL | DONE: deterministic mutation fuzz test (`mutated_inputs_never_panic`, 16k inputs per run), `seburity --strip IN OUT`. OPEN: libFuzzer/cargo-fuzz target, seccomp/Landlock sandbox of the parsers |
@@ -237,7 +237,7 @@ No Critical, no panics (326k mutants through the zlib validator; 10,562 Python-z
 | R10-M2 | replacing a connection dropped Down/FileCancelled as stale: UI kept "File arriving..." forever and leaked its 24 MiB budget; a contact could do it on purpose | FIXED | `FileCancelled` on replacement; test `replacing_a_connection_tells_the_ui_to_clear_file_state` |
 | R10-L1/L2 | plain-text structured check only on input (leading ZWSP hid an RTF); combining cap bypass via removable chars | FIXED | check output too, removed chars no longer reset the run, shared `core::text::is_combining`; idempotence test |
 | R10-L3 | `z`/`win`/error buffers not zeroized | FIXED | `Zeroizing` for the IDAT copy and the inflate window |
-| R10-L4 | notice limiter swallowed security notices | FIXED | integrity/refusal notices bypass the limiter. OPEN: sticky warnings in the UI |
+| R10-L4 | notice limiter swallowed security notices | FIXED | integrity/refusal notices bypass the limiter. FIXED (cycle 14): sticky alert bar |
 | R10-I | fuzz test did not reach the validator; `--strip` ignored unknown flags | FIXED | CRC-fixing mutator (12k mutants/run), unknown flags rejected |
 
 ## Review 11 — file sharing, round 3 (commit 7f043e6)
@@ -249,7 +249,7 @@ No Critical/High; all Review-10 fixes verified (hostile-PNG worst case 2.2 s rel
 | R11-L1 | 20k-block cap refused valid PNGs (memLevel=1, per-row sync flush); 4 s deadline hardware-dependent | FIXED | only EMPTY blocks capped (2000), total 1M, deadline 8 s (cleaning is off the UI thread). Known: a much slower machine may still refuse a huge hostile-shaped valid PNG after transfer |
 | R11-L2 | structured-text refusal bypassed by NBSP/ideographic space/combining marks; e-mail headers not caught; docs overclaimed | FIXED | skip all blanks/format/combining chars; RFC822 header detection; test |
 | R11-L3 | error-path copies of images not wiped | FIXED | `Zeroizing` output buffers in jpeg/png/text |
-| R11-I | misleading palette report text; `--strip` runs before the swap check; replaced-connection transfers vanish without a notice | PARTIAL | report text fixed; OPEN: swap check for `--strip`, notice on replacement |
+| R11-I | misleading palette report text; `--strip` runs before the swap check; replaced-connection transfers vanish without a notice | PARTIAL | report text fixed; FIXED (cycle 14): `--strip` applies the swap refusal (`--allow-swap` to override) and non-dumpable hardening. OPEN: notice on replacement |
 Round 4 not run: remaining items are minor; run one before wider use.
 
 ## Role decision (R8-privacy resolved) — bundle v4 capability + host-anyway (this commit)
@@ -265,7 +265,7 @@ Round 4 not run: remaining items are minor; run one before wider use.
 No Critical/High. Integrated:
 | ID | Finding | Status | Notes |
 |---|---|---|---|
-| R13-M1 | roles used today's `--cannot-host`, not what we told this contact: later flag changes gave silent no-connect or both-host/nobody-dials | FIXED | per-contact `adv_can_host` fixed at first export/pairing (vault bits 5/6), used for roles and for every later export; tests. OPEN: no UI warning when today's flag differs from what a contact was told; a corrected peer bundle still cannot be re-imported (delete + re-pair) |
+| R13-M1 | roles used today's `--cannot-host`, not what we told this contact: later flag changes gave silent no-connect or both-host/nobody-dials | FIXED | per-contact `adv_can_host` fixed at first export/pairing (vault bits 5/6), used for roles and for every later export; tests. FIXED (cycle 14): details pane warns when today's flag differs from what the contact was told. OPEN: a corrected peer bundle still cannot be re-imported (delete + re-pair) |
 | R13-M2 | `h` re-added the contact: dropped the queued outbox, the live connection and republished | FIXED | re-add keeps `pending`; `h` re-adds only when we dial (the only case it changes anything); test |
 | R13-L1 | `--cannot-host` still published when neither could host | FIXED | a side that cannot host never listens; test |
 | R13-L2 | stale signed bundle with the other bit can be replayed (bit not in the safety number) | PARTIAL | exports for one contact always carry the same bit; a replayed OLD bundle file only exists if the user exported differently before this fix. ACCEPTED otherwise |

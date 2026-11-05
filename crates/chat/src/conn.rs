@@ -103,10 +103,10 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
         if n_window.get().elapsed() > Duration::from_secs(60) { n_window.set(Instant::now()); n_count.set(0); }
         n_count.set(n_count.get() + 1);
         if n_count.get() > 6 { return true; }
-        ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok()
+        ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into(), alert: false })).is_ok()
     };
     // security-relevant notices (integrity failure, refused content) are never rate-limited away
-    let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok();
+    let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into(), alert: true })).is_ok();
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::FileCancelled { id, gen })).is_ok();
     let mut bad_frames = 0u32;
     'conn: loop {
@@ -215,7 +215,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         if bad {
                             inx = None; bad_frames += 1;
                             if bad_frames > 5 { break; } // an authenticated peer that keeps sending garbage is cut off
-                            if !notice(&ev, "unexpected file data: transfer cancelled") || !cancelled(&ev) { break; }
+                            if !alert(&ev, "unexpected file data: transfer cancelled") || !cancelled(&ev) { break; }
                         }
                         if done.is_some() {
                             let x = inx.take().expect("set above");
