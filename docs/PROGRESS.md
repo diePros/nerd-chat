@@ -16,10 +16,11 @@ spelled `Bash` (capital B).
 | 15 | (this commit) | integrate review 13: no `h` while starting, alert flood protection, capability fixed only after export/pairing succeeds, panic waits for create worker | not yet re-reviewed | yes (1.50 MB static) | yes, 2/2 pass |
 | 16 | (this commit) | key rotation (R5-M4): fingerprint = identity keys only, SBS4 vault (next_transport, peer_old), rotate frames, old+new service, `K` key, docs/KEY_ROTATION.md | yes (review 14), fixes in cycle 17 | yes (1.5 MB static) | yes, 3/3 live tests pass |
 | 17 | (this commit) | review 14 fixes: 1 rotation/contact/hour, no re-add on DONE, wider collision check, own rotation independent, no export while pending, fingerprint v2 | not re-reviewed | yes | yes, 3/3 |
+| 18 | (this commit) | dial fallback to the old address while the peer's rotation is unfinished; generation counter rejected | small, reviewed with the next chunk | yes | yes, 3/3 |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
-2. Open from review 14: signed transport generation counter (refuse old bundles), dial fallback to the old onion + ADD_ONION retry (R15-L1). Then random virtual port per contact, vanguards.
+2. Open from review 14: ADD_ONION retry for the new service (R15-L1). Generation counter evaluated and rejected (see tracker R15-L3). Then random virtual port per contact, vanguards.
 3. R12-5: probe hosting capability automatically at export.
 4. Sandbox the file parsers (seccomp/Landlock) and a cargo-fuzz target (needs the user's OK for new tooling/deps).
 5. `snow` does not zeroize: patch or replace.

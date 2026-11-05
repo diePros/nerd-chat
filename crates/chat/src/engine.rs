@@ -231,6 +231,9 @@ struct Rt {
     my_onion: [u8; 32],
     /// Our CURRENT (onion, auth) public keys, announced on every connection (see `Up`): lets the peer learn that a rotation finished.
     my_keys: [u8; 64],
+    /// While the peer's rotation is unfinished: the peer's OLD address, tried when the new one cannot be reached (e.g. its new
+    /// service failed to start in this session), with our client-auth installed for it.
+    fallback: Option<Bundle>,
     /// Pending rotation: (onion pub, auth pub, hosted?) of the NEW transport keys; `hosted` = the new service really runs.
     next: Option<([u8; 32], [u8; 32], bool)>,
     we_dial: bool,
@@ -327,8 +330,16 @@ impl Core {
             }
             next = Some((no, na, up));
         }
+        // dial fallback to the peer's previous address (only while its rotation is unfinished)
+        let mut fallback = None;
+        if we_dial {
+            if let Some((o, a)) = cfg.peer_old {
+                let fb = cfg.peer.clone().with_transport(o, a);
+                match self.transport.add_contact_ex(&me, &fb, &[], false) { Ok(_) => fallback = Some(fb), Err(_) => {} }
+            }
+        }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, next, we_dial, epoch, conn: None, pending: carried, dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, next, we_dial, epoch, conn: None, pending: carried, dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -367,6 +378,7 @@ impl Core {
             if let Some((_, tx)) = &rt.conn { let _ = tx.send(Out::Close); let _ = self.ev.send(Event::Disconnected { id }); }
             self.transport.remove_contact(&rt.my_onion, &rt.peer.onion_pub);
             if let Some((no, _, _)) = rt.next { self.transport.remove_contact(&no, &rt.peer.onion_pub); }
+            if let Some(fb) = &rt.fallback { self.transport.remove_contact(&[0u8; 32], &fb.onion_pub); } // forget our client-auth for the old address
         }
     }
 
@@ -471,9 +483,9 @@ impl Core {
         for id in ids {
             let rt = self.rts.get_mut(&id).expect("exists");
             rt.dialing = true;
-            let (dial, secret, peer, iso, in_tx, gen, epoch, t) = (self.dial.clone(), rt.secret.clone(), rt.peer.clone(), rt.iso, self.in_tx.clone(), self.gen.clone(), rt.epoch, self.t);
+            let (dial, secret, peer, fallback, iso, in_tx, gen, epoch, t) = (self.dial.clone(), rt.secret.clone(), rt.peer.clone(), rt.fallback.clone(), rt.iso, self.in_tx.clone(), self.gen.clone(), rt.epoch, self.t);
             let live = self.live.clone();
-            thread::spawn(move || outbound(dial, secret, peer, iso, in_tx, gen, id, epoch, t, live));
+            thread::spawn(move || outbound(dial, secret, peer, fallback, iso, in_tx, gen, id, epoch, t, live));
         }
     }
 
@@ -503,17 +515,20 @@ fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guar
 }
 
 #[allow(clippy::too_many_arguments)]
-fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
-    outbound_inner(dial, secret, peer, iso, &in_tx, gen, id, epoch, t, live);
+fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, fallback: Option<Bundle>, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
+    outbound_inner(dial, secret, peer, fallback, iso, &in_tx, gen, id, epoch, t, live);
     let _ = in_tx.send(In::Conn(ConnEvent::DialEnded { id, epoch }));
 }
 
 #[allow(clippy::too_many_arguments)]
-fn outbound_inner(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: &Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
+fn outbound_inner(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, fallback: Option<Bundle>, iso: [u8; 16], in_tx: &Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
     let in_tx = in_tx.clone();
     let fail = |in_tx: &Sender<In>| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id, epoch })); };
     let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return fail(&in_tx) };
-    let Ok(mut stream) = dial(&peer, &iso) else { return fail(&in_tx) };
+    let mut stream = match dial(&peer, &iso) {
+        Ok(s) => s,
+        Err(_) => match fallback.as_ref().map(|fb| dial(fb, &iso)) { Some(Ok(s)) => s, _ => return fail(&in_tx) },
+    };
     let r = {
         let mut ds = DeadlineStream { s: &mut stream, end: Instant::now() + t.handshake, abort: Arc::new(AtomicBool::new(false)) };
         link::dial(&mut ds, &me, &peer, &proto::keepalive())
@@ -836,6 +851,20 @@ mod tests {
         say(&ea, ID, "after rotation");
         assert!(got(&eb, "after rotation"));
         // a rotation that cannot host its new service never proposes it
+    }
+
+    #[test]
+    fn a_switched_dialer_falls_back_to_the_old_address_while_the_new_one_is_not_hosted() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();                          // l hosts (old address only: its new service never started)
+        let fresh = ContactIdentity::generate();
+        let new_peer = lb.clone().with_transport(fresh.onion_public(), fresh.auth_public().to_bytes());
+        let el = start(&net, &l, &db, ID);
+        let ed = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &d, new_peer).with_rotation(&d, None, Some((lb.onion_pub, lb.auth_pub)))], fast());
+        assert!(connected(&el) && connected(&ed), "the dialer must reach the old address when the new one is down");
+        say(&ed, ID, "via fallback");
+        assert!(got(&el, "via fallback"));
+        ed.shutdown(); el.shutdown();
     }
 
     #[test]
