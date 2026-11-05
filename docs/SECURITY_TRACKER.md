@@ -31,7 +31,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 | R2-M1 | Failed send burns counter, desync | FIXED | `failed_send_does_not_desync` |
 | R2-M2 | msg1 replay yields live-looking session | FIXED | unconfirmed responder sessions; app MUST honour `is_confirmed()` |
 | R2-M2b | No msg1 replay cache | FIXED (link layer) | `HandshakeGuard` replay cache (bounded, TTL, only after success) + confirmation-cell requirement in `net::link::accept`; app must keep ONE guard per onion service |
-| R2-M3 | Noise/ML-KEM/plaintext buffers not zeroized | PARTIAL | our buffers+Signed fixed; **`snow` does not zeroize** -> fork/replace before panic-wipe claim; verify ml-kem DecapsulationKey drop zeroizes |
+| R2-M3 | Noise/ML-KEM/plaintext buffers not zeroized | PARTIAL | our buffers+Signed fixed; `snow` is now vendored with Drop-time wiping (cycle 19, see D-3); verify ml-kem DecapsulationKey drop zeroizes (OPEN) |
 | R2-M4 | Rollback only informational | PARTIAL | see R1-M3 |
 | R2-M5 | OOM kill on low-RAM open | FIXED | MemAvailable check |
 | R2-L1 | Low-order X25519 accepted | FIXED | `check_dh_pub` in decode + handshake |
@@ -51,7 +51,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 |---|---|---|---|
 | D-1 | `ml-kem` never independently audited (upstream says so) | ACCEPTED (hybrid with X25519) | revisit on audit |
 | D-2 | `spake2` 0.4 (magic-wormhole's crate; not RustCrypto-audited) used for local pairing | ACCEPTED | second factor = safety number compare; revisit with audited CPace |
-| D-3 | `snow` has no zeroize-on-drop | OPEN | see R2-M3 |
+| D-3 | `snow` has no zeroize-on-drop | PARTIAL (cycle 19) | vendored `vendor/snow` (0.10.0 + Drop-time wiping of DH/cipher keys, chaining key/hash, PSKs, and of HKDF/DH/split temporaries; see vendor/snow/SEBURITY-PATCH.md). OPEN: compiler stack copies, `Copy` checkpoint of the symmetric state, blake2 internal buffers |
 | D-4 | all crates need `cargo-deny`/`cargo-vet` + pinned Cargo.lock + reproducible build | PARTIAL | DONE: `rust-toolchain.toml` pin (1.98.1), `scripts/repro-check.sh` (two builds in different dirs, `--locked`, path remapping: IDENTICAL sha256 on this machine). OPEN: `deny.toml` is written but NEVER RUN (cargo-deny not installed; ask before installing), cargo-vet not set up, reproducibility across different machines/toolchain installs unverified, no CI |
 
 ## Exchange stage (pre-review self-notes)
@@ -178,7 +178,7 @@ No Critical. Verified OK: only the pinned peer gets a session; no contact can im
 No Critical/High/Medium. VERIFIED against snow 0.10 / ml-kem 0.3.4 sources: psk2 is mixed at the end of msg2 (`Token::Psk(2)` -> `mix_key_and_hash`), so the msg2 AEAD, the transport keys and the session id all depend on `ss_i`; every responder path (`accept`, `accept_shared`, pairing, chat) returns a session only after a valid first cell, which needs the initiator's static ML-KEM secret; KCI now needs two independent breaks; psk framing is unambiguous (fixed lengths, distinct labels); forged `ct_e`/`ct_i` fail identically (implicit rejection, constant-time select); no panic reachable from msg1/msg2; decrypting a recorded session needs (ephemeral ML-KEM secret or ML-KEM break) AND (ephemeral X25519 or DLog break) plus the static secrets.
 | ID | Finding | Status | Notes |
 |---|---|---|---|
-| R7-L1 | `snow` never zeroizes (psk0/psk2, chaining key, DH outputs, transport keys stay in freed heap after a session) — now carries more secrets | OPEN (= R2-M3/D-3) | mitigations in place: swap guard, no core dumps, non-dumpable; real fix = patch/replace snow |
+| R7-L1 | `snow` never zeroizes (psk0/psk2, chaining key, DH outputs, transport keys stay in freed heap after a session) — now carries more secrets | PARTIAL (= R2-M3/D-3, cycle 19: vendored patch) | mitigations in place: swap guard, no core dumps, non-dumpable; real fix = patch/replace snow |
 | R7-L2 | PQ-impostor test only checked the impostor's own `finish` | FIXED | `link` test: responder returns `Unconfirmed` for an impostor with all classical keys that sends a cell anyway |
 | R7-L3 | `respond` returned a session that could already `send` | FIXED | unconfirmed sessions refuse `send` (`Error::Unconfirmed`) until the first valid cell arrives |
 | R7-I1 | `finish(me)` did not check it is the identity that initiated | FIXED | |
