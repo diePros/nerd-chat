@@ -52,7 +52,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 | D-1 | `ml-kem` never independently audited (upstream says so) | ACCEPTED (hybrid with X25519) | revisit on audit |
 | D-2 | `spake2` 0.4 (magic-wormhole's crate; not RustCrypto-audited) used for local pairing | ACCEPTED | second factor = safety number compare; revisit with audited CPace |
 | D-3 | `snow` has no zeroize-on-drop | OPEN | see R2-M3 |
-| D-4 | all crates need `cargo-deny`/`cargo-vet` + pinned Cargo.lock + reproducible build | OPEN | milestone 4 |
+| D-4 | all crates need `cargo-deny`/`cargo-vet` + pinned Cargo.lock + reproducible build | PARTIAL | DONE: `rust-toolchain.toml` pin (1.98.1), `scripts/repro-check.sh` (two builds in different dirs, `--locked`, path remapping: IDENTICAL sha256 on this machine). OPEN: `deny.toml` is written but NEVER RUN (cargo-deny not installed; ask before installing), cargo-vet not set up, reproducibility across different machines/toolchain installs unverified, no CI |
 
 ## Exchange stage (pre-review self-notes)
 - Pairing code = 10 digits, ONE online guess per code (burned on failure). App MUST regenerate the code after any failure and rate-limit attempts.
