@@ -132,13 +132,29 @@ pub struct Tor {
     /// Random per-process SOCKS username (isolation); never a recognisable constant.
     iso_user: String,
     _spawned: Option<spawn::SpawnedTor>,
+    /// Opens a FRESH authenticated control connection (used for cleanup when the current one is broken).
+    reconnect: Option<Reconnect>,
 }
+
+type Reconnect = Box<dyn Fn() -> Result<Controller<Box<dyn Stream>>, TorError> + Send>;
 
 impl Tor {
     pub(crate) fn from_parts(ctl: Controller<Box<dyn Stream>>, socks: Addr, spawned: Option<spawn::SpawnedTor>) -> Self {
         let mut r = [0u8; 8];
         getrandom::fill(&mut r).expect("OS RNG unavailable");
-        Self { ctl, socks, hosted: vec![], dialed: vec![], iso_user: r.iter().map(|b| format!("{b:02x}")).collect(), _spawned: spawned }
+        Self { ctl, socks, hosted: vec![], dialed: vec![], iso_user: r.iter().map(|b| format!("{b:02x}")).collect(), _spawned: spawned, reconnect: None }
+    }
+
+    pub(crate) fn with_reconnect(mut self, f: Reconnect) -> Self { self.reconnect = Some(f); self }
+
+    /// After an error the control connection is poisoned and every later DEL_ONION / ONION_CLIENT_AUTH_REMOVE would fail
+    /// silently, leaving our client-auth secrets in a (possibly shared) tor. Swap in a fresh connection first. Dropping the
+    /// old one also makes tor remove the (non-detached) services it created.
+    fn healthy_ctl(&mut self) {
+        if !self.ctl.is_broken() { return; }
+        if let Some(f) = &self.reconnect {
+            if let Ok(c) = f() { self.ctl = c; }
+        }
     }
 
     /// EXTERNAL mode: authenticate to an already running tor. SOCKS defaults to what tor itself reports.
@@ -155,7 +171,15 @@ impl Tor {
             Some(s) => s,
             None => ctl.socks_listeners()?.into_iter().next().ok_or_else(|| TorError::Other("tor reports no SOCKS listener".into()))?,
         };
-        Ok(Self::from_parts(ctl, socks, None))
+        let (control, password, cookie) = (control.clone(), pref.password.clone(), pref.cookie_path.clone());
+        Ok(Self::from_parts(ctl, socks, None).with_reconnect(Box::new(move || {
+            // the endpoint was verified (or trusted) when we first connected; re-check ownership anyway
+            let (stream, check) = open_control(&control, Duration::from_secs(10))?;
+            if !check.verified && !trust_control { return Err(TorError::Auth("control endpoint no longer verified".into())); }
+            let mut c = Controller::new(stream);
+            c.authenticate(&AuthPref { password: password.clone(), cookie_path: cookie.clone(), peer_verified: true })?;
+            Ok(c)
+        })))
     }
 
     /// SPAWN mode: start our own tor, wait until it has bootstrapped (reports progress 0..=100).
@@ -174,7 +198,12 @@ impl Tor {
             std::thread::sleep(Duration::from_millis(500));
         }
         let socks = sp.socks.clone();
-        Ok(Self::from_parts(ctl, socks, Some(sp)))
+        let (control, cookie) = (sp.control.clone(), sp.cookie_path());
+        Ok(Self::from_parts(ctl, socks, Some(sp)).with_reconnect(Box::new(move || {
+            let mut c = Controller::new(open(&control, Duration::from_secs(10))?);
+            c.authenticate(&AuthPref { password: None, cookie_path: Some(cookie.clone()), peer_verified: true })?;
+            Ok(c)
+        })))
     }
 
     pub fn bootstrap_progress(&mut self) -> Result<u8, TorError> { self.ctl.bootstrap_progress() }
@@ -184,6 +213,7 @@ impl Tor {
 
     /// Stop hosting a service (best effort).
     pub fn unhost(&mut self, service_id: &str) {
+        self.healthy_ctl();
         if let Some(i) = self.hosted.iter().position(|h| h == service_id) {
             let id = self.hosted.remove(i);
             let _ = self.ctl.del_onion(&id);
@@ -210,6 +240,7 @@ impl Tor {
 
     /// Remove the credential installed by `allow_dial` (best effort).
     pub fn forget_dial(&mut self, peer_onion_pub: &[u8; 32]) {
+        self.healthy_ctl();
         let id = service_id(peer_onion_pub);
         if let Some(i) = self.dialed.iter().position(|d| *d == id) {
             let id = self.dialed.remove(i);
@@ -241,6 +272,7 @@ impl Dialer {
 
 impl Drop for Tor {
     fn drop(&mut self) {
+        self.healthy_ctl();
         for id in std::mem::take(&mut self.hosted) { let _ = self.ctl.del_onion(&id); }
         for id in std::mem::take(&mut self.dialed) { let _ = self.ctl.client_auth_remove(&id); }
     }
@@ -273,6 +305,27 @@ mod tests {
         let seen = h.join().unwrap();
         assert_eq!(seen[2], format!("ONION_CLIENT_AUTH_REMOVE {id1}"));
         assert_eq!(seen[3], format!("ONION_CLIENT_AUTH_REMOVE {id2}"));
+    }
+
+    /// R8-L5: after a control-connection error, cleanup must still reach tor (fresh connection), not fail silently.
+    #[test]
+    fn cleanup_uses_a_fresh_control_connection_when_the_old_one_is_broken() {
+        let me = ContactIdentity::generate();
+        let p1 = Bundle::from_identity(&ContactIdentity::generate());
+        let id1 = service_id(&p1.onion_pub);
+        let (ctl, h) = control::tests::fake(vec![("ONION_CLIENT_AUTH_ADD ", "250 OK\r\n".into())]);
+        let (fresh, h2) = control::tests::fake(vec![("ONION_CLIENT_AUTH_REMOVE ", "250 OK\r\n".into())]);
+        let fresh = std::sync::Mutex::new(Some(fresh.into_inner()));
+        let (sock, _keep) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut tor = Tor::from_parts(Controller::new(Box::new(ctl.into_inner()) as Box<dyn Stream>), Addr::Unix("/nonexistent".into()), None)
+            .with_reconnect(Box::new(move || Ok(Controller::new(Box::new(fresh.lock().unwrap().take().ok_or(TorError::Io("once".into()))?) as Box<dyn Stream>))));
+        drop(sock);
+        tor.allow_dial(&me, &p1).unwrap();
+        h.join().unwrap(); // the first fake is gone: the next command on it fails and poisons it
+        let _ = tor.ctl.command("GETINFO version");
+        assert!(tor.ctl.is_broken());
+        tor.forget_dial(&p1.onion_pub);
+        assert_eq!(h2.join().unwrap()[0], format!("ONION_CLIENT_AUTH_REMOVE {id1}"));
     }
 
     #[test]

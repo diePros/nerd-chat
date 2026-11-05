@@ -161,6 +161,8 @@ fn b64_secret(key: &[u8]) -> Zeroizing<Vec<u8>> {
 impl<S: Read + Write> Controller<S> {
     pub fn new(s: S) -> Self { Self { s, buf: Vec::new(), authenticated: false, broken: false } }
     pub fn into_inner(self) -> S { self.s }
+    /// True after any I/O or protocol error (the connection is never reused).
+    pub fn is_broken(&self) -> bool { self.broken }
 
     fn fail<T>(&mut self, e: TorError) -> Result<T, TorError> { self.broken = true; Err(e) }
 
