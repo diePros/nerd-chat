@@ -48,7 +48,11 @@ or if any of these cannot be applied. A parser crash, endless loop or memory bom
 helper's answer is decoded as untrusted input (`seburity_strip::wire`: exact lengths, caps, control characters neutralised).
 `--no-sandbox` cleans in-process instead.
 
-**This is crash/DoS containment, NOT a sandbox against a compromised parser** (review 17): rlimits only cap descriptor numbers
-(NOFILE/FSIZE/NPROC are also set but a compromised helper can free descriptor slots, write through a shared mmap, unlink/rename,
-`execve`, signal the parent). It could still read the user's files, reach the network, and modify files. Real containment needs
-seccomp or Landlock (a dependency or `unsafe`): open, user decision.
+**Syscall allowlist (cycle 26).** Before it reads any input the helper installs a seccomp-BPF allowlist (crate `crates/sandbox`, the only
+crate with `unsafe`: ONE `prctl` call): `read` on fd 0, `write` on fd 1/2, `mmap` without PROT_EXEC, `munmap`, `mremap`, `madvise`,
+`brk`, `sigaltstack`, `clock_gettime`, `getrandom`, `exit_group`. Everything else kills the helper (SIGSYS): no `open`, `socket`,
+`execve`, `unlink`, `rename`, `kill`, `ptrace`, `mprotect`, `close`, `fork`, 32-bit/x32 syscalls. The filter is tested by an in-test
+BPF interpreter over all syscall numbers + 200k random inputs, by mutation checks, and against the real kernel (each forbidden
+call kills a child with SIGSYS). x86_64 Linux only: elsewhere (or without seccomp) the helper refuses and files are refused unless
+`--no-sandbox` is given. Residual: the parser can still lie in its answer (strict decoder) and burn CPU/memory up to the limits;
+Tor, the vault and keys never exist in the helper. The rlimits (NOFILE/FSIZE/NPROC) are defence in depth, not the boundary.

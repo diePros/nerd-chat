@@ -22,6 +22,7 @@ spelled `Bash` (capital B).
 | 23 | (this commit) | review 16 fixes: fallback ends on DONE announcement, stronger tests, broken-control notice | not re-reviewed | yes | yes, 3/3 |
 | 24 | f4e8993 | file cleaning in a resource-limited helper process (`--clean-worker`), strict wire decoding, `--no-sandbox` | yes (1.53 MB static; --strip through helper verified) | n/a (no transport change) |
 | 25 | (this commit) | review 17 fixes: honest sandbox claims, no_new_privs/setsid/PDEATHSIG, deadline-bound wait, zeroizing | not re-reviewed | yes (static, --strip via helper OK) | n/a |
+| 26 | (this commit) | seccomp allowlist for the cleaning helper: crates/sandbox (one unsafe prctl), interpreter+mutation+kernel tests | review requested | yes | n/a |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
@@ -39,7 +40,7 @@ unfixed Medium+; workspace tests, static musl build, repro check and live Tor te
 
 ## WAITING FOR THE USER (blocks the pre-production gate)
 1. (done: cargo-deny passes, cargo-vet initialised; 210 crates only exempted, see tracker D-4)
-2. Parser sandbox: needs either a new dependency (e.g. a Landlock/seccomp crate) or a small `unsafe` module; a design decision, see tracker R9-open.
+2. (decided by the user: small unsafe module, done in cycle 26)
 3. cargo-fuzz target (new tool).
 4. Tails test and professional audit (human).
 Work that needs none of these is continuing: ADD_ONION retry (R15-L1), R8-I7 wasted dials, R12-5 probe at export, random virtual port.

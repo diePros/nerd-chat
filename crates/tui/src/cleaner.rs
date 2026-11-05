@@ -1,15 +1,17 @@
-//! Cleaning of hostile files in a CHILD PROCESS (this same binary started with `--clean-worker`) instead of inside the process
+//! Cleaning of hostile files in a sandboxed CHILD PROCESS (this same binary started with `--clean-worker`) instead of inside the process
 //! that holds your keys, with resource limits, `no_new_privs`, its own session and a kill-with-parent signal (a network namespace via `unshare` would need `unsafe`).
 //!
 //! What this IS: containment of parser CRASHES and runaway CPU/memory/time. A crash (`panic = "abort"`), an endless loop or a
 //! memory bomb only kills the helper and the file is refused; the helper never sees keys, the vault or the environment, and its
 //! answer is decoded as untrusted input (`seburity_strip::wire`).
 //!
-//! What this is NOT: a sandbox against a COMPROMISED parser. RLIMIT_NOFILE only caps descriptor numbers (a helper can close
-//! stdin/stderr and open a file or socket with the freed numbers), RLIMIT_FSIZE does not stop writes through a shared mmap,
-//! unlink or rename, and NPROC does not stop execve. A compromised helper can therefore still read files the user can read,
-//! reach the network, signal the parent and modify the user's files. Real containment needs seccomp or Landlock (a dependency or
-//! `unsafe`, see docs/FILE_SHARING.md).
+//! On top of that the helper installs a seccomp-BPF ALLOWLIST (crate `seburity-sandbox`, x86_64 only) BEFORE it reads a single
+//! untrusted byte: afterwards it can only read fd 0, write fd 1/2, manage memory (no PROT_EXEC) and exit. Any other syscall
+//! (open, socket, execve, unlink, kill, ptrace, mprotect, close, fork...) kills it with SIGSYS and the file is refused. A
+//! compromised parser can therefore no longer read files, reach the network, change files or signal the parent. Where no
+//! filter exists (other architectures, kernels without seccomp) the helper refuses to run (`--no-sandbox` is the explicit way out).
+//! Remaining weakness: the parser still shares the pipe to the parent, so it can lie in its answer (hence the strict decoder) and
+//! it can burn CPU/memory up to the limits (hence the rlimits and the timeout).
 use seburity_strip::{wire, Cleaned, Mode, StripError, MAX_INPUT};
 use std::{io::{Read, Write}, path::Path, process::{Command, Stdio}, sync::mpsc::channel, thread, time::Duration};
 use zeroize::Zeroizing;
@@ -41,6 +43,12 @@ pub fn worker_main() -> ! {
         // killed together with the parent (panic wipe / exit): no helper outlives the app holding plaintext
         if rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL)).is_err() { die("could not set the death signal"); }
         if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).is_err() { die("could not mark the helper non-dumpable"); }
+    }
+    // the allowlist is installed BEFORE any untrusted byte is read: from here on only read(0)/write(1,2)/memory/exit are possible
+    match seburity_sandbox::enter() {
+        Ok(()) => {}
+        Err(seburity_sandbox::Error::Unsupported) => die("no seccomp filter for this platform (use --no-sandbox to clean in-process)"),
+        Err(seburity_sandbox::Error::Kernel(e)) => die(&format!("the kernel refused the seccomp filter (errno {e}); use --no-sandbox to clean in-process")),
     }
     let mut input = Zeroizing::new(Vec::with_capacity(MAX_INPUT + 16));
     if std::io::stdin().take(MAX_INPUT as u64 + 16).read_to_end(&mut input).is_err() { std::process::exit(2); }

@@ -1633,6 +1633,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "seburity-sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "seburity-store"
 version = "0.1.0"
 dependencies = [
@@ -1665,6 +1672,7 @@ dependencies = [
  "seburity-core",
  "seburity-exchange",
  "seburity-net",
+ "seburity-sandbox",
  "seburity-store",
  "seburity-strip",
  "seburity-vault",

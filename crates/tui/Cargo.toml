@@ -17,6 +17,7 @@ seburity-exchange = { path = "../exchange" }
 seburity-net = { path = "../net" }
 seburity-chat = { path = "../chat" }
 seburity-strip = { path = "../strip" }
+seburity-sandbox = { path = "../sandbox" }
 ratatui = "0.30"
 zeroize = "1"
 getrandom = "0.3"
