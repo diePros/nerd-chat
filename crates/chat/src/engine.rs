@@ -91,7 +91,8 @@ pub(crate) enum ConnEvent {
     Up { id: [u8; 8], gen: u64, epoch: u64, tx: Sender<Out> },
     Down { id: [u8; 8], gen: u64 },
     Msg { id: [u8; 8], gen: u64, text: Zeroizing<String> },
-    DialFailed { id: [u8; 8], epoch: u64 },
+    /// `unreachable`: the dial itself failed (peer offline/unreachable). Handshake failures do NOT count (an attacker could cause them).
+    DialFailed { id: [u8; 8], epoch: u64, unreachable: bool },
 }
 pub(crate) enum In { Cmd(Command), Conn(ConnEvent) }
 
@@ -202,20 +203,23 @@ impl Core {
         let epoch = self.next_epoch;
         let mut we_dial = we_dial;
         let mut hosting = false;
+        // never lazily host after a flip (we are the dialer by necessity) or when we cannot even prepare dialing
+        let mut no_fallback = false;
         match self.transport.add_contact(&me, &cfg.peer, !we_dial) {
             Err(e) if !we_dial => {
                 // we are the designated host but cannot host: FLIP to dialing (the peer will host for us after its dials fail)
                 self.notice(Some(cfg.id), format!("cannot host for this contact ({e}): dialing it instead; it must be able to host"));
                 we_dial = true;
+                no_fallback = true;
                 if let Err(e2) = self.transport.add_contact(&me, &cfg.peer, false) { self.notice(Some(cfg.id), format!("cannot prepare dialing either: {e2}")); }
             }
-            Err(e) => self.notice(Some(cfg.id), format!("cannot prepare dialing for this contact: {e}")),
+            Err(e) => { no_fallback = true; self.notice(Some(cfg.id), format!("cannot prepare dialing for this contact: {e}")) }
             Ok(Some(rx)) => { hosting = true; self.spawn_acceptor(cfg.id, cfg.secret.clone(), cfg.peer.clone(), rx, guard, stop.clone(), epoch); }
             Ok(None) => {}
         }
         self.rts.insert(cfg.id, Rt {
             secret: cfg.secret, peer: cfg.peer, my_onion, we_dial, epoch, conn: None, pending: VecDeque::new(), dialing: false,
-            backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop, hosting, fails: 0, fallback_tried: false,
+            backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop, hosting, fails: 0, fallback_tried: no_fallback,
         });
     }
 
@@ -301,11 +305,11 @@ impl Core {
             In::Conn(ConnEvent::Msg { id, gen, text }) => {
                 if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
             }
-            In::Conn(ConnEvent::DialFailed { id, epoch }) => {
+            In::Conn(ConnEvent::DialFailed { id, epoch, unreachable }) => {
                 let mut fallback = false;
                 if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) {
                     rt.dialing = false;
-                    rt.fails += 1;
+                    if unreachable { rt.fails += 1; }
                     rt.backoff = (rt.backoff * 2).min(self.t.max_backoff);
                     rt.next_dial = Instant::now() + jitter(rt.backoff);
                     fallback = self.t.host_fallback_after > 0 && rt.fails >= self.t.host_fallback_after && !rt.hosting;
@@ -367,14 +371,14 @@ fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guar
 
 #[allow(clippy::too_many_arguments)]
 fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing) {
-    let fail = |in_tx: &Sender<In>| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id, epoch })); };
-    let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return fail(&in_tx) };
-    let Ok(mut stream) = dial(&peer, &iso) else { return fail(&in_tx) };
+    let fail = |in_tx: &Sender<In>, unreachable: bool| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id, epoch, unreachable })); };
+    let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return fail(&in_tx, false) };
+    let Ok(mut stream) = dial(&peer, &iso) else { return fail(&in_tx, true) };
     let r = {
         let mut ds = DeadlineStream { s: &mut stream, end: Instant::now() + t.handshake, abort: Arc::new(AtomicBool::new(false)) };
         link::dial(&mut ds, &me, &peer, &proto::keepalive())
     };
-    let Ok(sess) = r else { return fail(&in_tx) };
+    let Ok(sess) = r else { return fail(&in_tx, false) };
     let g = gen.fetch_add(1, Ordering::SeqCst) + 1;
     let (otx, orx) = channel();
     if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, epoch, tx: otx })).is_err() { return; }
@@ -695,6 +699,27 @@ mod tests {
         while !net.is_hosted(&db.onion_pub) && Instant::now() < end { std::thread::sleep(Duration::from_millis(50)); }
         assert!(net.is_hosted(&db.onion_pub), "fallback hosting never started");
         assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("now hosting"))));
+    }
+
+    /// Refuses the FIRST hosting attempt only (e.g. a transient onion-address collision).
+    struct FailOnce(crate::transport::MemTransport, bool);
+    impl Transport for FailOnce {
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+            if listen && !self.1 { self.1 = true; return Err("transient failure".into()); }
+            self.0.add_contact(me, peer, listen)
+        }
+        fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.0.remove_contact(a, b) }
+        fn dial_fn(&self) -> DialFn { self.0.dial_fn() }
+    }
+
+    /// Review 8 (M1): a side that flipped to dialing must never lazily host later (no host+dial on both sides).
+    #[test]
+    fn a_flipped_side_never_starts_hosting_later() {
+        let net = MemNet::new();
+        let ((l, lb), (_d, db)) = ordered();
+        let _el = start_with(Box::new(FailOnce(net.transport(), false)), &l, &db);
+        std::thread::sleep(Duration::from_millis(2500)); // far more than host_fallback_after failed dials
+        assert!(!net.is_hosted(&lb.onion_pub), "flipped side started hosting");
     }
 
     #[test]

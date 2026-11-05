@@ -251,6 +251,7 @@ impl App {
         self.chat_with = None;
         self.compose.clear();
         self.code_buf.clear();
+        self.cfg.keyfile = None; // Zeroizing: dropped now
         self.kdf_rx = None; // a running derivation finishes on its own; its result is dropped (zeroized)
         self.vf = None;
         self.view = None;
