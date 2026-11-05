@@ -31,7 +31,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 | R2-M1 | Failed send burns counter, desync | FIXED | `failed_send_does_not_desync` |
 | R2-M2 | msg1 replay yields live-looking session | FIXED | unconfirmed responder sessions; app MUST honour `is_confirmed()` |
 | R2-M2b | No msg1 replay cache | FIXED (link layer) | `HandshakeGuard` replay cache (bounded, TTL, only after success) + confirmation-cell requirement in `net::link::accept`; app must keep ONE guard per onion service |
-| R2-M3 | Noise/ML-KEM/plaintext buffers not zeroized | PARTIAL | our buffers+Signed fixed; `snow` is now vendored with Drop-time wiping (cycle 19, see D-3); verify ml-kem DecapsulationKey drop zeroizes (OPEN) |
+| R2-M3 | Noise/ML-KEM/plaintext buffers not zeroized | PARTIAL | our buffers+Signed fixed; `snow` is now vendored with Drop-time wiping (cycle 19, see D-3); ml-kem `DecapsulationKey` is `ZeroizeOnDrop` with the enabled `zeroize` feature (verified in the source, cycle 20) |
 | R2-M4 | Rollback only informational | PARTIAL | see R1-M3 |
 | R2-M5 | OOM kill on low-RAM open | FIXED | MemAvailable check |
 | R2-L1 | Low-order X25519 accepted | FIXED | `check_dh_pub` in decode + handshake |

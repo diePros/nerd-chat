@@ -24,7 +24,7 @@ spelled `Bash` (capital B).
 2. Open from review 14: ADD_ONION retry for the new service (R15-L1). Generation counter evaluated and rejected (see tracker R15-L3). Then random virtual port per contact, vanguards.
 3. R12-5: probe hosting capability automatically at export.
 4. Sandbox the file parsers (seccomp/Landlock) and a cargo-fuzz target (needs the user's OK for new tooling/deps).
-5. (done in cycle 19, partial) snow wiping; next: ml-kem DecapsulationKey zeroize check, mlock (R1-H2).
+5. (done, cycles 19-20) snow wiping, ml-kem key wipe verified. mlock stays deferred: RLIMIT_MEMLOCK (usually 8 MiB) is far below Argon2's 512 MiB, swap is refused anyway.
 6. cargo-deny (ask first), cargo-vet, CI, cross-machine reproducible build.
 7. R8-I7/R13: stop wasted dials to a peer that flipped (needs signalling).
 8. Tails test (user-deferred), professional audit before real use.
@@ -32,3 +32,10 @@ spelled `Bash` (capital B).
 ## Pre-production gate (all must be true)
 All tracker rows FIXED or ACCEPTED with a written reason, except the audit/Tails items that need a human; last review has no
 unfixed Medium+; workspace tests, static musl build, repro check and live Tor tests green on the final commit.
+
+## WAITING FOR THE USER (blocks the pre-production gate)
+1. Allow installing `cargo-deny` (supply-chain check; deny.toml exists, never run) and, later, cargo-vet.
+2. Parser sandbox: needs either a new dependency (e.g. a Landlock/seccomp crate) or a small `unsafe` module; a design decision, see tracker R9-open.
+3. cargo-fuzz target (new tool).
+4. Tails test and professional audit (human).
+Work that needs none of these is continuing: ADD_ONION retry (R15-L1), R8-I7 wasted dials, R12-5 probe at export, random virtual port.
