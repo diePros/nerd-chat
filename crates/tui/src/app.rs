@@ -154,6 +154,8 @@ pub struct App {
     pair_ctl: Option<PairCtl>,
     code_buf: SecretBuf,
     pending_pair: Option<([u8; 8], ImportedContact, String)>,
+    /// The capability bit used in the running/last pairing; recorded in the vault only when the pairing is accepted.
+    pair_adv: Option<bool>,
     failures: u32,
     locked_until: Option<Instant>,
     lockout: std::sync::Arc<Lockout>,
@@ -176,10 +178,14 @@ pub struct App {
     /// file being cleaned on a worker (cleaning is CPU-heavy on hostile input; the UI/panic key must stay live)
     prep_rx: Option<([u8; 8], Receiver<Result<(seburity_chat::FileOut, Vec<String>), seburity_strip::StripError>>)>,
     /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
-    pub alerts: Vec<String>,
+    pub alerts: Vec<(String, u32)>,
+    /// Alerts that did not fit (never evict an unacknowledged one).
+    pub alerts_dropped: u32,
     kdf_rx: Option<Receiver<KdfMsg>>,
     /// Set by the panic wipe: a running vault-creation worker must not touch the disk any more.
     kdf_cancel: Arc<AtomicBool>,
+    /// The running worker creates a vault (only then does a panic wait for it).
+    kdf_creating: bool,
     /// screen to return to if the derivation fails
     kdf_back: Screen,
     #[cfg(test)]
@@ -193,12 +199,12 @@ impl App {
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
-            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
+            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
-            alerts: Vec::new(), kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_back: Screen::Unlock,
+            alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
@@ -276,8 +282,11 @@ impl App {
         self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
         self.alerts.clear();
+        self.alerts_dropped = 0;
         self.kdf_cancel.store(true, Ordering::SeqCst); // a creating worker stops before it writes anything (R8-L4)
-        self.kdf_rx = None; // a running derivation finishes on its own; its result is dropped (zeroized)
+        // A create worker past its key derivation may be inside the atomic write: give it a bounded moment to finish or
+        // clean up its temp file before the process exits (R8-L4 residual window). Its result is dropped (zeroized).
+        if let Some(rx) = self.kdf_rx.take() { if self.kdf_creating { let _ = rx.recv_timeout(Duration::from_millis(1200)); } }
         self.vf = None;
         self.view = None;
         self.pending_pair = None;
@@ -370,6 +379,7 @@ impl App {
         self.pw.clear(); self.pw2.clear();
         let (path, counter, keyfile, profile) = (self.cfg.path.clone(), self.cfg.counter.clone(), self.cfg.keyfile.clone(), self.cfg.profile);
         let cancel = self.kdf_cancel.clone();
+        self.kdf_creating = true;
         self.start_kdf(Screen::CreatePw, move || {
             KdfMsg::Created(VaultFile::create_cancellable(path.as_deref(), counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice()), profile, &cancel))
         });
@@ -403,6 +413,7 @@ impl App {
             Ok(m) => m,
         };
         self.kdf_rx = None;
+        self.kdf_creating = false;
         let back = std::mem::replace(&mut self.kdf_back, Screen::Unlock);
         match msg {
             KdfMsg::Opened(Ok((vf, info))) => {
@@ -450,7 +461,7 @@ impl App {
             Key::Up | Key::Char('k') => self.sel = self.sel.saturating_sub(1),
             Key::Down | Key::Char('j') => { if self.sel + 1 < n { self.sel += 1 } }
             Key::Char('?') => self.screen = Screen::Help,
-            Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } }
+            Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } else { self.alerts_dropped = 0; } }
             Key::Char('n') => self.open_prompt(Prompt::NewContact, ""),
             // Neutral random default: the contact's name must not leak into filesystem metadata.
             Key::Char('e') => if self.sel_name().is_some() {
@@ -532,12 +543,20 @@ impl App {
 
     /// The capability WE advertise to this contact: fixed (and saved) at the first export/pairing, so the contact's roles and ours
     /// are computed from the same facts even if we later start with a different `--cannot-host`.
-    fn advertised(&mut self, idx: usize) -> bool {
-        let now = self.cfg.can_host;
-        let Some(c) = self.vf.as_mut().and_then(|v| v.store.contacts.get_mut(idx)) else { return now };
-        match c.adv_can_host {
-            Some(b) => b,
-            None => { c.adv_can_host = Some(now); let _ = self.save(); now }
+    /// Read-only: the bit to put in a bundle (what was told before, else today's flag). Nothing is fixed until `commit_advertised`.
+    fn advertised(&self, idx: usize) -> bool {
+        self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).and_then(|c| c.adv_can_host).unwrap_or(self.cfg.can_host)
+    }
+
+    /// Fix (and save) what we told this contact, but ONLY after the bundle really left (file written / pairing succeeded) and
+    /// only if the vault could be saved: otherwise memory and vault would disagree and later roles would too (review 13: L2/L3).
+    fn commit_advertised(&mut self, idx: usize, value: bool) -> bool {
+        let Some(c) = self.vf.as_mut().and_then(|v| v.store.contacts.get_mut(idx)) else { return false };
+        if c.adv_can_host.is_some() { return true; }
+        c.adv_can_host = Some(value);
+        if self.save() { true } else {
+            if let Some(c) = self.vf.as_mut().and_then(|v| v.store.contacts.get_mut(idx)) { c.adv_can_host = None; }
+            false
         }
     }
 
@@ -545,6 +564,9 @@ impl App {
 
     /// Option C: host an onion service for the selected contact although the roles would make us only dial.
     fn toggle_host_anyway(&mut self) {
+        if matches!(self.online, Online::Starting(_) | Online::Stopping) {
+            return self.err("Wait until the connection state settles (online or offline), then change 'host anyway': a change while starting would not reach the engine.");
+        }
         let i = self.sel;
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)) else { return self.err("No contact selected.") };
         if c.peer.is_none() { return self.err("Pair or import this contact first."); }
@@ -686,6 +708,10 @@ impl App {
                 let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
                 let path = PathBuf::from(&text);
                 match fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(armored.as_bytes())) {
+                    Ok(()) if !self.commit_advertised(sel, can_host) => {
+                        let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
+                        self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
+                    }
                     Ok(()) => self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())),
                     Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
                 }
@@ -771,7 +797,7 @@ impl App {
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
         if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let (offer, code) = match { let sel = self.sel; let adv = self.advertised(sel); PairingOffer::generate_in(self.lockout.clone()).map(|(o, c)| (o.with_can_host(adv), c)) } { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
+        let (offer, code) = match { let sel = self.sel; let adv = self.advertised(sel); self.pair_adv = Some(adv); PairingOffer::generate_in(self.lockout.clone()).map(|(o, c)| (o.with_can_host(adv), c)) } { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
         let (ident, id) = self.identity_clone();
@@ -813,7 +839,7 @@ impl App {
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let join = match parsed.map(|j| { let sel = self.sel; j.with_can_host(self.advertised(sel)) }) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
+        let join = match parsed.map(|j| { let sel = self.sel; let adv = self.advertised(sel); self.pair_adv = Some(adv); j.with_can_host(adv) }) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -944,6 +970,17 @@ impl App {
         self.started_ids = now;
     }
 
+    /// Name the contact; identical repeats only raise a counter; an unacknowledged alert is never evicted. Returns the shown text.
+    fn record_alert(&mut self, id: Option<[u8; 8]>, text: &str) -> String {
+        let mut t: String = text.chars().take(300).collect();
+        let who = id.and_then(|i| self.vf.as_ref().and_then(|v| v.store.contacts.iter().find(|c| c.id == i).map(|c| c.name.clone())));
+        if let Some(w) = who { t = format!("{w}: {t}"); }
+        if let Some(e) = self.alerts.iter_mut().find(|(a, _)| *a == t) { e.1 = e.1.saturating_add(1); }
+        else if self.alerts.len() < 5 { self.alerts.push((t.clone(), 1)); }
+        else { self.alerts_dropped = self.alerts_dropped.saturating_add(1); }
+        t
+    }
+
     fn known(&self, id: &[u8; 8]) -> bool { self.vf.as_ref().is_some_and(|v| v.store.contacts.iter().any(|c| c.id == *id)) }
 
     fn poll_online(&mut self) {
@@ -979,9 +1016,8 @@ impl App {
                     self.push_line(id, ChatLine { mine: false, text, queued: false });
                     if !(self.screen == Screen::Chat && self.chat_with == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
-                Event::Notice { text, alert, .. } => {
-                    let t: String = text.chars().take(300).collect();
-                    if alert { if self.alerts.len() >= 5 { self.alerts.remove(0); } self.alerts.push(t.clone()); }
+                Event::Notice { id, text, alert } => {
+                    let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
                     self.status = t;
                 }
                 Event::FileOffer { id, xid, bucket } => {
@@ -1062,11 +1098,19 @@ impl App {
         let (peer, trust) = contact.into_parts();
         let pos = self.vf.as_ref().and_then(|v| v.store.contacts.iter().position(|c| c.id == id));
         if let Some(i) = pos { if self.onion_collision(i, &peer) { self.err("Refused: the paired bundle reuses an onion address that another contact (or you) already has."); return; } }
+        let told = self.pair_adv.take();
         let Some(c) = self.vf().store.contacts.iter_mut().find(|c| c.id == id) else { self.err("Contact vanished during pairing."); return };
         if c.peer.is_some() { self.err("Contact already has a peer key; discarded the paired one."); return; }
         c.peer = Some(peer);
         c.trust = trust;
-        if self.save() {
+        let set_adv = c.adv_can_host.is_none() && told.is_some();
+        if set_adv { c.adv_can_host = told; }
+        if !self.save() {
+            // memory and vault must agree: undo (the user can pair again)
+            if let Some(c) = self.vf().store.contacts.iter_mut().find(|c| c.id == id) { c.peer = None; c.trust = Trust::Unverified; if set_adv { c.adv_can_host = None; } }
+            return;
+        }
+        {
             if let Some(i) = self.vf().store.contacts.iter().position(|c| c.id == id) { self.engine_add(i); }
             let how = if trust == Trust::CodeAuthenticated { "code-authenticated (in person)" } else { "UNVERIFIED - compare the safety number (v)" };
             self.ok(format!("Paired: {how}. Safety number {sn}"));
@@ -1107,14 +1151,61 @@ mod tests {
     fn security_alerts_are_sticky_until_acknowledged() {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v");
-        a.alerts.push("received file failed its integrity check".into());
-        a.alerts.push("second".into());
+        a.alerts.push(("received file failed its integrity check".into(), 1));
+        a.alerts.push(("second".into(), 1));
         a.ok("some later status message");
         assert_eq!(a.alerts.len(), 2, "status text never clears an alert");
         a.handle(Key::Char('z'));
-        assert_eq!(a.alerts, vec!["second".to_string()]);
+        assert_eq!(a.alerts, vec![("second".to_string(), 1)]);
         a.panic_wipe();
         assert!(a.alerts.is_empty(), "panic wipes alerts");
+    }
+
+    #[test]
+    fn alerts_name_the_contact_dedupe_and_never_evict() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        for _ in 0..50 { a.record_alert(Some(id), "received file failed its integrity check"); }
+        assert_eq!(a.alerts.len(), 1, "a flood of identical alerts is one entry");
+        assert_eq!(a.alerts[0].1, 50);
+        assert!(a.alerts[0].0.starts_with("bob: "), "{:?}", a.alerts[0]);
+        for i in 0..10 { a.record_alert(Some(id), &format!("distinct {i}")); }
+        assert_eq!(a.alerts.len(), 5, "capped");
+        assert!(a.alerts[0].0.contains("integrity"), "the first real alert was not pushed out");
+        assert_eq!(a.alerts_dropped, 6);
+    }
+
+    #[test]
+    fn host_anyway_cannot_change_while_going_online_or_offline() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        a.online = Online::Starting(10);
+        a.handle(Key::Char('h'));
+        assert!(a.error && a.status.contains("settles"), "{}", a.status);
+        assert!(!a.vf.as_ref().unwrap().store.contacts[0].host_anyway);
+        a.online = Online::Stopping;
+        a.handle(Key::Char('h'));
+        assert!(a.error && a.status.contains("settles"));
+    }
+
+    #[test]
+    fn the_told_capability_is_fixed_only_when_the_bundle_really_left() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        a.cfg.can_host = false;
+        let f = d.path().join("exists.sbc");
+        std::fs::write(&f, b"x").unwrap();
+        a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
+        assert!(a.error);
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, None, "a failed export must not fix the bit");
+        let g = d.path().join("new.sbc");
+        a.handle(Key::Char('e')); a.input = g.to_str().unwrap().into(); a.handle(Key::Enter);
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
+        // bad listen address: nothing fixed either (second contact)
+        add(&mut a, "carol"); a.sel = 1;
+        a.handle(Key::Char('l')); a.input = "999.1.1.1:1".into(); a.handle(Key::Enter);
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[1].adv_can_host, None);
     }
 
     #[test]

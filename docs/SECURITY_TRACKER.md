@@ -273,3 +273,13 @@ No Critical/High. Integrated:
 | R13-L4 | stale lazy-hosting rows in this tracker | FIXED | marked superseded |
 | R13-I | UI did not show our actual role | FIXED | details show "YOU host for it while online" / "you only dial"; wasted dials by a host-anyway side to a flipped peer: OPEN (info) |
 Not re-reviewed after these fixes (small, test-covered).
+
+## Review 13 (Opus, commits 195a1d3..b0a26c1) — integrated in cycle 15
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R14-M1 | `h` pressed while going online was not applied to the starting engine: the engine published a service while the UI said host-anyway was off | FIXED | `h` is refused while `Starting`/`Stopping`; test |
+| R14-M2 | a malicious contact could flood the sticky alert bar with "unexpected file data", evict real alerts; alerts did not name the contact | FIXED | "unexpected file data" is a plain (rate-limited) notice again; alerts name the contact, identical repeats are counted `(xN)`, at most 5 distinct, never evicted, overflow counted; test |
+| R14-L1 | vault-create cancel flag misses the write window (F12 mid-write leaves a tmp/vault) | PARTIAL | panic waits up to 1.2 s for a create worker so `write_atomic` can finish or clean its temp file. OPEN (info): a process kill inside the write still can leave a tmp blob (encrypted) |
+| R14-L2 | `advertised()` ignored a failed save (memory `Some`, vault `None`) | FIXED | `commit_advertised` reverts and the export is cancelled (file removed) / pairing undone |
+| R14-L3 | the advertised bit was fixed even if nothing was sent (export to an existing path, bind failure, failed join) | FIXED | the bit is read-only until the file was written / the pairing was accepted; test |
+| R14-I | roles line ignores the engine's flip; `h` while connected drops the connection; `--strip` must be first arg; alert line not wrapped, `z` only on main screen | OPEN (info) | |

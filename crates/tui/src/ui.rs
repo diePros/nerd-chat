@@ -46,10 +46,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Security warnings are sticky: shown above the status line until acknowledged (z), never overwritten.
-    let rows2 = if let Some(a) = app.alerts.first() {
+    let rows2 = if let Some((a, n)) = app.alerts.first() {
         let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
-        let more = if app.alerts.len() > 1 { format!(" (+{} more)", app.alerts.len() - 1) } else { String::new() };
-        f.render_widget(Paragraph::new(format!("! {a}{more}  [z = acknowledge]")).style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)), sub[0]);
+        let more = if app.alerts.len() > 1 || app.alerts_dropped > 0 { format!(" (+{} more)", app.alerts.len() - 1 + app.alerts_dropped as usize) } else { String::new() };
+        let times = if *n > 1 { format!(" (x{n})") } else { String::new() };
+        f.render_widget(Paragraph::new(format!("[z] ! {a}{times}{more}")).style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)), sub[0]);
         sub[1]
     } else { rows[2] };
     let style = if app.error { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Cyan) };

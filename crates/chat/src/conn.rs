@@ -215,7 +215,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         if bad {
                             inx = None; bad_frames += 1;
                             if bad_frames > 5 { break; } // an authenticated peer that keeps sending garbage is cut off
-                            if !alert(&ev, "unexpected file data: transfer cancelled") || !cancelled(&ev) { break; }
+                            if !notice(&ev, "unexpected file data: transfer cancelled") || !cancelled(&ev) { break; }
                         }
                         if done.is_some() {
                             let x = inx.take().expect("set above");

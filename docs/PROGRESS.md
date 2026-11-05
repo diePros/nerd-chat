@@ -12,10 +12,11 @@ spelled `Bash` (capital B).
 | Cycle | Commit | What | Reviewed | Static build | Live Tor tests |
 |---|---|---|---|---|---|
 | 13 | 195a1d3 | per-contact advertised capability, re-add keeps outbox | yes (review 12), fixes in 195a1d3 | yes | yes (cycle 14) |
-| 14 | b0a26c1 | cancelled vault create writes nothing, DialEnded in-flight dials, sticky alerts (`z`), flag-mismatch warning, `--strip` swap refusal | review running | yes (1.49 MB static-pie) | yes, 2/2 pass |
+| 14 | b0a26c1 | cancelled vault create, DialEnded, sticky alerts, flag-mismatch warning, --strip swap refusal | yes (review 13), fixes in cycle 15 | yes (1.49 MB static-pie) | yes, 2/2 pass |
+| 15 | (this commit) | integrate review 13: no `h` while starting, alert flood protection, capability fixed only after export/pairing succeeds, panic waits for create worker | not yet re-reviewed | yes (1.50 MB static) | yes, 2/2 pass |
 
 ## Next candidates (privacy first)
-1. Integrate the review of b0a26c1 (if findings), re-run tests.
+1. Short re-review of cycle 15 fixes (small), together with the next feature.
 2. R5-M4: rotate per-contact onion/auth keys over the authenticated channel; random virtual port per contact.
 3. R12-5: probe hosting capability automatically at export.
 4. Sandbox the file parsers (seccomp/Landlock) and a cargo-fuzz target (needs the user's OK for new tooling/deps).

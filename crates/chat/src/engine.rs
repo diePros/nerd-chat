@@ -906,7 +906,7 @@ mod tests {
         let (el, mut s, mut sess, me) = raw_peer();
         // 1. content without an accepted offer: cancelled, engine alive
         raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[9; 8], &[1; 100]));
-        assert!(wait(&el, |e| matches!(e, Event::Notice { text, alert: true, .. } if text.contains("unexpected file data"))));
+        assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("unexpected file data"))));
         // 2. out-of-policy offers (0 bytes, > cap) are declined without bothering the user
         for bucket in [0u32, 100, 20_000, (file::MAX_FILE * 2) as u32] {
             raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [3; 8], bucket, mode: 0, hash: [0; 32] }));
