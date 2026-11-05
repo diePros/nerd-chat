@@ -6,6 +6,15 @@ use zeroize::{Zeroize, Zeroizing};
 pub const KIND_TEXT_FINAL: u8 = 1;
 pub const KIND_KEEPALIVE: u8 = 2;
 pub const KIND_TEXT_CONT: u8 = 4;
+/// Key rotation (docs/KEY_ROTATION.md): payload = new onion public key (32) | new client-auth public key (32); ACK and DONE echo it.
+pub const KIND_ROTATE_OFFER: u8 = 0x20;
+pub const KIND_ROTATE_ACK: u8 = 0x21;
+pub const KIND_ROTATE_DONE: u8 = 0x22;
+
+/// Body of a rotation frame.
+pub fn encode_rotate(kind: u8, keys: &[u8; 64]) -> Vec<u8> { let mut v = Vec::with_capacity(65); v.push(kind); v.extend_from_slice(keys); v }
+/// `Some(keys)` only for an exact-length frame.
+pub fn parse_rotate(body: &[u8]) -> Option<[u8; 64]> { body.get(1..).and_then(|p| <[u8; 64]>::try_from(p).ok()) }
 /// Payload bytes per chunk (one byte of the body is the kind).
 pub const MAX_CHUNK: usize = MAX_BODY - 1;
 /// Hard cap for one reassembled message.

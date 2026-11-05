@@ -43,6 +43,9 @@ impl Bundle {
 
     pub fn with_can_host(mut self, can_host: bool) -> Self { self.can_host = can_host; self }
 
+    /// Same identity, other transport keys (onion service + client-auth key): key rotation (docs/KEY_ROTATION.md).
+    pub fn with_transport(mut self, onion_pub: [u8; 32], auth_pub: [u8; 32]) -> Self { self.onion_pub = onion_pub; self.auth_pub = auth_pub; self }
+
     fn body(&self) -> [u8; BODY_LEN] {
         let mut b = [0u8; BODY_LEN];
         b[..4].copy_from_slice(MAGIC);
@@ -138,7 +141,9 @@ impl Bundle {
         let mut h = Blake2b::<U32>::new();
         h.update(b"seburity-fingerprint-v1");
         let mut body = self.body();
-        body[CAP_OFF] = 0; // key material only
+        body[CAP_OFF] = 0; // identity key material only: the capability bit and ...
+        body[68..132].fill(0); // ... the transport keys (onion + client-auth) are operational and rotate; the session itself
+                               // is authenticated by sign/dh/kem, so a swapped onion/auth key can only fail the handshake
         h.update(body);
         h.finalize().into()
     }
@@ -185,6 +190,19 @@ mod tests {
             assert!(Bundle::decode(&t).is_err(), "byte {i}");
         }
         assert_eq!(Bundle::decode(&enc[..enc.len() - 1]), Err(Error::Malformed));
+    }
+
+    #[test]
+    fn transport_keys_can_rotate_without_changing_the_safety_number() {
+        let a = Bundle::from_identity(&ContactIdentity::generate());
+        let b = Bundle::from_identity(&ContactIdentity::generate());
+        let rotated = a.clone().with_transport([7; 32], [9; 32]);
+        assert_ne!(a, rotated);
+        assert_eq!(a.fingerprint(), rotated.fingerprint());
+        assert_eq!(safety_number(&a, &b), safety_number(&rotated, &b));
+        // ... but changing an identity key does change it
+        let mut other = a.clone(); other.dh_pub[0] ^= 1;
+        assert_ne!(a.fingerprint(), other.fingerprint());
     }
 
     #[test]

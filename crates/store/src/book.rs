@@ -4,7 +4,9 @@ use zeroize::Zeroizing;
 
 pub const MAX_CONTACTS: usize = 1024;
 pub const MAX_NAME: usize = 64;
-const MAGIC: &[u8; 4] = b"SBS3";
+const MAGIC: &[u8; 4] = b"SBS4";
+/// SBS3 (no rotation state) is still read.
+const MAGIC_V3: &[u8; 4] = b"SBS3";
 /// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS3.
 const MAGIC_V2: &[u8; 4] = b"SBS2";
 
@@ -22,6 +24,11 @@ pub struct Contact {
     /// The `can_host` value WE put into the bundle we gave this contact (fixed at the first export/pairing). Roles use THIS, not
     /// whatever flag we run with today, because the contact computes its roles from what we told it.
     pub adv_can_host: Option<bool>,
+    /// Key rotation, OUR side: the new onion/client-auth secret (onion seed | auth) we proposed; kept until the contact acknowledged.
+    /// While set, the engine hosts the OLD and the NEW service so the contact reaches us whichever it knows.
+    pub next_transport: Option<Zeroizing<[u8; 64]>>,
+    /// Key rotation, THEIR side: the peer's previous (onion, auth) public keys, kept (authorized on our hosted service) until its DONE.
+    pub peer_old: Option<([u8; 32], [u8; 32])>,
 }
 
 impl std::fmt::Debug for Contact {
@@ -36,6 +43,33 @@ pub struct Store { pub contacts: Vec<Contact> }
 fn valid_name(n: &str) -> bool {
     let t = n.trim();
     !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(seburity_core::text::is_unsafe_char)
+}
+
+impl Contact {
+    /// OUR rotation, step 1: remember a fresh transport secret (hosted next to the old one until acknowledged).
+    pub fn begin_rotation(&mut self) -> Zeroizing<[u8; 64]> {
+        let t = ContactIdentity::fresh_transport_secret();
+        self.next_transport = Some(t.clone());
+        t
+    }
+
+    /// OUR rotation, final step (the contact acknowledged): the new keys become THE keys, the old ones are dropped (zeroized).
+    pub fn commit_rotation(&mut self) -> bool {
+        let Some(t) = self.next_transport.as_ref() else { return false };
+        let Some(id) = self.identity.with_transport_secret(t) else { return false };
+        self.identity = id;
+        self.next_transport = None;
+        true
+    }
+
+    /// THEIR rotation: switch to the proposed keys now, remember the old public ones (still authorized on our service until DONE).
+    pub fn accept_peer_rotation(&mut self, onion: [u8; 32], auth: [u8; 32]) -> bool {
+        let Some(p) = self.peer.as_ref() else { return false };
+        let old = (p.onion_pub, p.auth_pub);
+        self.peer = Some(p.clone().with_transport(onion, auth));
+        if self.peer_old.is_none() { self.peer_old = Some(old); }
+        true
+    }
 }
 
 impl Drop for Contact {
@@ -53,7 +87,7 @@ impl Store {
         if self.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Duplicate); }
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).expect("OS RNG unavailable");
-        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None });
+        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None, next_transport: None, peer_old: None });
         Ok(self.contacts.len() - 1)
     }
 
@@ -79,6 +113,10 @@ impl Store {
                 v.extend_from_slice(&p.auth_pub);
                 v.extend_from_slice(&p.kem_pub);
             }
+            // SBS4: rotation state. flags2: bit0 next_transport, bit1 peer_old (needs a peer)
+            v.push(c.next_transport.is_some() as u8 | (c.peer_old.is_some() as u8) << 1);
+            if let Some(t) = &c.next_transport { v.extend_from_slice(&**t); }
+            if let Some((o, a)) = &c.peer_old { v.extend_from_slice(o); v.extend_from_slice(a); }
         }
         v
     }
@@ -86,7 +124,8 @@ impl Store {
     pub fn decode(b: &[u8]) -> Result<Self, StoreError> {
         let mut r = Reader(b);
         let magic = r.take(4)?;
-        let v3 = magic == MAGIC;
+        let v4 = magic == MAGIC;
+        let v3 = v4 || magic == MAGIC_V3;
         if !v3 && magic != MAGIC_V2 { return Err(StoreError::Corrupt); }
         let n = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
         if n > MAX_CONTACTS { return Err(StoreError::Corrupt); }
@@ -114,7 +153,18 @@ impl Store {
                 Some(Bundle::from_parts(sign, dh, onion, auth, peer_can_host, kem).map_err(|_| StoreError::Corrupt)?)
             } else { None };
             let trust = match flags & 0b110 { 0b010 => Trust::CodeAuthenticated, 0b100 => Trust::SafetyVerified, _ => Trust::Unverified };
-            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host });
+            let (mut next_transport, mut peer_old) = (None, None);
+            if v4 {
+                let f2 = r.take(1)?[0];
+                if f2 & !0b11 != 0 || (f2 & 0b10 != 0 && peer.is_none()) { return Err(StoreError::Corrupt); }
+                if f2 & 1 != 0 { next_transport = Some(Zeroizing::new(<[u8; 64]>::try_from(r.take(64)?).unwrap())); }
+                if f2 & 0b10 != 0 {
+                    let o: [u8; 32] = r.take(32)?.try_into().unwrap();
+                    let a: [u8; 32] = r.take(32)?.try_into().unwrap();
+                    peer_old = Some((o, a));
+                }
+            }
+            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host, next_transport, peer_old });
         }
         if !r.0.is_empty() { return Err(StoreError::Corrupt); }
         Ok(s)
@@ -153,6 +203,7 @@ mod tests {
         let i = s2.add_contact("carol").unwrap();
         s2.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
         let mut old = s2.encode().to_vec(); old[..4].copy_from_slice(b"SBS2");
+        old.pop(); // the SBS4 'flags2' byte (no rotation state) did not exist in SBS2/SBS3
         // SBS2 had flags with bit4 clear; our SBS3 encode set it (can_host = true): clear it as the old writer would have
         let flags_at = 4 + 2 + 8 + 1 + "carol".len() + SECRET_LEN;
         old[flags_at] &= !0b1_0000;
@@ -164,6 +215,33 @@ mod tests {
         let mut e = Store::new(); e.add_contact("dave").unwrap();
         let mut enc = e.encode().to_vec(); let at = 4 + 2 + 8 + 1 + "dave".len() + SECRET_LEN; enc[at] |= 0b1_0000;
         assert!(Store::decode(&enc).is_err());
+    }
+
+    #[test]
+    fn rotation_state_roundtrips_and_commits() {
+        let mut s = Store::new();
+        let i = s.add_contact("alice").unwrap();
+        s.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
+        let before = Bundle::from_identity(&s.contacts[i].identity);
+        let t = s.contacts[i].begin_rotation();
+        let peer_before = s.contacts[i].peer.clone().unwrap();
+        let np = ContactIdentity::generate();
+        let (no, na) = (np.onion_public(), np.auth_public().to_bytes());
+        assert!(s.contacts[i].accept_peer_rotation(no, na));
+        let d = Store::decode(&s.encode()).unwrap();
+        assert_eq!(d.contacts[i].next_transport.as_deref(), Some(&*t));
+        assert_eq!(d.contacts[i].peer_old, Some((peer_before.onion_pub, peer_before.auth_pub)));
+        assert_eq!(d.contacts[i].peer.as_ref().unwrap().onion_pub, no);
+        let mut d = d;
+        assert!(d.contacts[i].commit_rotation() && d.contacts[i].next_transport.is_none());
+        let after = Bundle::from_identity(&d.contacts[i].identity);
+        assert_ne!(before.onion_pub, after.onion_pub);
+        assert_eq!((before.sign_pub, before.dh_pub), (after.sign_pub, after.dh_pub));
+        assert!(!d.contacts[i].commit_rotation(), "nothing pending");
+        // peer_old without a peer is corrupt
+        let mut e = Store::new(); e.add_contact("bob").unwrap();
+        e.contacts[0].peer_old = Some(([1; 32], [2; 32]));
+        assert!(Store::decode(&e.encode()).is_err());
     }
 
     #[test]

@@ -62,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows2);
     }
-    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  h host-anyway  z ack-alert  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  h host-anyway  K rotate-keys  z ack-alert  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
@@ -215,12 +215,14 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "Files: f send JPEG/PNG (metadata stripped), t send plain text, a/r accept/decline, s save, r discard.",
         "       Files live in RAM only until you save them; names are neutral.",
         "",
+        "Rotate: K (while online) gives the contact a NEW onion address+key; old copies of your bundle then stop showing when you are online.",
+        "",
         "PANIC: F12 or Ctrl+\\  locks, wipes the screen+scrollback and exits at once.",
         "q / Esc quits (locks) normally.",
         "",
         "Press any key.",
     ];
-    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 76, 17);
+    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 78, 19);
     let _ = Alignment::Left;
 }
 

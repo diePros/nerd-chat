@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 /// A file ready to send: `padded` is the full stream (`len | content | zeros`); `hash` covers the true content only.
 pub struct FileOut { pub xid: Xid, pub bucket: u32, pub mode: u8, pub hash: [u8; 32], pub padded: Zeroizing<Vec<u8>> }
 
-pub enum Out { Text(Zeroizing<String>), File(FileOut), Reply { xid: Xid, accept: bool }, Close }
+pub enum Out { Text(Zeroizing<String>), File(FileOut), Reply { xid: Xid, accept: bool }, Rotate { kind: u8, keys: [u8; 64] }, Close }
 
 const OFFER_WAIT: Duration = Duration::from_secs(120);
 const RECV_IDLE: Duration = Duration::from_secs(60);
@@ -109,6 +109,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into(), alert: true })).is_ok();
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::FileCancelled { id, gen })).is_ok();
     let mut bad_frames = 0u32;
+    let mut rot_frames = 0u32;
     'conn: loop {
         loop {
             match out_rx.try_recv() {
@@ -135,6 +136,10 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         }
                         last_tx = Instant::now();
                     }
+                }
+                Ok(Out::Rotate { kind, keys }) => {
+                    if !send_body(&mut stream, &mut sess, &me, &proto::encode_rotate(kind, &keys)) { break 'conn; }
+                    last_tx = Instant::now();
                 }
                 Ok(Out::Close) | Err(TryRecvError::Disconnected) => break 'conn,
                 Err(TryRecvError::Empty) => break,
@@ -235,6 +240,13 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                                 _ => { if !alert(&ev, "received file failed its integrity check and was discarded") || !cancelled(&ev) { break; } }
                             }
                         }
+                    }
+                    Some(k @ (proto::KIND_ROTATE_OFFER | proto::KIND_ROTATE_ACK | proto::KIND_ROTATE_DONE)) => {
+                        // few per connection: a peer cannot make us churn services or the vault
+                        rot_frames += 1;
+                        let Some(keys) = proto::parse_rotate(&m.body) else { break };
+                        if rot_frames > 6 { break; }
+                        if ev.send(In::Conn(ConnEvent::Rotate { id, kind: k, keys })).is_err() { break; }
                     }
                     _ => match asm.feed(&m.body) {
                         Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Msg { id, gen, text })).is_err() { break; } }

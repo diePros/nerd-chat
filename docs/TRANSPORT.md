@@ -10,7 +10,7 @@ signed bundle, so the safety number covers them.
 onion address can derive the blinded key, fetch the (outer-encrypted) descriptor from the HSDirs and so see WHEN the
 service is online, for as long as that address exists. Therefore **a bundle is not public**: treat bundle files,
 QR codes and pairing transcripts as confidential, deliver them over channels you would trust with "who I talk to", and
-delete them after import. Rotating per-contact onion/auth keys over the authenticated channel is planned (tracker R5-M4).
+delete them after import. Rotating the per-contact onion/auth keys over the authenticated channel is implemented (`K`, see docs/KEY_ROTATION.md): old copies of your bundle then stop showing when you are online.
 All of a user's per-contact services also come online and go offline together (one tor), which a network observer of
 descriptor uploads can correlate; Tor's own protections apply, nothing here adds to them.
 

@@ -84,3 +84,66 @@ fn chat_works_over_real_tor_when_one_side_cannot_host() {
     e_host.shutdown();
     e_dialer.shutdown();
 }
+
+/// Key rotation over the REAL Tor network: the host runs old + new onion service, the dialer switches to the new one after the
+/// offer, the host retires the old service, and chat works again over the new address.
+#[test]
+#[ignore = "needs tor and network"]
+fn key_rotation_works_over_real_tor() {
+    use seburity_chat::proto::{KIND_ROTATE_ACK, KIND_ROTATE_DONE, KIND_ROTATE_OFFER};
+    let tor = find_tor().expect("`tor` not found in PATH");
+    let (host, dialer) = loop {
+        let (x, y) = (ContactIdentity::generate(), ContactIdentity::generate());
+        let (bx, by) = (Bundle::from_identity(&x), Bundle::from_identity(&y));
+        if bx.sign_pub > by.sign_pub { break (x, y); }   // both can host: the SMALLER key dials, so `host` hosts
+        if by.sign_pub > bx.sign_pub { break (y, x); }
+    };
+    let (hb, db) = (Bundle::from_identity(&host), Bundle::from_identity(&dialer));
+    let t = ContactIdentity::fresh_transport_secret();
+    let host2 = host.with_transport_secret(&t).unwrap();
+    let hb2 = Bundle::from_identity(&host2);
+    let start = |tor: std::path::PathBuf| thread::spawn(move || TorTransport::start(TorSetup::Spawn(SpawnConfig::new(tor)), |_| {}).expect("tor start"));
+    let (t1, t2) = (start(tor.clone()), start(tor));
+    let (t_host, t_dialer) = (t1.join().unwrap(), t2.join().unwrap());
+    let id = [11u8; 8];
+    let timing = Timing { min_backoff: Duration::from_secs(2), max_backoff: Duration::from_secs(20), ..Timing::default() };
+    let e_host = Engine::start(Box::new(t_host), vec![ContactCfg::new(id, &host, db.clone()).with_rotation(&host, Some(&t), None)], timing);
+    let e_dialer = Engine::start(Box::new(t_dialer), vec![ContactCfg::new(id, &dialer, hb.clone())], timing);
+    let end = Instant::now() + Duration::from_secs(900);
+    let (mut switched, mut committed, mut done_seen, mut reconnected) = (false, false, false, false);
+    while Instant::now() < end && !(committed && done_seen && reconnected) {
+        while let Ok(ev) = e_dialer.events.try_recv() {
+            match ev {
+                Event::Notice { text, .. } => eprintln!("dialer notice: {text}"),
+                Event::Rotate { kind: KIND_ROTATE_OFFER, onion, auth, .. } if (onion, auth) == (hb2.onion_pub, hb2.auth_pub) => {
+                    e_dialer.answer_rotation(id, KIND_ROTATE_ACK, onion, auth);
+                    e_dialer.add(ContactCfg::new(id, &dialer, hb.clone().with_transport(onion, auth)).with_rotation(&dialer, None, Some((hb.onion_pub, hb.auth_pub))));
+                    switched = true;
+                    eprintln!("dialer switched to the new onion service");
+                }
+                Event::Rotate { kind: KIND_ROTATE_DONE, onion, auth, .. } if switched && (onion, auth) == (hb2.onion_pub, hb2.auth_pub) => done_seen = true,
+                _ => {}
+            }
+        }
+        while let Ok(ev) = e_host.events.try_recv() {
+            match ev {
+                Event::Notice { text, .. } => eprintln!("host notice: {text}"),
+                Event::Connected { .. } if committed => { reconnected = true; eprintln!("host: connected again over the new service"); }
+                Event::Rotate { kind: KIND_ROTATE_ACK, onion, auth, .. } if !committed && (onion, auth) == (hb2.onion_pub, hb2.auth_pub) => {
+                    e_host.answer_rotation(id, KIND_ROTATE_DONE, onion, auth);
+                    e_host.add(ContactCfg::new(id, &host2, db.clone()));
+                    committed = true;
+                    eprintln!("host committed: old onion service retired");
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(committed, "the host never received the acknowledgement");
+    assert!(reconnected, "no connection over the NEW onion service (committed={committed}, done_seen={done_seen})");
+    e_host.send(id, Zeroizing::new("after rotation, from the host".into()));
+    assert!(wait(&e_dialer, Duration::from_secs(120), |e| matches!(e, Event::Message { text, .. } if &***text == "after rotation, from the host")));
+    e_dialer.shutdown();
+    e_host.shutdown();
+}

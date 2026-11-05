@@ -25,6 +25,11 @@ pub trait Transport: Send {
     fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String>;
     /// Stop hosting the service whose onion public key is `my_onion_pub` and forget any credentials we installed to dial
     /// the peer's service (`peer_onion_pub`). Nothing of a deleted contact may stay behind in a shared tor.
+    /// Like `add_contact`, additionally authorizing `extra_auth` client keys on the hosted service (the peer's previous
+    /// key while a key rotation is unfinished). Transports that do not host keep the default.
+    fn add_contact_ex(&mut self, me: &ContactIdentity, peer: &Bundle, _extra_auth: &[[u8; 32]], listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+        self.add_contact(me, peer, listen)
+    }
     fn remove_contact(&mut self, my_onion_pub: &[u8; 32], peer_onion_pub: &[u8; 32]);
     fn dial_fn(&self) -> DialFn;
 }
@@ -102,7 +107,9 @@ impl TorTransport {
 fn hex8(b: &[u8]) -> String { b.iter().take(8).map(|x| format!("{x:02x}")).collect() }
 
 impl Transport for TorTransport {
-    fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+    fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> { self.add_contact_ex(me, peer, &[], listen) }
+
+    fn add_contact_ex(&mut self, me: &ContactIdentity, peer: &Bundle, extra_auth: &[[u8; 32]], listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
         if !listen {
             self.tor.allow_dial(me, peer).map_err(|e| e.to_string())?;
             return Ok(None);
@@ -133,7 +140,7 @@ impl Transport for TorTransport {
                 })))
             }
         };
-        let id = match self.tor.host(me, peer, &target) {
+        let id = match self.tor.host_with(me, peer, extra_auth, &target) {
             Ok(id) => id,
             Err(e) => { if let Some(p) = &sock_file { let _ = std::fs::remove_file(p); } return Err(e.to_string()); }
         };

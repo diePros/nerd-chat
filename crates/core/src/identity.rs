@@ -48,6 +48,28 @@ impl ContactIdentity {
         Some(Self { sign: SigningKey::from_bytes(&s), dh: StaticSecret::from(*d), kem, kem_seed: k, onion_seed: o, auth: StaticSecret::from(*a) })
     }
 
+    /// The rotatable part (onion seed | client-auth secret), 64 bytes, for the vault's pending-rotation slot.
+    pub fn transport_secret(&self) -> Zeroizing<[u8; 64]> {
+        let mut t = Zeroizing::new([0u8; 64]);
+        t[..32].copy_from_slice(&*self.onion_seed);
+        t[32..].copy_from_slice(&self.auth.to_bytes());
+        t
+    }
+
+    /// A fresh random transport secret (new onion identity + new client-auth key).
+    pub fn fresh_transport_secret() -> Zeroizing<[u8; 64]> {
+        let mut t = Zeroizing::new([0u8; 64]);
+        getrandom::fill(&mut *t).expect("OS RNG unavailable");
+        t
+    }
+
+    /// The same contact identity with other transport keys (sign/dh/kem unchanged).
+    pub fn with_transport_secret(&self, t: &[u8; 64]) -> Option<Self> {
+        let mut b = self.secret_bytes();
+        b[128..192].copy_from_slice(t);
+        Self::from_secret_bytes(&b)
+    }
+
     pub fn verifying_key(&self) -> VerifyingKey { self.sign.verifying_key() }
 
     /// Sign `msg` with this contact's Ed25519 key. The CALLER must start `msg` with a unique
@@ -66,4 +88,23 @@ impl ContactIdentity {
     /// Private client-authorization key used to reach the PEER's onion service.
     pub fn auth_secret_bytes(&self) -> Zeroizing<[u8; 32]> { Zeroizing::new(self.auth.to_bytes()) }
     pub fn kem_public(&self) -> EncapsulationKey768 { self.kem.encapsulation_key().clone() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_rotation_keeps_the_identity_and_changes_only_onion_and_auth() {
+        let a = ContactIdentity::generate();
+        let t = ContactIdentity::fresh_transport_secret();
+        let b = a.with_transport_secret(&t).unwrap();
+        assert_eq!(a.verifying_key(), b.verifying_key());
+        assert_eq!(a.dh_public().to_bytes(), b.dh_public().to_bytes());
+        assert!(a.kem_public() == b.kem_public());
+        assert_ne!(a.onion_public(), b.onion_public());
+        assert_ne!(a.auth_public().to_bytes(), b.auth_public().to_bytes());
+        assert_eq!(*b.transport_secret(), *t);
+        assert_eq!(&b.secret_bytes()[..128], &a.secret_bytes()[..128]);
+    }
 }

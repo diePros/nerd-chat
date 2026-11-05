@@ -223,8 +223,13 @@ impl Tor {
     /// Host OUR onion service for this contact: reachable only by the peer's authorized client key.
     /// `target` is where our listener accepts the (Noise) connections tor forwards: prefer a unix socket in a 0700 dir
     /// when tor runs as us (spawn mode); external tors need TCP loopback.
-    pub fn host(&mut self, me: &ContactIdentity, peer: &Bundle, target: &Target) -> Result<String, TorError> {
-        let id = self.ctl.add_onion(&me.onion_expanded_secret(), VIRT_PORT, target, &[peer.auth_pub], &me.onion_public())?;
+    pub fn host(&mut self, me: &ContactIdentity, peer: &Bundle, target: &Target) -> Result<String, TorError> { self.host_with(me, peer, &[], target) }
+
+    /// Like `host`, but also authorizes `extra_auth` client keys (the peer's previous key during a key rotation).
+    pub fn host_with(&mut self, me: &ContactIdentity, peer: &Bundle, extra_auth: &[[u8; 32]], target: &Target) -> Result<String, TorError> {
+        let mut auth = vec![peer.auth_pub];
+        for a in extra_auth.iter().take(2) { if !auth.contains(a) { auth.push(*a); } }
+        let id = self.ctl.add_onion(&me.onion_expanded_secret(), VIRT_PORT, target, &auth, &me.onion_public())?;
         debug_assert_eq!(id, service_id(&me.onion_public()));
         self.hosted.push(id.clone());
         Ok(id)
