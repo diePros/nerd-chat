@@ -83,6 +83,11 @@ The report states for every control port whether its owner check passed (`owner 
   simply offline for a long time ALSO publishes a service for it (so people holding that bundle can see you online); set
   `Timing.host_fallback_after = 0` to forbid that if you never need to be reachable by a peer that cannot host. If neither side can
   host, nothing connects and both get a clear notice. At most one side dials a host-capable peer, so no duplicate connections arise.
+> **PRIVACY IMPACT of lazy hosting (to be revisited):** with the default `host_fallback_after = 5`, a contact that stays offline makes
+> you publish an onion service for them. Anyone holding that contact's bundle (they know your onion address) can then tell when you
+> are online, which the pure dialer role did not reveal. Until the policy is decided (opt-in per contact, UI prompt, ...) treat it as
+> a known weakness. Tracked as R8-privacy in SECURITY_TRACKER.md.
+
 - **Handshake availability (review 6):** NO per-contact refusal before authentication (a token bucket let anyone who could connect
   lock the real peer out). Per hosted service only a replay cache runs before the handshake; CPU is bounded by ONE engine-wide budget
   (50 handshakes/s, burst 100); every handshake has a TOTAL deadline (45 s) instead of per-read timeouts; at most 4 unauthenticated

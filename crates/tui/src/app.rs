@@ -4,7 +4,7 @@ use seburity_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Eve
 use seburity_net::tor::{control::AuthPref, spawn::{find_tor, SpawnConfig}, Addr};
 use seburity_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
 use seburity_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
-use seburity_store::{read_regular_file, StoreError, VaultFile};
+use seburity_store::{read_regular_file, OpenInfo, StoreError, VaultFile};
 use seburity_vault::Profile;
 use std::{
     collections::{HashMap, HashSet},
@@ -75,6 +75,9 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Online { Offline, Starting(u8), Online, Stopping, Failed(String) }
 
+/// Result of the (slow, memory-hard) vault key derivation done on a worker thread.
+enum KdfMsg { Opened(Result<(VaultFile, OpenInfo), StoreError>), Created(Result<VaultFile, StoreError>) }
+
 enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 
 /// One line of conversation. RAM only, wiped when dropped.
@@ -102,6 +105,8 @@ pub enum Screen {
     Verify,
     Help,
     Chat,
+    /// Vault key derivation running on a worker; only the panic key is honoured.
+    Working,
     /// After a panic: everything wiped, nothing to show.
     Wiped,
 }
@@ -157,6 +162,11 @@ pub struct App {
     unread: HashMap<[u8; 8], u32>,
     chat_with: Option<[u8; 8]>,
     compose: ComposeBuf,
+    kdf_rx: Option<Receiver<KdfMsg>>,
+    /// screen to return to if the derivation fails
+    kdf_back: Screen,
+    #[cfg(test)]
+    test_async: bool,
 }
 
 impl App {
@@ -169,6 +179,8 @@ impl App {
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
+            kdf_rx: None, kdf_back: Screen::Unlock,
+            #[cfg(test)] test_async: false,
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
             else if exists { "Enter your password to unlock.".into() }
@@ -239,6 +251,7 @@ impl App {
         self.chat_with = None;
         self.compose.clear();
         self.code_buf.clear();
+        self.kdf_rx = None; // a running derivation finishes on its own; its result is dropped (zeroized)
         self.vf = None;
         self.view = None;
         self.pending_pair = None;
@@ -264,6 +277,7 @@ impl App {
             Screen::Verify => { self.key_verify(k); Action::None }
             Screen::Help => { self.screen = Screen::Main; Action::None }
             Screen::Chat => { self.key_chat(k); Action::None }
+            Screen::Working => Action::None,
         }
     }
 
@@ -285,33 +299,12 @@ impl App {
                     if Instant::now() < t { self.err(format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1)); return Action::None; }
                 }
                 let path = self.cfg.path.clone().expect("unlock needs a path");
-                let r = VaultFile::open(&path, self.cfg.counter.as_deref(), self.pw.as_bytes(), self.cfg.keyfile.as_deref().map(|v| v.as_slice()));
+                let pw = Zeroizing::new(self.pw.as_bytes().to_vec());
                 self.pw.clear();
-                match r {
-                    Ok((vf, info)) => {
-                        self.vf = Some(vf);
-                        self.screen = Screen::Main;
-                        self.failures = 0;
-                        if info.rollback_unchecked {
-                            self.err("WARNING: no counter file - rollback of the vault cannot be detected (see docs).");
-                        } else if info.counter_same_device {
-                            self.err(format!("Unlocked. Vault save #{}. WARNING: the counter file is on the SAME device as the vault: weak rollback protection (use --counter-file on another device).", info.counter));
-                        } else { self.ok(format!("Unlocked. Vault save #{}.", info.counter)); }
-                    }
-                    Err(StoreError::Vault(seburity_vault::VaultError::Rollback { found, expected })) =>
-                        self.err(format!("ROLLBACK DETECTED: vault save #{found} is older than #{expected}. An old copy was substituted. Refusing to open.")),
-                    Err(StoreError::Vault(seburity_vault::VaultError::Tampered)) =>
-                        self.err("Password correct but the vault file is CORRUPTED or TAMPERED with."),
-                    Err(StoreError::Vault(seburity_vault::VaultError::WrongCredentials)) => {
-                        self.failures += 1;
-                        if self.failures >= 3 {
-                            let wait = 5u64 << (self.failures - 3).min(6);
-                            self.locked_until = Some(Instant::now() + Duration::from_secs(wait));
-                        }
-                        self.err("Wrong password or keyfile.");
-                    }
-                    Err(e) => self.err(format!("Cannot open vault: {e}")),
-                }
+                let (counter, keyfile) = (self.cfg.counter.clone(), self.cfg.keyfile.clone());
+                self.start_kdf(Screen::Unlock, move || {
+                    KdfMsg::Opened(VaultFile::open(&path, counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice())))
+                });
             }
             _ => {}
         }
@@ -346,18 +339,79 @@ impl App {
     }
 
     fn create_vault(&mut self, random_pw: bool) {
-        let mut rnd = Zeroizing::new([0u8; 32]);
-        if random_pw { getrandom::fill(&mut *rnd).expect("OS RNG unavailable"); }
-        let pw: &[u8] = if random_pw { &rnd[..] } else { self.pw.as_bytes() };
-        let r = VaultFile::create(self.cfg.path.as_deref(), self.cfg.counter.as_deref(), pw, self.cfg.keyfile.as_deref().map(|v| v.as_slice()), self.cfg.profile);
+        let mut pw = Zeroizing::new(self.pw.as_bytes().to_vec());
+        if random_pw { pw = Zeroizing::new(vec![0u8; 32]); getrandom::fill(&mut pw[..]).expect("OS RNG unavailable"); }
         self.pw.clear(); self.pw2.clear();
-        match r {
-            Ok(vf) => {
+        let (path, counter, keyfile, profile) = (self.cfg.path.clone(), self.cfg.counter.clone(), self.cfg.keyfile.clone(), self.cfg.profile);
+        self.start_kdf(Screen::CreatePw, move || {
+            KdfMsg::Created(VaultFile::create(path.as_deref(), counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice()), profile))
+        });
+    }
+
+    /// Run the memory-hard derivation off the UI thread so the panic key and signals stay live.
+    fn start_kdf(&mut self, back: Screen, job: impl FnOnce() -> KdfMsg + Send + 'static) {
+        let (tx, rx) = channel();
+        self.kdf_rx = Some(rx);
+        self.kdf_back = back;
+        self.screen = Screen::Working;
+        self.ok("Deriving the key (memory-hard, takes a few seconds)... F12 = panic.");
+        thread::spawn(move || { let _ = tx.send(job()); });
+        #[cfg(test)]
+        if !self.test_async { self.settle(); }
+    }
+
+    #[cfg(test)]
+    fn settle(&mut self) {
+        while self.kdf_rx.is_some() { self.poll_kdf(); thread::sleep(Duration::from_millis(5)); }
+    }
+
+    fn poll_kdf(&mut self) {
+        let Some(rx) = &self.kdf_rx else { return };
+        let msg = match rx.try_recv() {
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.kdf_rx = None; self.screen = std::mem::replace(&mut self.kdf_back, Screen::Unlock);
+                self.err("Key derivation thread died."); return;
+            }
+            Ok(m) => m,
+        };
+        self.kdf_rx = None;
+        let back = std::mem::replace(&mut self.kdf_back, Screen::Unlock);
+        match msg {
+            KdfMsg::Opened(Ok((vf, info))) => {
+                self.vf = Some(vf);
+                self.screen = Screen::Main;
+                self.failures = 0;
+                if info.rollback_unchecked {
+                    self.err("WARNING: no counter file - rollback of the vault cannot be detected (see docs).");
+                } else if info.counter_same_device {
+                    self.err(format!("Unlocked. Vault save #{}. WARNING: the counter file is on the SAME device as the vault: weak rollback protection (use --counter-file on another device).", info.counter));
+                } else { self.ok(format!("Unlocked. Vault save #{}.", info.counter)); }
+            }
+            KdfMsg::Created(Ok(vf)) => {
                 self.vf = Some(vf);
                 self.screen = Screen::Main;
                 self.ok("Vault created. Press n to add your first contact, ? for help.");
             }
-            Err(e) => { self.screen = Screen::CreatePw; self.err(format!("Cannot create vault: {e}")); }
+            KdfMsg::Created(Err(e)) => { self.screen = back; self.err(format!("Cannot create vault: {e}")); }
+            KdfMsg::Opened(Err(e)) => {
+                self.screen = back;
+                match e {
+                    StoreError::Vault(seburity_vault::VaultError::Rollback { found, expected }) =>
+                        self.err(format!("ROLLBACK DETECTED: vault save #{found} is older than #{expected}. An old copy was substituted. Refusing to open.")),
+                    StoreError::Vault(seburity_vault::VaultError::Tampered) =>
+                        self.err("Password correct but the vault file is CORRUPTED or TAMPERED with."),
+                    StoreError::Vault(seburity_vault::VaultError::WrongCredentials) => {
+                        self.failures += 1;
+                        if self.failures >= 3 {
+                            let wait = 5u64 << (self.failures - 3).min(6);
+                            self.locked_until = Some(Instant::now() + Duration::from_secs(wait));
+                        }
+                        self.err("Wrong password or keyfile.");
+                    }
+                    e => self.err(format!("Cannot open vault: {e}")),
+                }
+            }
         }
     }
 
@@ -772,6 +826,7 @@ impl App {
 
     /// Call every UI tick: collects a finished pairing.
     pub fn poll(&mut self) {
+        self.poll_kdf();
         self.poll_online();
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
@@ -849,6 +904,29 @@ mod tests {
         type_str(&mut a, "a long enough passphrase"); a.handle(Key::Enter);
         type_str(&mut a, "a different passphrase!!"); a.handle(Key::Enter);
         assert_eq!(a.screen, Screen::CreatePw); assert!(!d.path().join("v").exists());
+    }
+
+    #[test]
+    fn kdf_runs_off_the_ui_thread_and_panic_works_meanwhile() {
+        let d = tempfile::tempdir().unwrap();
+        { let _ = create_app(d.path(), "v"); }
+        let mut a = App::new(cfg(Some(d.path().join("v"))));
+        a.test_async = true;
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert_eq!(a.screen, Screen::Working);
+        assert_eq!(a.pw.chars(), 0, "password buffer cleared immediately");
+        assert_eq!(a.handle(Key::Char('q')), Action::None, "keys are ignored while working");
+        for _ in 0..2000 { a.poll(); if a.screen != Screen::Working { break; } thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(a.screen, Screen::Main, "{}", a.status);
+        // panic while a derivation is running
+        let mut b = App::new(cfg(Some(d.path().join("v"))));
+        b.test_async = true;
+        type_str(&mut b, "correct horse battery"); b.handle(Key::Enter);
+        assert_eq!(b.screen, Screen::Working);
+        assert_eq!(b.handle(Key::F12), Action::Panic);
+        assert_eq!(b.screen, Screen::Wiped);
+        thread::sleep(Duration::from_millis(100)); b.poll();
+        assert!(!b.unlocked() && b.screen == Screen::Wiped, "late result must not resurrect the vault");
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::CreatePw => secret_box(f, rows[1], "Create new vault", "New password (long passphrase)", app.pw.chars()),
         Screen::CreateConfirm => secret_box(f, rows[1], "Create new vault", "Repeat password", 0),
         Screen::Chat => chat_view(f, rows[1], app),
+        Screen::Working => secret_box(f, rows[1], "Working", "Deriving the key... (F12 = panic)", 0),
         _ => main_view(f, rows[1], app),
     }
 
