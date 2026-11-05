@@ -234,6 +234,9 @@ struct Rt {
     /// While the peer's rotation is unfinished: the peer's OLD address, tried when the new one cannot be reached (e.g. its new
     /// service failed to start in this session), with our client-auth installed for it.
     fallback: Option<Bundle>,
+    /// What a retry of the NEW service needs (rotation pending, we host, but ADD_ONION failed): its identity secret, the extra
+    /// authorized client keys, the handshake guard shared with the acceptor, and when to try next.
+    retry: Option<NextRetry>,
     /// Pending rotation: (onion pub, auth pub, hosted?) of the NEW transport keys; `hosted` = the new service really runs.
     next: Option<([u8; 32], [u8; 32], bool)>,
     we_dial: bool,
@@ -247,6 +250,8 @@ struct Rt {
     iso: [u8; 16],
     stop: Arc<AtomicBool>,
 }
+
+struct NextRetry { secret: Zeroizing<Vec<u8>>, extra: Vec<[u8; 32]>, guard: Arc<Mutex<HandshakeGuard>>, at: Instant }
 
 struct Core {
     transport: Box<dyn Transport>,
@@ -318,6 +323,7 @@ impl Core {
         // Pending rotation: while we host for this contact, ALSO host the proposed new service (same acceptor rules), so the
         // contact reaches us whether it already switched or not. Not hosted -> no proposal is ever sent (see Command::Rotate).
         let mut next = None;
+        let mut retry = None;
         if let Some(ns) = cfg.next.as_ref().and_then(|n| ContactIdentity::from_secret_bytes(n)) {
             let (no, na) = (ns.onion_public(), ns.auth_public().to_bytes());
             let mut up = !hosting; // a side that does not host needs no second service
@@ -325,7 +331,10 @@ impl Core {
                 match self.transport.add_contact_ex(&ns, &cfg.peer, &extra, true) {
                     Ok(Some(rx)) => { up = true; self.spawn_acceptor(cfg.id, cfg.secret.clone(), cfg.peer.clone(), rx, guard.clone(), stop.clone(), epoch); }
                     Ok(None) => {}
-                    Err(e) => self.notice(Some(cfg.id), format!("key rotation: cannot host the new service ({e}); nothing was proposed to the contact")),
+                    Err(e) => {
+                        self.notice(Some(cfg.id), format!("key rotation: cannot host the new service yet ({e}); nothing is proposed until it runs, retrying"));
+                        if let Some(sec) = cfg.next.clone() { retry = Some(NextRetry { secret: sec, extra: extra.clone(), guard: guard.clone(), at: Instant::now() + self.t.max_backoff }); }
+                    }
                 }
             }
             next = Some((no, na, up));
@@ -339,7 +348,7 @@ impl Core {
             }
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, next, we_dial, epoch, conn: None, pending: carried, dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, pending: carried, dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -477,8 +486,37 @@ impl Core {
         }
     }
 
+    /// Retry hosting the NEW service of a pending rotation (a transient tor error must not leave the rotation stuck).
+    fn retry_next_services(&mut self, now: Instant) {
+        let ids: Vec<[u8; 8]> = self.rts.iter().filter(|(_, r)| r.retry.as_ref().is_some_and(|x| now >= x.at)).map(|(i, _)| *i).collect();
+        for id in ids {
+            let (secret, extra, guard, peer, stop, epoch, rsecret) = {
+                let rt = self.rts.get(&id).expect("exists");
+                let r = rt.retry.as_ref().expect("filtered");
+                (r.secret.clone(), r.extra.clone(), r.guard.clone(), rt.peer.clone(), rt.stop.clone(), rt.epoch, rt.secret.clone())
+            };
+            let Some(ns) = ContactIdentity::from_secret_bytes(&secret) else { if let Some(rt) = self.rts.get_mut(&id) { rt.retry = None; } continue };
+            match self.transport.add_contact_ex(&ns, &peer, &extra, true) {
+                Ok(Some(rx)) => {
+                    self.spawn_acceptor(id, rsecret, peer, rx, guard, stop, epoch);
+                    let rt = self.rts.get_mut(&id).expect("exists");
+                    rt.retry = None;
+                    if let Some(n) = rt.next.as_mut() { n.2 = true; }
+                    // propose it right away if the contact is connected (otherwise it is proposed on the next connection)
+                    if let (Some((no, na, true)), Some((_, tx))) = (rt.next, rt.conn.as_ref()) {
+                        let mut k = [0u8; 64]; k[..32].copy_from_slice(&no); k[32..].copy_from_slice(&na);
+                        let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_OFFER, keys: k });
+                    }
+                    self.notice(Some(id), "key rotation: the new onion service is running now");
+                }
+                _ => { if let Some(x) = self.rts.get_mut(&id).and_then(|r| r.retry.as_mut()) { x.at = now + self.t.max_backoff; } }
+            }
+        }
+    }
+
     fn tick(&mut self) {
         let now = Instant::now();
+        self.retry_next_services(now);
         let ids: Vec<[u8; 8]> = self.rts.iter().filter(|(_, r)| r.we_dial && r.conn.is_none() && !r.dialing && now >= r.next_dial).map(|(i, _)| *i).collect();
         for id in ids {
             let rt = self.rts.get_mut(&id).expect("exists");
@@ -865,6 +903,38 @@ mod tests {
         say(&ed, ID, "via fallback");
         assert!(got(&el, "via fallback"));
         ed.shutdown(); el.shutdown();
+    }
+
+    /// Refuses the first attempt to host one particular onion key (a transient ADD_ONION failure), then works.
+    struct FailNewOnion { inner: crate::transport::MemTransport, onion: [u8; 32], failed: bool }
+    impl Transport for FailNewOnion {
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+            if listen && me.onion_public() == self.onion && !self.failed { self.failed = true; return Err("transient ADD_ONION failure".into()); }
+            self.inner.add_contact(me, peer, listen)
+        }
+        fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.inner.remove_contact(a, b) }
+        fn dial_fn(&self) -> DialFn { self.inner.dial_fn() }
+    }
+
+    #[test]
+    fn a_new_service_that_failed_to_start_is_retried_and_only_then_proposed() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let t = ContactIdentity::fresh_transport_secret();
+        let lb2 = Bundle::from_identity(&l.with_transport_secret(&t).unwrap());
+        let tr = FailNewOnion { inner: net.transport(), onion: lb2.onion_pub, failed: false };
+        let ea = Engine::start(Box::new(tr), vec![ContactCfg::new(ID, &l, db.clone()).with_rotation(&l, Some(&t), None)], fast());
+        let eb = start(&net, &d, &lb, ID);
+        assert!(connected(&ea) && connected(&eb));
+        // while the new service is down nothing may be proposed; once the retry succeeds the offer arrives by itself
+        let mut offered = false;
+        for _ in 0..200 {
+            while let Ok(e) = eb.events.try_recv() { if let Event::Rotate { kind: proto::KIND_ROTATE_OFFER, onion, .. } = e { assert_eq!(onion, lb2.onion_pub); offered = true; } }
+            if offered { break; }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(offered, "the retried new service was never proposed");
+        assert!(net.is_hosted(&lb.onion_pub) && net.is_hosted(&lb2.onion_pub));
     }
 
     #[test]

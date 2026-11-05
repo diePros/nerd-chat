@@ -18,10 +18,11 @@ spelled `Bash` (capital B).
 | 17 | (this commit) | review 14 fixes: 1 rotation/contact/hour, no re-add on DONE, wider collision check, own rotation independent, no export while pending, fingerprint v2 | not re-reviewed | yes | yes, 3/3 |
 | 18 | (this commit) | dial fallback to the old address while the peer's rotation is unfinished; generation counter rejected | small, reviewed with the next chunk | yes | yes, 3/3 |
 | 19 | (this commit) | vendored snow with Drop-time zeroization (D-3/R2-M3/R7-L1) | yes (review 15), fixes applied | yes, reproducible (same machine) | yes, 3/3 |
+| 22 | (this commit) | retry of a failed new service during rotation; random virtual port ACCEPTED as unneeded | small, review with next chunk | yes | yes, 3/3 |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
-2. Open from review 14: ADD_ONION retry for the new service (R15-L1). Generation counter evaluated and rejected (see tracker R15-L3). Then random virtual port per contact, vanguards.
+2. (done) rotation retry; counter rejected; random port accepted as unneeded.
 3. R12-5: probe hosting capability automatically at export.
 4. Sandbox the file parsers (seccomp/Landlock) and a cargo-fuzz target (needs the user's OK for new tooling/deps).
 5. (done, cycles 19-20) snow wiping, ml-kem key wipe verified. mlock stays deferred: RLIMIT_MEMLOCK (usually 8 MiB) is far below Argon2's 512 MiB, swap is refused anyway.

@@ -32,7 +32,7 @@ undone and no ack is sent.
 - While a rotation is pending (until the contact ACKs: possibly never, e.g. an old binary or an absent contact) BOTH services are
   published, so the old address keeps leaking presence exactly as before. The UI refuses export meanwhile. There is no cancel (it would
   strand a contact that already switched) and, if the NEW service cannot be hosted in a later session, the contact that already
-  switched cannot reach us until it can (open: dial fallback to the old address, retry of ADD_ONION).
+  switched cannot reach us until it can (mitigated: a switched dialer falls back to the old address, and the new service is retried and proposed once it runs).
 - A hostile contact can only propose its own keys; it cannot make us rotate ours. We accept at most ONE rotation per contact per
   hour (each costs a vault write and a re-publish of our service), at most six rotate frames per connection, and a DONE never
   triggers a re-add. A contact that never sends `DONE` leaves `peer_old` (an extra authorized client key for *its own* old key) and
