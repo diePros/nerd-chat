@@ -50,6 +50,9 @@ After the contacts have each other's keys (section 3 or 4), in BOTH terminals:
 ```bash
 # press  o   (go online): Seburity starts its own Tor in a private RAM directory; the title bar shows "starting tor NN%"
 # when it says ONLINE, the contact list shows a green dot next to a contact once the connection is up
+# FILES (select a connected contact): f = send a JPEG/PNG (metadata stripped, other formats refused), t = send plain text,
+#   a / r = accept / decline an offer (nothing is sent before you accept), s = save under a neutral name (never overwrites), r = discard.
+#   Files live in RAM only until saved. Offline cleaning: ./seburity --strip IN OUT   (see docs/FILE_SHARING.md for the limits)
 # Enter on a contact opens the chat: type, Enter sends, Esc goes back, o goes offline again (it says "stopping..." for a moment)
 ```
 Connection can take 1-3 minutes the first time (Tor publishes the onion service; the dialing side retries by itself).
