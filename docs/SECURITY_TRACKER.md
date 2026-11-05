@@ -51,7 +51,7 @@ Status: FIXED (with test) · PARTIAL · OPEN · ACCEPTED (documented risk) · IN
 |---|---|---|---|
 | D-1 | `ml-kem` never independently audited (upstream says so) | ACCEPTED (hybrid with X25519) | revisit on audit |
 | D-2 | `spake2` 0.4 (magic-wormhole's crate; not RustCrypto-audited) used for local pairing | ACCEPTED | second factor = safety number compare; revisit with audited CPace |
-| D-3 | `snow` has no zeroize-on-drop | PARTIAL (cycle 19) | vendored `vendor/snow` (0.10.0 + Drop-time wiping of DH/cipher keys, chaining key/hash, PSKs, and of HKDF/DH/split temporaries; see vendor/snow/SEBURITY-PATCH.md). OPEN: compiler stack copies, `Copy` checkpoint of the symmetric state, blake2 internal buffers |
+| D-3 | `snow` has no zeroize-on-drop | PARTIAL (cycle 19) | vendored `vendor/snow` (0.10.0 + Drop-time wiping of DH/cipher keys, chaining key/hash, PSKs, and of HKDF/DH/split temporaries; see vendor/snow/SEBURITY-PATCH.md). review 15 fixes: DH shared-secret/private-key temporaries, BLAKE2 `result()` temporaries and the Copy checkpoint wiped, per-call ChaCha key copy removed, version pinned `=0.10.0`. OPEN: dalek-internal copies, poly1305 state, blake2 internal buffers, compiler copies, no wipe on `panic=abort` |
 | D-4 | all crates need `cargo-deny`/`cargo-vet` + pinned Cargo.lock + reproducible build | PARTIAL | DONE: `rust-toolchain.toml` pin (1.98.1), `scripts/repro-check.sh` (two builds in different dirs, `--locked`, path remapping: IDENTICAL sha256 on this machine). OPEN: `deny.toml` is written but NEVER RUN (cargo-deny not installed; ask before installing), cargo-vet not set up, reproducibility across different machines/toolchain installs unverified, no CI |
 
 ## Exchange stage (pre-review self-notes)
@@ -82,7 +82,7 @@ No Critical/High. Crypto sound (no offline dictionary attack, no reflection, no 
 ## Store + TUI stage (self-notes before review 4)
 - R1-M3 now PARTIAL+: `VaultFile` persists/checks a counter file (default `<vault>.counter`, same disk => weak). Recommend `--counter-file` on the keyfile device. UI warns when no counter file existed.
 - R1-I2: measured Strong profile = ~3.8 s create/unlock on 8-core dev box, single-threaded Argon2 (lanes not parallel). Calibrate on target hardware.
-- Panic key: App drops vault (secrets zeroize on drop), buffers cleared, terminal screen+scrollback purged (ESC[3J) and process exits. NOT covered: `snow` state (R2-M3), RAM remanence, terminal-emulator memory, other processes' copies, swap (no mlock yet: R1-H2).
+- Panic key: App drops vault (secrets zeroize on drop), buffers cleared, terminal screen+scrollback purged (ESC[3J) and process exits. NOT covered: `snow` only PARTIALLY covered (D-3: keys wiped on drop, some temporaries/dalek internals not), RAM remanence, terminal-emulator memory, other processes' copies, swap (no mlock yet: R1-H2).
 - Password policy: >=12 chars (or keyfile); 3 wrong unlocks -> exponential UI delay (in-process only; offline attack unaffected — KDF is the defence).
 - Dev fixes: tests run with optimized deps; `insecure-test-kdf` feature must never be enabled in release builds (CI check TODO under D-4).
 - Not yet in TUI: chat, message history (by design none persisted), password change UI, QR export.

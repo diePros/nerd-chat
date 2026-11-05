@@ -216,8 +216,8 @@ impl HandshakeState {
     /// Will result in `Error::Input` if the size of the output exceeds the max message
     /// length in the Noise Protocol (65535 bytes).
     pub fn write_message(&mut self, payload: &[u8], message: &mut [u8]) -> Result<usize, Error> {
-        let checkpoint = self.symmetricstate.checkpoint();
-        match self._write_message(payload, message) {
+        let mut checkpoint = self.symmetricstate.checkpoint();
+        let r = match self._write_message(payload, message) {
             Ok(res) => {
                 self.pattern_position += 1;
                 self.my_turn = false;
@@ -227,7 +227,9 @@ impl HandshakeState {
                 self.symmetricstate.restore(checkpoint);
                 Err(err)
             },
-        }
+        };
+        checkpoint.wipe(); // seburity patch: the Copy checkpoint holds the chaining key
+        r
     }
 
     fn _write_message(&mut self, payload: &[u8], message: &mut [u8]) -> Result<usize, Error> {
@@ -345,8 +347,8 @@ impl HandshakeState {
     ///
     /// Will result in `StateProblem::Exhausted` if the max nonce count overflows.
     pub fn read_message(&mut self, message: &[u8], payload: &mut [u8]) -> Result<usize, Error> {
-        let checkpoint = self.symmetricstate.checkpoint();
-        match self._read_message(message, payload) {
+        let mut checkpoint = self.symmetricstate.checkpoint();
+        let r = match self._read_message(message, payload) {
             Ok(res) => {
                 self.pattern_position += 1;
                 self.my_turn = true;
@@ -356,7 +358,9 @@ impl HandshakeState {
                 self.symmetricstate.restore(checkpoint);
                 Err(err)
             },
-        }
+        };
+        checkpoint.wipe(); // seburity patch
+        r
     }
 
     fn _read_message(&mut self, message: &[u8], payload: &mut [u8]) -> Result<usize, Error> {

@@ -232,6 +232,7 @@ impl Dh for Dh25519 {
         let mut bytes = [0_u8; CIPHERKEYLEN];
         copy_slices!(privkey, bytes);
         self.privkey = bytes;
+        zeroize::Zeroize::zeroize(&mut bytes); // seburity patch
         self.derive_pubkey();
     }
 
@@ -239,6 +240,7 @@ impl Dh for Dh25519 {
         let mut bytes = [0_u8; CIPHERKEYLEN];
         rng.try_fill_bytes(&mut bytes)?;
         self.privkey = bytes;
+        zeroize::Zeroize::zeroize(&mut bytes); // seburity patch
         self.derive_pubkey();
         Ok(())
     }
@@ -255,8 +257,9 @@ impl Dh for Dh25519 {
         let mut pubkey_owned = [0_u8; CIPHERKEYLEN];
         assert!(pubkey.len() >= 32, "invalid public key length passed into dh function");
         copy_slices!(&pubkey[..32], pubkey_owned);
-        let result = MontgomeryPoint(pubkey_owned).mul_clamped(self.privkey).to_bytes();
+        let mut result = MontgomeryPoint(pubkey_owned).mul_clamped(self.privkey).to_bytes();
         copy_slices!(result, out);
+        zeroize::Zeroize::zeroize(&mut result); // seburity patch: the shared secret
         Ok(())
     }
 }
@@ -293,6 +296,7 @@ impl Dh for P256 {
         let mut bytes = [0_u8; 32];
         copy_slices!(privkey, bytes);
         self.privkey = bytes;
+        zeroize::Zeroize::zeroize(&mut bytes); // seburity patch
         self.derive_pubkey();
     }
 
@@ -300,6 +304,7 @@ impl Dh for P256 {
         let mut bytes = [0_u8; 32];
         rng.try_fill_bytes(&mut bytes)?;
         self.privkey = bytes;
+        zeroize::Zeroize::zeroize(&mut bytes); // seburity patch
         self.derive_pubkey();
         Ok(())
     }
@@ -393,7 +398,7 @@ impl Cipher for CipherChaChaPoly {
 
         copy_slices!(plaintext, out);
 
-        let tag = ChaCha20Poly1305::new(&self.key.into())
+        let tag = ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key)) /* seburity patch: no by-value key copy */
             .encrypt_in_place_detached(&nonce_bytes.into(), authtext, &mut out[0..plaintext.len()])
             .unwrap();
 
@@ -416,7 +421,7 @@ impl Cipher for CipherChaChaPoly {
 
         copy_slices!(ciphertext[..message_len], out);
 
-        ChaCha20Poly1305::new(&self.key.into())
+        ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key)) /* seburity patch: no by-value key copy */
             .decrypt_in_place_detached(
                 &nonce_bytes.into(),
                 authtext,
@@ -445,7 +450,7 @@ impl Cipher for CipherXChaChaPoly {
 
         copy_slices!(plaintext, out);
 
-        let tag = XChaCha20Poly1305::new(&self.key.into())
+        let tag = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key)) /* seburity patch: no by-value key copy */
             .encrypt_in_place_detached(&nonce_bytes.into(), authtext, &mut out[0..plaintext.len()])
             .unwrap();
 
@@ -468,7 +473,7 @@ impl Cipher for CipherXChaChaPoly {
 
         copy_slices!(ciphertext[..message_len], out);
 
-        XChaCha20Poly1305::new(&self.key.into())
+        XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key)) /* seburity patch: no by-value key copy */
             .decrypt_in_place_detached(
                 &nonce_bytes.into(),
                 authtext,
@@ -504,7 +509,7 @@ impl Hash for HashSHA256 {
     }
 
     fn result(&mut self, out: &mut [u8]) {
-        let hash = self.hasher.finalize_reset();
+        let mut hash = self.hasher.finalize_reset(); // seburity patch: wiped below
         copy_slices!(hash.as_slice(), out);
     }
 }
@@ -532,7 +537,7 @@ impl Hash for HashSHA512 {
     }
 
     fn result(&mut self, out: &mut [u8]) {
-        let hash = self.hasher.finalize_reset();
+        let mut hash = self.hasher.finalize_reset(); // seburity patch: wiped below
         copy_slices!(hash.as_slice(), out);
     }
 }
@@ -560,8 +565,9 @@ impl Hash for HashBLAKE2b {
     }
 
     fn result(&mut self, out: &mut [u8]) {
-        let hash = self.hasher.finalize_reset();
+        let mut hash = self.hasher.finalize_reset(); // seburity patch: wiped below
         out[..64].copy_from_slice(&hash);
+        zeroize::Zeroize::zeroize(hash.as_mut_slice());
     }
 }
 
@@ -588,8 +594,9 @@ impl Hash for HashBLAKE2s {
     }
 
     fn result(&mut self, out: &mut [u8]) {
-        let hash = self.hasher.finalize_reset();
+        let mut hash = self.hasher.finalize_reset(); // seburity patch: wiped below
         out[..32].copy_from_slice(&hash);
+        zeroize::Zeroize::zeroize(hash.as_mut_slice());
     }
 }
 

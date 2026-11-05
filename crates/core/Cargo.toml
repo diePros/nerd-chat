@@ -11,7 +11,7 @@ getrandom = "0.3"
 blake2 = "0.11"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
-snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
+snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
 ml-kem = { version = "0.3", features = ["zeroize", "getrandom"] }
 sha2 = "0.11"
 sha3 = "0.12"

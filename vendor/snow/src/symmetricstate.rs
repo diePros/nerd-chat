@@ -16,6 +16,14 @@ pub(crate) struct SymmetricStateData {
     has_key: bool,
 }
 
+impl SymmetricStateData {
+    /// seburity patch: wipe a stack copy of the state.
+    pub(crate) fn wipe(&mut self) {
+        self.h.zeroize();
+        self.ck.zeroize();
+    }
+}
+
 impl Default for SymmetricStateData {
     fn default() -> Self {
         SymmetricStateData { h: [0_u8; MAXHASHLEN], ck: [0_u8; MAXHASHLEN], has_key: false }
