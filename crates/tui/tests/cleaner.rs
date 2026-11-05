@@ -45,7 +45,10 @@ fn the_helper_runs_under_hard_resource_limits() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(status.lines().any(|l| l.starts_with("Seccomp:") && l.ends_with('2')), "the helper must run under a seccomp FILTER: {status}");
-    assert!(status.lines().any(|l| l.starts_with("Seccomp_filters:") && l.ends_with('1')), "{status}");
+    // one more filter than this test process itself runs under (a CI runner/container may already apply its own)
+    let count = |t: &str| t.lines().find(|l| l.starts_with("Seccomp_filters:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+    let mine = count(&std::fs::read_to_string("/proc/self/status").unwrap());
+    assert_eq!(count(&status), mine + 1, "{status}");
     assert_eq!(get("Max open files"), "3 3", "{limits}");
     assert_eq!(get("Max file size"), "0 0", "{limits}");
     assert_eq!(get("Max processes"), "0 0", "{limits}");

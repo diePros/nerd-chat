@@ -47,7 +47,7 @@ fn child_dispatch() {
             }
             "open" => { libc::syscall(libc::SYS_openat, libc::AT_FDCWD, b"/etc/hostname\0".as_ptr(), libc::O_RDONLY); }
             "socket" => { libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0); }
-            "execve" => { let argv = [z, z]; libc::syscall(libc::SYS_execve, b"/bin/true\0".as_ptr(), argv.as_ptr(), argv.as_ptr()); }
+            "execve" => { let argv = [z, z]; libc::syscall(libc::SYS_execve, b"/nonexistent-seburity-path\0".as_ptr(), argv.as_ptr(), argv.as_ptr()); }  // ENOENT if it were allowed: exit 77, never a loader dying for another reason
             "kill_parent" => { libc::syscall(libc::SYS_kill, ppid, 0); }
             "mprotect" => { libc::syscall(libc::SYS_mprotect, 0, 0, 0); }
             "mmap_exec" => { libc::syscall(libc::SYS_mmap, 0, 4096, libc::PROT_READ | libc::PROT_EXEC, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1i64, 0); }
@@ -64,7 +64,7 @@ fn child_dispatch() {
             "close" => { libc::syscall(libc::SYS_close, 2); }
             "unlink" => { libc::syscall(libc::SYS_unlink, b"/tmp/seburity-sandbox-nonexistent\0".as_ptr()); }
             "fork" => { libc::syscall(libc::SYS_fork); }
-            "ptrace" => { libc::syscall(libc::SYS_ptrace, 0, 0, 0, 0); }
+            "ptrace" => { libc::syscall(libc::SYS_ptrace, 2 /* PTRACE_PEEKDATA */, 1, 0, 0); } // returns EPERM/ESRCH if it were allowed (TRACEME would hang the run)
             "prctl" => { libc::syscall(libc::SYS_prctl, libc::PR_SET_DUMPABLE, 1, 0, 0, 0); }
             "seccomp_again" => { libc::syscall(libc::SYS_seccomp, 0, 0, 0); }
             // 32-bit compat entry. eax = 11 is i386 `execve` but x86_64 `munmap` (an ALLOWED number): only the architecture check kills this
@@ -86,7 +86,11 @@ fn run_case(case: &str) -> Outcome {
     let end = Instant::now() + Duration::from_secs(20);
     let status = loop {
         if let Some(s) = c.try_wait().unwrap() { break s; }
-        if Instant::now() > end { let _ = c.kill(); let _ = c.wait(); panic!("case {case}: the child HUNG (a filter that kills only a thread?)"); }
+        if Instant::now() > end {
+            let _ = c.kill();
+            for _ in 0..500 { if c.try_wait().unwrap().is_some() { break; } std::thread::sleep(Duration::from_millis(10)); } // bounded: a traced zombie can be unreapable
+            panic!("case {case}: the child HUNG (a filter that kills only a thread?)");
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
     let stdout = reader.join().unwrap();

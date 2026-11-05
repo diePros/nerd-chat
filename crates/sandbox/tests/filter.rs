@@ -57,7 +57,7 @@ fn structure_is_sane() {
     assert_eq!((p[p.len() - 2].code, p[p.len() - 2].k), (0x06, KILL));
     // every conditional jump stays inside the program
     for (i, ins) in p.iter().enumerate() {
-        if ins.code == 0x15 || ins.code == 0x45 { assert!(i + 1 + (ins.jt.max(ins.jf) as usize) < p.len(), "jump out of range at {i}"); }
+        if ins.code == 0x15 || ins.code == 0x45 || ins.code == 0x35 { assert!(i + 1 + (ins.jt.max(ins.jf) as usize) < p.len(), "jump out of range at {i}"); }
     }
 }
 
