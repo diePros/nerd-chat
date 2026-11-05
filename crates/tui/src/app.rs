@@ -91,9 +91,11 @@ pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: b
 /// A contact may rotate its keys (and so make us re-publish our service) at most this often.
 const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
+/// Upper bound of the history scroll offset (the UI clamps to what really exists).
+const SCROLL_CAP: usize = 100_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, F12, CtrlBackslash }
+pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, BackTab, PageUp, PageDown, Home, End, F12, CtrlBackslash }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action { None, Quit, Panic }
@@ -102,6 +104,14 @@ pub enum Action { None, Quit, Panic }
 pub enum Prompt {
     NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson, SendFile, SendText, SaveFile,
 }
+
+/// What the right-hand pane shows (the contact list sidebar is always there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane { Details, Chat }
+
+/// Vim-style input: in `Normal` every key is a command, in `Insert` (chat only) keys are TEXT and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode { Normal, Insert }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -112,7 +122,6 @@ pub enum Screen {
     Prompt(Prompt),
     Verify,
     Help,
-    Chat,
     /// Vault key derivation running on a worker; only the panic key is honoured.
     Working,
     /// After a panic: everything wiped, nothing to show.
@@ -172,7 +181,15 @@ pub struct App {
     chats: HashMap<[u8; 8], Vec<ChatLine>>,
     linked: HashSet<[u8; 8]>,
     unread: HashMap<[u8; 8], u32>,
-    chat_with: Option<[u8; 8]>,
+    /// Right pane: details of the selected contact, or the conversation with it (the open chat is ALWAYS `sel_id()`).
+    pub pane: Pane,
+    pub mode: Mode,
+    /// Privacy screen (3rd Esc): the app keeps running underneath but draws nothing; Enter unlocks, q quits. NOT authentication.
+    pub locked: bool,
+    /// Lines scrolled up from the newest message (the UI clamps what it can show).
+    pub scroll: usize,
+    /// `q` pressed once with something that would be lost: a second `q` quits.
+    quit_armed: bool,
     compose: ComposeBuf,
     /// pending incoming file offers (contact id -> (transfer id, size))
     offers: HashMap<[u8; 8], (seburity_chat::file::Xid, u32)>,
@@ -205,7 +222,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, quit_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -228,11 +245,30 @@ impl App {
     }
     /// (name, trust, connected) of the open chat.
     pub fn chat_header(&self) -> Option<(&str, Trust, bool)> {
-        let id = self.chat_with?;
+        let id = self.chat_id()?;
         let c = self.vf.as_ref()?.store.contacts.iter().find(|c| c.id == id)?;
         Some((c.name.as_str(), c.trust, self.linked.contains(&id)))
     }
-    pub fn chat_lines(&self) -> &[ChatLine] { self.chat_with.and_then(|id| self.chats.get(&id)).map_or(&[], |v| v.as_slice()) }
+    /// The open conversation: the selected contact while the right pane shows the chat (one source of truth: `sel`).
+    pub fn chat_id(&self) -> Option<[u8; 8]> { if self.pane == Pane::Chat { self.sel_id() } else { None } }
+    /// Connection state of the selected contact for the details pane (None: no peer key yet).
+    pub fn selected_connection(&self) -> Option<&'static str> {
+        let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
+        c.peer.as_ref()?;
+        Some(if self.linked.contains(&c.id) { "connected" }
+             else if self.engine.is_some() { "online, the contact is not connected (yet)" }
+             else { "offline: press o to go online" })
+    }
+    /// Key rotation state of the selected contact (None: nothing in progress).
+    pub fn rotation_state(&self) -> Option<&'static str> {
+        let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
+        match (c.next_transport.is_some(), c.peer_old.is_some()) {
+            (true, _) => Some("key rotation pending: waiting for the contact's answer (your OLD onion address stays published until then)"),
+            (false, true) => Some("the contact rotated its keys: its old keys stay authorized until it confirms"),
+            _ => None,
+        }
+    }
+    pub fn chat_lines(&self) -> &[ChatLine] { self.chat_id().and_then(|id| self.chats.get(&id)).map_or(&[], |v| v.as_slice()) }
     pub fn compose_text(&self) -> &str { self.compose.as_str() }
     pub fn online_label(&self) -> String {
         match &self.online {
@@ -277,7 +313,11 @@ impl App {
         self.chats.clear();
         self.linked.clear();
         self.unread.clear();
-        self.chat_with = None;
+        self.pane = Pane::Details;
+        self.mode = Mode::Normal;
+        self.locked = false;
+        self.scroll = 0;
+        self.quit_armed = false;
         self.compose.clear();
         self.code_buf.clear();
         self.prep_rx = None;
@@ -309,13 +349,14 @@ impl App {
         if matches!(k, Key::F12 | Key::CtrlBackslash) { self.panic_wipe(); return Action::Panic; }
         match &self.screen {
             Screen::Wiped => Action::Quit,
+            // the privacy screen swallows every key (even for a prompt an engine event raised underneath it)
+            _ if self.locked => self.key_lock(k),
             Screen::Unlock => self.key_unlock(k),
             Screen::CreatePw | Screen::CreateConfirm => self.key_create(k),
             Screen::Main => self.key_main(k),
             Screen::Prompt(_) => { self.key_prompt(k); Action::None }
             Screen::Verify => { self.key_verify(k); Action::None }
             Screen::Help => { self.screen = Screen::Main; Action::None }
-            Screen::Chat => { self.key_chat(k); Action::None }
             Screen::Working => Action::None,
         }
     }
@@ -459,11 +500,59 @@ impl App {
 
     // ---------- main ----------
     fn key_main(&mut self, k: Key) -> Action {
-        let n = self.contacts_len();
+        if self.locked { return self.key_lock(k); }
+        if self.mode == Mode::Insert && self.pane == Pane::Chat { self.key_insert(k); return Action::None; }
+        self.key_normal(k)
+    }
+
+    /// Privacy screen: nothing but unlock/quit (and the panic key, handled before this).
+    fn key_lock(&mut self, k: Key) -> Action {
         match k {
-            Key::Char('q') | Key::Esc => return Action::Quit,
-            Key::Up | Key::Char('k') => self.sel = self.sel.saturating_sub(1),
-            Key::Down | Key::Char('j') => { if self.sel + 1 < n { self.sel += 1 } }
+            Key::Enter => {
+                self.locked = false;
+                self.mode = Mode::Normal; // never come back into typing mode
+                if let Some(id) = self.chat_id() { self.unread.remove(&id); }
+                Action::None
+            }
+            Key::Char('q') => Action::Quit,
+            _ => Action::None,
+        }
+    }
+
+    /// Insert mode (chat only): keys are TEXT. Nothing typed here can act as a command.
+    fn key_insert(&mut self, k: Key) {
+        match k {
+            Key::Esc => self.mode = Mode::Normal,
+            Key::Backspace => self.compose.pop(),
+            Key::Char(c) => { self.compose.push(c); }
+            Key::Enter => self.send_compose(),
+            _ => {}
+        }
+    }
+
+    fn key_normal(&mut self, k: Key) -> Action {
+        let chatting = self.pane == Pane::Chat;
+        if k != Key::Char('q') { self.quit_armed = false; }
+        match k {
+            // Esc ladder: (Insert -> Normal is in key_insert) chat -> details -> privacy lock
+            Key::Esc => {
+                if chatting { self.pane = Pane::Details; self.compose.clear(); self.scroll = 0; }
+                else { self.locked = true; }
+            }
+            Key::Char('q') => return self.quit_request(),
+            // reading: scroll the history (chat) or move through the contacts (details)
+            Key::Up | Key::Char('k') => if chatting { self.scroll = (self.scroll + 1).min(SCROLL_CAP); } else { self.sel = self.sel.saturating_sub(1) },
+            Key::Down | Key::Char('j') => if chatting { self.scroll = self.scroll.saturating_sub(1); } else if self.sel + 1 < self.contacts_len() { self.sel += 1 },
+            Key::PageUp => if chatting { self.scroll = (self.scroll + 10).min(SCROLL_CAP); },
+            Key::PageDown => if chatting { self.scroll = self.scroll.saturating_sub(10); },
+            Key::Home | Key::Char('g') => if chatting { self.scroll = SCROLL_CAP; },
+            Key::End | Key::Char('G') => if chatting { self.scroll = 0; },
+            Key::Tab => if chatting { self.step_contact(true) } else if self.sel + 1 < self.contacts_len() { self.sel += 1 },
+            Key::BackTab => if chatting { self.step_contact(false) } else { self.sel = self.sel.saturating_sub(1) },
+            // typing
+            Key::Char('i') => if chatting { self.mode = Mode::Insert } else { self.open_chat(true) },
+            Key::Enter => if chatting { self.mode = Mode::Insert } else { self.open_chat(false) },
+            // contact / global commands: work in the details view AND while reading a chat
             Key::Char('?') => self.screen = Screen::Help,
             Key::Char('K') => self.start_rotation(),
             Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } else { self.alerts_dropped = 0; } }
@@ -475,7 +564,7 @@ impl App {
                 let name = format!("bundle-{}.sbc", r.iter().map(|b| format!("{b:02x}")).collect::<String>());
                 self.open_prompt(Prompt::Export, &name)
             },
-            Key::Char('i') => if self.require_no_peer() { self.open_prompt(Prompt::Import, "") },
+            Key::Char('I') => if self.require_no_peer() { self.open_prompt(Prompt::Import, "") },
             Key::Char('l') => if self.require_no_peer() { self.open_prompt(Prompt::Listen, "127.0.0.1:0") },
             Key::Char('c') => if self.require_no_peer() { self.open_prompt(Prompt::JoinAddr, "") },
             Key::Char('x') => self.cancel_pairing(),
@@ -486,12 +575,36 @@ impl App {
             Key::Char('r') => self.reply_offer(false),
             Key::Char('s') => self.start_save(),
             Key::Char('h') => self.toggle_host_anyway(),
-            Key::Enter => self.open_chat(),
             Key::Char('v') => self.start_verify(),
             Key::Char('d') => if self.sel_name().is_some() { self.open_prompt(Prompt::ConfirmDelete, "") },
             _ => {}
         }
         Action::None
+    }
+
+    /// `q`: quit (RAM is wiped on exit). If queued messages or an unsaved received file would be lost, the SECOND `q` quits.
+    fn quit_request(&mut self) -> Action {
+        let queued = self.chats.values().flatten().filter(|l| l.mine && l.queued).count();
+        let files = self.inbox.len() + self.offers.len() + self.accepted.len();
+        if (queued > 0 || files > 0) && !self.quit_armed {
+            self.quit_armed = true;
+            self.err(format!("Quitting wipes RAM: {queued} queued message(s) and {files} unsaved/arriving file(s) would be lost. Press q again to quit, any other key to stay."));
+            return Action::None;
+        }
+        Action::Quit
+    }
+
+    /// Tab / Shift+Tab inside a chat: the next/previous contact that has a peer (wraps). The draft is dropped, unread cleared, history at the newest.
+    fn step_contact(&mut self, forward: bool) {
+        let ids: Vec<usize> = self.vf.as_ref().map_or(vec![], |v| v.store.contacts.iter().enumerate().filter(|(_, c)| c.peer.is_some()).map(|(i, _)| i).collect());
+        if ids.len() < 2 { return; }
+        let pos = ids.iter().position(|&i| i == self.sel).unwrap_or(0);
+        let next = if forward { (pos + 1) % ids.len() } else { (pos + ids.len() - 1) % ids.len() };
+        self.sel = ids[next];
+        self.compose.clear();
+        self.scroll = 0;
+        self.mode = Mode::Normal;
+        if let Some(id) = self.sel_id() { self.unread.remove(&id); }
     }
 
     fn sel_id(&self) -> Option<[u8; 8]> { self.vf.as_ref()?.store.contacts.get(self.sel).map(|c| c.id) }
@@ -694,6 +807,7 @@ impl App {
     }
 
     fn open_prompt(&mut self, p: Prompt, default: &str) {
+        self.mode = Mode::Normal; // a prompt (also one raised by an engine/pairing event) is never typed into by accident
         self.input = default.to_string();
         self.screen = Screen::Prompt(p);
     }
@@ -748,7 +862,10 @@ impl App {
             Prompt::NewContact => match self.vf().store.add_contact(text.trim_end_matches('\n')) {
                 Ok(i) => {
                     self.sel = i;
-                    if self.save() { self.ok("Contact created with a NEW keypair. Export your bundle (e) and send it, then import theirs (i), or pair over the local link (l / c)."); }
+                    self.pane = Pane::Details; // the new contact has no peer yet: show its details
+                    self.mode = Mode::Normal;
+                    self.compose.clear();
+                    if self.save() { self.ok("Contact created with a NEW keypair. Export your bundle (e) and send it, then import theirs (I), or pair over the local link (l / c)."); }
                 }
                 Err(e) => self.err(format!("{e}")),
             },
@@ -833,6 +950,10 @@ impl App {
                     }
                     self.vf().store.remove(i);
                     self.sel = self.sel.saturating_sub(1);
+                    self.pane = Pane::Details;
+                    self.mode = Mode::Normal;
+                    self.compose.clear();
+                    self.scroll = 0;
                     if self.save() { self.ok("Contact and its keys deleted."); }
                 } else { self.ok("Not deleted (type yes to confirm)."); }
             }
@@ -1015,37 +1136,29 @@ impl App {
         })
     }
 
-    fn open_chat(&mut self) {
+    fn open_chat(&mut self, typing: bool) {
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)) else { return self.err("No contact selected. Press n to add one.") };
-        if c.peer.is_none() { return self.err("No peer key yet: import their file (i) or pair (l / c) first."); }
+        if c.peer.is_none() { return self.err("No peer key yet: import their file (I) or pair (l / c) first."); }
         let id = c.id;
-        self.chat_with = Some(id);
+        self.pane = Pane::Chat;
+        self.mode = if typing { Mode::Insert } else { Mode::Normal };
         self.unread.remove(&id);
         self.compose.clear();
-        self.screen = Screen::Chat;
+        self.scroll = 0;
         if self.online == Online::Offline { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type; messages are sent only while online."); }
     }
 
-    fn key_chat(&mut self, k: Key) {
-        match k {
-            Key::Esc | Key::Tab => { self.compose.clear(); self.chat_with = None; self.screen = Screen::Main; }
-            Key::Backspace => self.compose.pop(),
-            Key::Char(c) => { self.compose.push(c); }
-            Key::Enter => self.send_compose(),
-            _ => {}
-        }
-    }
-
     fn send_compose(&mut self) {
-        let Some(id) = self.chat_with else { return };
+        let Some(id) = self.chat_id() else { return };
         if self.compose.is_empty() { return; }
-        if self.engine.is_none() { return self.err("You are offline: press Esc, then o. (Nothing was sent.)"); }
+        if self.engine.is_none() { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
         let text = self.compose.take_string();
         let queued = !self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
         if let Some(e) = &self.engine { e.send(id, text); }
         self.push_line(id, ChatLine { mine: true, text: shown, queued });
+        self.scroll = 0; // sending jumps to the newest line
         if queued { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
     }
 
@@ -1112,7 +1225,7 @@ impl App {
                 Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::Message { id, text } => {
                     self.push_line(id, ChatLine { mine: false, text, queued: false });
-                    if !(self.screen == Screen::Chat && self.chat_with == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
+                    if !(self.pane == Pane::Chat && !self.locked && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
@@ -1381,7 +1494,7 @@ mod tests {
         a.handle(Key::Char('e')); a.input.clear(); type_str(&mut a, fa.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error);
         for (app, f) in [(&mut a, &fb), (&mut b, &fa)] {
-            app.handle(Key::Char('i')); type_str(app, f.to_str().unwrap()); app.handle(Key::Enter);
+            app.handle(Key::Char('I')); type_str(app, f.to_str().unwrap()); app.handle(Key::Enter);
             assert!(!app.error, "{}", app.status);
             assert_eq!(app.selected_detail().unwrap().1, Trust::Unverified);
         }
@@ -1399,7 +1512,7 @@ mod tests {
         type_str(&mut a2, "correct horse battery"); a2.handle(Key::Enter);
         assert_eq!(a2.selected_detail().unwrap().1, Trust::SafetyVerified);
         // importing your own bundle or a second peer is refused
-        a.handle(Key::Char('i')); assert!(a.error);
+        a.handle(Key::Char('I')); assert!(a.error);
     }
 
     #[test]
@@ -1407,14 +1520,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
         let g = d.path().join("g.sbc"); fs::write(&g, "garbage").unwrap();
-        a.handle(Key::Char('i')); type_str(&mut a, g.to_str().unwrap()); a.handle(Key::Enter);
+        a.handle(Key::Char('I')); type_str(&mut a, g.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error && a.selected_detail().unwrap().2.is_none());
         let own = d.path().join("own.sbc");
         a.handle(Key::Char('e')); a.input.clear(); type_str(&mut a, own.to_str().unwrap()); a.handle(Key::Enter);
-        a.handle(Key::Char('i')); type_str(&mut a, own.to_str().unwrap()); a.handle(Key::Enter);
+        a.handle(Key::Char('I')); type_str(&mut a, own.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error && a.status.contains("OWN"));
         let big = d.path().join("big.sbc"); fs::write(&big, vec![b'A'; 100_000]).unwrap();
-        a.handle(Key::Char('i')); type_str(&mut a, big.to_str().unwrap()); a.handle(Key::Enter);
+        a.handle(Key::Char('I')); type_str(&mut a, big.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error);
     }
 
@@ -1550,11 +1663,11 @@ mod tests {
         let fifo = d.path().join("bob.sbc");
         assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
         let t = Instant::now();
-        a.handle(Key::Char('i')); type_str(&mut a, fifo.to_str().unwrap()); a.handle(Key::Enter);
+        a.handle(Key::Char('I')); type_str(&mut a, fifo.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error && t.elapsed() < Duration::from_secs(2));
         let link = d.path().join("tty.sbc");
         std::os::unix::fs::symlink("/dev/tty", &link).unwrap();
-        a.handle(Key::Char('i')); type_str(&mut a, link.to_str().unwrap()); a.handle(Key::Enter);
+        a.handle(Key::Char('I')); type_str(&mut a, link.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error);
     }
 
@@ -1592,7 +1705,7 @@ mod tests {
             assert!(!app.error, "{}", app.status);
         }
         for (app, f) in [(&mut *a, &fb), (&mut *b, &fa)] {
-            app.handle(Key::Char('i')); type_str(app, f.to_str().unwrap()); app.handle(Key::Enter);
+            app.handle(Key::Char('I')); type_str(app, f.to_str().unwrap()); app.handle(Key::Enter);
             assert!(!app.error, "{}", app.status);
         }
     }
@@ -1645,7 +1758,7 @@ mod tests {
         assert_eq!(a.selected_detail().unwrap().2, sn_before, "rotation must not change the safety number");
         // chat still works afterwards, and the rotated keys survive a vault reload
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.handle(Key::Enter); type_str(&mut a, "still here"); a.handle(Key::Enter);
+        a.handle(Key::Char('i')); type_str(&mut a, "still here"); a.handle(Key::Enter);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.get(&x[1].vf.as_ref().unwrap().store.contacts[0].id).is_some_and(|l| l.iter().any(|m| m.text.as_str() == "still here"))));
         let _ = id;
         let on = onion_of(&a);
@@ -1732,13 +1845,13 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online), "{:?}", a.status);
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])), "never connected");
         // alice's side: open chat, type, send
-        a.handle(Key::Enter);
-        assert_eq!(a.screen, Screen::Chat);
+        a.handle(Key::Char('i'));
+        assert_eq!((a.pane, a.mode), (Pane::Chat, Mode::Insert));
         type_str(&mut a, "hello bob, this is private"); a.handle(Key::Enter);
         assert!(a.compose_text().is_empty() && a.chat_lines().len() == 1 && a.chat_lines()[0].mine && !a.chat_lines()[0].queued);
         // bob sees an unread marker, opens the chat, sees the line
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].contact_rows()[0].4 == 1), "no unread marker");
-        b.handle(Key::Enter);
+        b.handle(Key::Char('i'));
         assert_eq!(&*b.chat_lines()[0].text, "hello bob, this is private");
         assert!(!b.chat_lines()[0].mine);
         assert_eq!(b.contact_rows()[0].4, 0, "unread cleared by opening");
@@ -1747,7 +1860,7 @@ mod tests {
         term.draw(|f| crate::ui::draw(f, &b)).unwrap();
         let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(screen.contains("hello bob, this is private") && screen.contains("them>") && screen.contains("connected"), "{screen}");
-        assert!(screen.contains("WARNING: identity not verified"), "unverified contacts carry a visible warning");
+        assert!(screen.contains("WARNING: NOT verified"), "unverified contacts carry a visible warning");
         type_str(&mut b, "got it"); b.handle(Key::Enter);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 2), "reply never arrived");
         assert_eq!(&*a.chat_lines()[1].text, "got it");
@@ -1929,7 +2042,7 @@ mod tests {
         a.handle(Key::Char('o')); assert!(a.error, "second press while stopping is refused");
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline), "never finished stopping");
         assert!(pump_until(&mut [&mut a, &mut b], |x| !is_linked(x[1])), "peer must notice");
-        a.handle(Key::Enter); type_str(&mut a, "x"); a.handle(Key::Enter);
+        a.handle(Key::Char('i')); type_str(&mut a, "x"); a.handle(Key::Enter);
         assert!(a.error && a.status.contains("offline") && a.chat_lines().is_empty());
     }
 
@@ -1958,7 +2071,7 @@ mod tests {
         link_apps(&mut a, &mut b, d.path());
         go_online(&mut a); go_online(&mut b);
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
-        a.handle(Key::Enter); type_str(&mut a, "secret words"); a.handle(Key::Enter);
+        a.handle(Key::Char('i')); type_str(&mut a, "secret words"); a.handle(Key::Enter);
         type_str(&mut a, "half typed secret");
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].contact_rows()[0].4 == 1));
         // PANIC on a: engine stopped, messages gone, half-typed line gone, quick
@@ -2041,7 +2154,7 @@ mod tests {
         let f = d.path().join("evil.sbc");
         fs::write(&f, file::armor(&bad.encode(&mal))).unwrap();
         a.sel = 1;
-        a.handle(Key::Char('i')); type_str(&mut a, f.to_str().unwrap()); a.handle(Key::Enter);
+        a.handle(Key::Char('I')); type_str(&mut a, f.to_str().unwrap()); a.handle(Key::Enter);
         assert!(a.error && a.status.contains("Refused"), "{}", a.status);
         assert!(a.selected_detail().unwrap().2.is_none(), "nothing was stored");
     }
@@ -2053,8 +2166,8 @@ mod tests {
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         a.vf.as_mut().unwrap().store.contacts[0].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
-        a.chat_with = Some(id);
-        a.screen = Screen::Chat;
+        let _ = id;
+        a.pane = Pane::Chat;
         let msg: String = "漢".repeat(60);
         a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false });
         a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false });
@@ -2077,5 +2190,258 @@ mod tests {
         while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
         assert!(a.error && b.error, "{} / {}", a.status, b.status);
         assert!(a.selected_detail().unwrap().2.is_none() && b.selected_detail().unwrap().2.is_none());
+    }
+
+    // ---------- vim-style modes, sidebar layout, privacy screen (UI overhaul) ----------
+
+    fn add_peer(a: &mut App, name: &str) {
+        add(a, name);
+        let i = a.vf.as_ref().unwrap().store.contacts.len() - 1;
+        a.vf().store.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
+    }
+
+    fn screen_text(a: &App, w: u16, h: u16) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| crate::ui::draw(f, a)).unwrap();
+        term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn esc_ladder_walks_typing_normal_details_lock_and_enter_comes_back() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        assert_eq!((a.pane, a.mode, a.locked), (Pane::Details, Mode::Normal, false));
+        a.handle(Key::Char('i'));                                   // details -> chat, typing
+        assert_eq!((a.pane, a.mode), (Pane::Chat, Mode::Insert));
+        type_str(&mut a, "draft");
+        a.handle(Key::Esc);                                         // 1st Esc: leave typing only
+        assert_eq!((a.pane, a.mode, a.locked), (Pane::Chat, Mode::Normal, false));
+        assert_eq!(a.compose_text(), "draft", "leaving insert mode keeps the draft");
+        a.handle(Key::Esc);                                         // 2nd Esc: back to the details
+        assert_eq!((a.pane, a.mode, a.locked), (Pane::Details, Mode::Normal, false));
+        assert_eq!(a.compose_text(), "", "closing the chat drops the draft");
+        assert_eq!(a.handle(Key::Esc), Action::None);               // 3rd Esc: privacy screen, NOT quit
+        assert!(a.locked && a.screen == Screen::Main);
+        assert_eq!(a.handle(Key::Esc), Action::None); assert!(a.locked, "Esc on the lock screen does nothing");
+        assert_eq!(a.handle(Key::Char('f')), Action::None); assert!(a.locked && a.screen == Screen::Main, "other keys are swallowed");
+        a.handle(Key::Enter);
+        assert!(!a.locked && a.pane == Pane::Details && a.sel == 0, "Enter unlocks without a password and returns to where we were");
+        a.handle(Key::Esc); assert!(a.locked);
+        assert_eq!(a.handle(Key::Char('q')), Action::Quit, "q on the lock screen quits");
+    }
+
+    #[test]
+    fn panic_key_works_in_every_mode_pane_and_in_the_lock() {
+        for setup in 0..4 {
+            let d = tempfile::tempdir().unwrap();
+            let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+            match setup { 0 => {} , 1 => { a.handle(Key::Char('i')); } , 2 => { a.handle(Key::Char('i')); a.handle(Key::Esc); } , _ => { a.handle(Key::Esc); } }
+            type_str_if_insert(&mut a);
+            assert_eq!(a.handle(Key::F12), Action::Panic, "setup {setup}");
+            assert_eq!(a.screen, Screen::Wiped);
+            assert!(!a.locked && a.pane == Pane::Details && a.mode == Mode::Normal && a.scroll == 0 && a.compose_text().is_empty());
+        }
+    }
+    fn type_str_if_insert(a: &mut App) { if a.mode == Mode::Insert { type_str(a, "secret draft"); } }
+
+    #[test]
+    fn typed_text_in_insert_mode_never_acts_as_a_command() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob"); add_peer(&mut a, "carol");
+        a.handle(Key::Char('i'));
+        for c in "qfatsvdohKzgGjk?nIlcxe I".chars() { assert_eq!(a.handle(Key::Char(c)), Action::None, "{c}"); }
+        assert_eq!((a.screen == Screen::Main, a.pane, a.mode, a.locked), (true, Pane::Chat, Mode::Insert, false), "still typing, no prompt, no popup, not locked");
+        assert_eq!(a.compose_text(), "qfatsvdohKzgGjk?nIlcxe I");
+        assert_eq!(a.contacts_len(), 2, "no contact was created or deleted");
+        assert_eq!(a.online, Online::Offline);
+        // Tab / arrows in insert mode do nothing either (no contact switch, no scroll)
+        let sel = a.sel;
+        for k in [Key::Tab, Key::BackTab, Key::Up, Key::Down, Key::PageUp, Key::Home] { a.handle(k); }
+        assert_eq!((a.sel, a.scroll), (sel, 0));
+    }
+
+    #[test]
+    fn contact_commands_work_in_normal_mode_while_a_chat_is_open_and_act_on_the_shown_contact() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob"); add_peer(&mut a, "carol");
+        a.sel = 1;
+        a.handle(Key::Enter);                                        // open the chat of carol (normal mode)
+        assert_eq!((a.pane, a.mode, a.sel), (Pane::Chat, Mode::Normal, 1));
+        a.handle(Key::Char('v'));                                    // verify: carol's safety number
+        assert_eq!(a.screen, Screen::Verify);
+        a.handle(Key::Char('n')); assert_eq!(a.screen, Screen::Main);
+        a.handle(Key::Char('f'));                                    // not connected: refused with a reason, no prompt
+        assert!(a.error && a.status.contains("CONNECTED") && a.screen == Screen::Main, "{}", a.status);
+        a.handle(Key::Char('d'));
+        assert_eq!(a.screen, Screen::Prompt(Prompt::ConfirmDelete));
+        type_str(&mut a, "yes"); a.handle(Key::Enter);
+        assert_eq!(a.contacts_len(), 1, "carol (the contact shown) was deleted, not bob");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].name, "bob");
+        assert_eq!((a.pane, a.mode), (Pane::Details, Mode::Normal), "deleting the open contact closes the chat");
+    }
+
+    #[test]
+    fn tab_and_shift_tab_switch_contacts_and_reset_the_chat_state() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob"); add(&mut a, "nopeer"); add_peer(&mut a, "carol");
+        let ids: Vec<[u8; 8]> = a.vf.as_ref().unwrap().store.contacts.iter().map(|c| c.id).collect();
+        a.sel = 0; a.handle(Key::Enter);
+        a.handle(Key::Char('i')); type_str(&mut a, "half"); a.handle(Key::Esc);
+        a.unread.insert(ids[2], 3); a.scroll = 7;
+        a.handle(Key::Tab);
+        assert_eq!(a.sel, 2, "Tab skips contacts without a peer key");
+        assert_eq!((a.compose_text(), a.scroll, a.mode, a.pane), ("", 0, Mode::Normal, Pane::Chat));
+        assert_eq!(a.unread.get(&ids[2]), None, "unread cleared by showing the chat");
+        a.handle(Key::Tab); assert_eq!(a.sel, 0, "wraps around");
+        a.handle(Key::BackTab); assert_eq!(a.sel, 2);
+        // in the details view Tab/Shift+Tab just move the selection
+        a.handle(Key::Esc); assert_eq!(a.pane, Pane::Details);
+        a.sel = 0; a.handle(Key::Tab); assert_eq!(a.sel, 1); a.handle(Key::BackTab); assert_eq!(a.sel, 0);
+    }
+
+    #[test]
+    fn history_scrolls_and_jumps_back_to_the_newest_line() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false }); }
+        a.handle(Key::Enter);
+        let s0 = screen_text(&a, 110, 24);
+        assert!(s0.contains("line-59") && !s0.contains("line-00"), "starts at the newest line");
+        a.handle(Key::Home);                                         // oldest
+        let s1 = screen_text(&a, 110, 24);
+        assert!(s1.contains("line-00") && !s1.contains("line-59") && s1.contains("scrolled up"), "{s1}");
+        a.handle(Key::End);
+        assert_eq!(a.scroll, 0);
+        a.handle(Key::Char('k')); a.handle(Key::Up); assert_eq!(a.scroll, 2);
+        a.handle(Key::PageUp); assert_eq!(a.scroll, 12);
+        a.handle(Key::Char('j')); a.handle(Key::PageDown); a.handle(Key::PageDown); assert_eq!(a.scroll, 0, "never below the newest line");
+        a.handle(Key::Char('g')); assert!(a.scroll > 1000); a.handle(Key::Char('G')); assert_eq!(a.scroll, 0);
+        // sending jumps to the newest line
+        a.handle(Key::Char('i')); a.scroll = 9; a.engine = None;
+        type_str(&mut a, "x"); a.handle(Key::Enter);                 // offline: refused, nothing sent, scroll untouched
+        assert!(a.error);
+    }
+
+    #[test]
+    fn the_sidebar_stays_visible_in_every_state_and_narrow_terminals_show_one_pane() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob"); add_peer(&mut a, "carol");
+        let details = screen_text(&a, 110, 24);
+        assert!(details.contains("Contacts") && details.contains("bob") && details.contains("carol") && details.contains("Details"));
+        a.sel = 0; a.handle(Key::Enter);
+        let chat = screen_text(&a, 110, 24);
+        assert!(chat.contains("bob") && chat.contains("carol") && chat.contains("Contacts") && chat.contains("Conversation") && chat.contains("NORMAL"), "{chat}");
+        a.handle(Key::Char('n'));                                     // a prompt: the sidebar is still there under it
+        let prompt = screen_text(&a, 110, 24);
+        assert!(prompt.contains("New contact") && prompt.contains("carol"));
+        a.handle(Key::Esc);
+        a.handle(Key::Char('i')); assert!(screen_text(&a, 110, 24).contains("-- INSERT --"));
+        // narrow terminal (< 70 columns): one pane at a time
+        let narrow_chat = screen_text(&a, 60, 20);
+        assert!(narrow_chat.contains("Conversation") && !narrow_chat.contains("Contacts"), "{narrow_chat}");
+        a.handle(Key::Esc); a.handle(Key::Esc);
+        let narrow_list = screen_text(&a, 60, 20);
+        assert!(narrow_list.contains("Contacts") && !narrow_list.contains("Conversation"));
+        let mut tiny = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 5)).unwrap();
+        tiny.draw(|f| crate::ui::draw(f, &a)).unwrap();               // no panic
+    }
+
+    #[test]
+    fn the_privacy_screen_draws_nothing_about_contacts_or_messages() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bobsecret");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false });
+        a.unread.insert(id, 4);
+        a.record_alert(Some(id), "something bad happened with bobsecret");
+        assert!(screen_text(&a, 110, 24).contains("bobsecret"));      // sanity: visible when unlocked
+        a.handle(Key::Esc);
+        let locked = screen_text(&a, 110, 24);
+        assert!(locked.contains("LOCKED") && locked.contains("Enter = unlock") && locked.contains("a security alert is waiting"));
+        for leak in ["bobsecret", "topsecretmessage", "something bad", "Contacts", "Details", "SEBURITY", "[4]"] { assert!(!locked.contains(leak), "the privacy screen leaked {leak:?}"); }
+        let narrow = screen_text(&a, 30, 8);
+        assert!(!narrow.contains("bobsecret"));
+    }
+
+    #[test]
+    fn the_app_keeps_running_underneath_the_privacy_screen() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        a.handle(Key::Esc); assert!(a.locked);
+        b.handle(Key::Char('i')); type_str(&mut b, "while you were away"); b.handle(Key::Enter);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].contact_rows()[0].4 == 1), "the message must arrive while locked");
+        assert!(is_linked(&a), "the connection stays up under the privacy screen");
+        assert!(!screen_text(&a, 100, 20).contains("while you were away"));
+        a.handle(Key::Enter);
+        assert!(screen_text(&a, 100, 20).contains("[1]"), "unread marker visible after unlocking");
+        a.handle(Key::Enter);
+        assert!(a.chat_lines().iter().any(|l| &*l.text == "while you were away"));
+    }
+
+    #[test]
+    fn an_in_person_prompt_raised_over_a_chat_returns_to_that_chat_in_normal_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        a.handle(Key::Char('i'));
+        a.open_prompt(Prompt::InPerson, "");                         // what poll() does when a pairing finishes
+        assert_eq!(a.mode, Mode::Normal, "typing mode must not survive a prompt");
+        a.handle(Key::Esc);
+        assert_eq!((a.screen == Screen::Main, a.pane, a.mode, a.sel_id().is_some()), (true, Pane::Chat, Mode::Normal, true));
+        // a prompt raised while locked stays hidden and is not answerable until unlocked
+        a.handle(Key::Esc); a.handle(Key::Esc); assert!(a.locked);
+        a.open_prompt(Prompt::InPerson, "");
+        assert!(screen_text(&a, 90, 20).contains("LOCKED") && !screen_text(&a, 90, 20).contains("IN PERSON"));
+        a.handle(Key::Char('y')); assert!(a.locked && a.screen == Screen::Prompt(Prompt::InPerson), "keys do not reach the prompt");
+        a.handle(Key::Enter); assert!(!a.locked && a.screen == Screen::Prompt(Prompt::InPerson));
+    }
+
+    #[test]
+    fn quitting_asks_twice_only_when_something_would_be_lost() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        assert_eq!(a.handle(Key::Char('q')), Action::Quit, "nothing pending: quits at once");
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true });
+        assert_eq!(a.handle(Key::Char('q')), Action::None);
+        assert!(a.error && a.status.contains("q again") && a.status.contains("1 queued"), "{}", a.status);
+        a.handle(Key::Char('j'));                                    // any other key disarms
+        assert_eq!(a.handle(Key::Char('q')), Action::None);
+        assert_eq!(a.handle(Key::Char('q')), Action::Quit, "second q quits");
+    }
+
+    #[test]
+    fn a_long_draft_shows_its_tail_and_the_stale_tor_text_is_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let stale = screen_text(&a, 110, 24);
+        assert!(!stale.contains("Tor transport") && !stale.contains("next build stage"), "the long outdated line must be gone");
+        assert!(stale.contains("Connection: offline"), "a live connection line instead: {stale}");
+        a.handle(Key::Char('i'));
+        type_str(&mut a, &format!("{}THE-END", "x".repeat(300)));
+        let s = screen_text(&a, 80, 24);
+        assert!(s.contains("THE-END") && s.contains("-- INSERT --"), "the end of a long draft must stay visible");
+    }
+
+    #[test]
+    fn contact_rotation_state_and_footer_hints_follow_the_context() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let details = screen_text(&a, 200, 24);
+        assert!(details.contains("Esc lock") && details.contains("Enter chat"));
+        a.handle(Key::Enter);
+        let normal = screen_text(&a, 200, 24);
+        assert!(normal.contains("NORMAL") && normal.contains("f file") && normal.contains("Tab next") && !normal.contains("Esc lock"));
+        a.handle(Key::Char('i'));
+        let insert = screen_text(&a, 200, 24);
+        assert!(insert.contains("Enter send") && insert.contains("Esc normal mode") && !insert.contains("f file"), "no command keys are advertised while typing");
+        a.vf().store.contacts[0].next_transport = Some(Zeroizing::new([1u8; 64]));
+        a.handle(Key::Esc); a.handle(Key::Esc);
+        assert!(screen_text(&a, 200, 30).contains("key rotation pending"));
     }
 }

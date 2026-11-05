@@ -1,5 +1,5 @@
 //! Rendering only. Reads `App`, never mutates it. Passwords are shown as dots only.
-use crate::app::{App, Prompt, Screen};
+use crate::app::{App, Mode, Pane, Prompt, Screen};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -27,6 +27,8 @@ fn trust_label(t: Trust, has_peer: bool) -> (&'static str, Color) {
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     if app.screen == Screen::Wiped { f.render_widget(Clear, area); return; }
+    // Privacy screen: ONLY this is drawn (the app underneath is not rendered at all, so no name or message stays in the terminal buffer).
+    if app.locked { lock_view(f, area, app); return; }
     let rows = Layout::default().direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 }), Constraint::Length(1)]).split(area);
     let mode = if app.is_ram_only() { "RAM-ONLY" } else { "vault" };
@@ -40,9 +42,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Unlock => secret_box(f, rows[1], "Unlock vault", "Password", app.pw.chars()),
         Screen::CreatePw => secret_box(f, rows[1], "Create new vault", "New password (long passphrase)", app.pw.chars()),
         Screen::CreateConfirm => secret_box(f, rows[1], "Create new vault", "Repeat password", 0),
-        Screen::Chat => chat_view(f, rows[1], app),
         Screen::Working => secret_box(f, rows[1], "Working", "Deriving the key... (F12 = panic)", 0),
-        _ => main_view(f, rows[1], app),
+        _ => body(f, rows[1], app),
     }
 
     // Security warnings are sticky: shown above the status line until acknowledged (z), never overwritten.
@@ -62,8 +63,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows2);
     }
-    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  h host-anyway  K rotate-keys  z ack-alert  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
-        .style(Style::default().fg(Color::DarkGray)), rows[3]);
+    f.render_widget(Paragraph::new(footer_hint(app)).style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
         Screen::Prompt(p) => {
@@ -76,6 +76,22 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+/// Only keys that really work in the current state (mode / pane), most important first; the terminal clips the rest.
+fn footer_hint(app: &App) -> &'static str {
+    match (&app.screen, app.pane, app.mode) {
+        (Screen::Prompt(_), _, _) => " Enter ok  Esc cancel   F12 / Ctrl+\\ = PANIC WIPE",
+        (Screen::Main, Pane::Chat, Mode::Insert) => " -- INSERT --  Enter send  Esc normal mode   F12 / Ctrl+\\ = PANIC WIPE",
+        (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC",
+        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC",
+        _ => " F12 / Ctrl+\\ = PANIC WIPE",
+    }
+}
+
+fn trust_glyph(t: Trust, has_peer: bool) -> (&'static str, Color) {
+    if !has_peer { return ("○", Color::DarkGray); }
+    match t { Trust::Unverified => ("◔", Color::Red), Trust::CodeAuthenticated => ("◑", Color::Yellow), Trust::SafetyVerified => ("●", Color::Green) }
+}
+
 fn secret_box(f: &mut Frame, area: Rect, title: &str, label: &str, n: usize) {
     let r = centered(area, 60, 5);
     let dots = "•".repeat(n.min(50));
@@ -83,20 +99,46 @@ fn secret_box(f: &mut Frame, area: Rect, title: &str, label: &str, n: usize) {
         .block(Block::bordered().title(title)), r);
 }
 
-fn main_view(f: &mut Frame, area: Rect, app: &App) {
-    let cols = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
+/// Privacy screen: a shaded pattern over the whole terminal, nothing about contacts or messages.
+fn lock_view(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let rows: Vec<Line> = (0..area.height as usize).map(|y| Line::from(Span::styled("░▒".repeat(w / 2 + 1).chars().skip(y % 2).take(w).collect::<String>(), Style::default().fg(Color::DarkGray)))).collect();
+    f.render_widget(Paragraph::new(rows), area);
+    let mut lines = vec![Line::from(Span::styled("LOCKED", Style::default().add_modifier(Modifier::BOLD))), Line::from("Enter = unlock    q = quit")];
+    lines.push(Line::from(if app.alerts.is_empty() { "" } else { "! a security alert is waiting: unlock to read it" }));
+    lines.push(Line::from(Span::styled("privacy screen only: the vault stays open, F12 = panic wipe", Style::default().fg(Color::DarkGray))));
+    let r = centered(area, 56, 6);
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(Block::bordered()), r);
+}
+
+/// Sidebar (always) + right pane (details or conversation). Narrow terminals show one pane at a time.
+fn body(f: &mut Frame, area: Rect, app: &App) {
+    if area.width < 70 {
+        if app.pane == Pane::Chat { chat_view(f, area, app) } else { sidebar(f, area, app) }
+        return;
+    }
+    let side_w = (area.width / 4).clamp(24, 34);
+    let cols = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Length(side_w), Constraint::Min(20)]).split(area);
+    sidebar(f, cols[0], app);
+    if app.pane == Pane::Chat { chat_view(f, cols[1], app) } else { details_view(f, cols[1], app) }
+}
+
+fn sidebar(f: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app.contact_rows().iter().map(|(n, t, p, linked, unread)| {
-        let (l, c) = trust_label(*t, *p);
+        let (g, c) = trust_glyph(*t, *p);
         let dot = if *linked { Span::styled("● ", Style::default().fg(Color::Green)) } else { Span::raw("  ") };
-        let mut v = vec![dot, Span::raw(format!("{n}  ")), Span::styled(l, Style::default().fg(c))];
-        if *unread > 0 { v.push(Span::styled(format!("  [{unread} new]"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))); }
+        let mut v = vec![dot, Span::raw(format!("{n} ")), Span::styled(g, Style::default().fg(c))];
+        if *unread > 0 { v.push(Span::styled(format!(" [{unread}]"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))); }
         ListItem::new(Line::from(v))
     }).collect();
     let mut st = ListState::default();
     if !items.is_empty() { st.select(Some(app.sel)); }
-    f.render_stateful_widget(List::new(items).block(Block::bordered().title("Contacts (each has its own keypair)"))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED)), cols[0], &mut st);
+    f.render_stateful_widget(List::new(items).block(Block::bordered().title("Contacts"))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED)), area, &mut st);
+}
 
+fn details_view(f: &mut Frame, area: Rect, app: &App) {
     let detail = match app.selected_detail() {
         None => vec![Line::from("No contacts yet. Press n to add one: a NEW keypair is generated for each contact.")],
         Some((name, trust, sn)) => {
@@ -108,11 +150,12 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
                     for chunk in n.split(' ').collect::<Vec<_>>().chunks(4) { v.push(Line::from(Span::styled(chunk.join("  "), Style::default().add_modifier(Modifier::BOLD)))); }
                     if trust != Trust::SafetyVerified { v.push(Line::from("")); v.push(Line::from("Compare these digits over a DIFFERENT channel (voice/in person), then press v.")); }
                     v.push(Line::from(""));
-                    v.push(Line::from("Chat needs the Tor transport (next build stage)."));
+                    if let Some(conn) = app.selected_connection() { v.push(Line::from(format!("Connection: {conn}"))); }
+                    v.push(Line::from("Enter = open the chat, i = open it and start typing."));
                 }
                 None => {
                     v.push(Line::from("Next: e = export YOUR public bundle and send it,"));
-                    v.push(Line::from("      i = import THEIR bundle file, or"));
+                    v.push(Line::from("      I = import THEIR bundle file, or"));
                     v.push(Line::from("      l / c = pair directly over LAN with a one-time code."));
                 }
             }
@@ -126,26 +169,39 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
                         if told { "CAN" } else { "CANNOT" }, if told { "--cannot-host" } else { "hosting enabled" }), Style::default().fg(Color::Yellow))));
                 }
             }
+            if let Some(r) = app.rotation_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(r, Style::default().fg(Color::Yellow)))); }
             if let Some(fs) = app.file_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(fs, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }
             v
         }
     };
-    f.render_widget(Paragraph::new(detail).block(Block::bordered().title("Details")).wrap(Wrap { trim: false }), cols[1]);
+    f.render_widget(Paragraph::new(detail).block(Block::bordered().title("Details")).wrap(Wrap { trim: false }), area);
+}
+
+/// The last `cols` display columns of `t` (a borrowed slice: no copy of the draft), so the end of a long draft is always visible.
+fn tail(t: &str, cols: usize) -> &str {
+    let mut used = 0;
+    for (i, ch) in t.char_indices().rev() {
+        let cw = Span::raw(&t[i..i + ch.len_utf8()]).width().max(1);
+        if used + cw > cols { return &t[i + ch.len_utf8()..]; }
+        used += cw;
+    }
+    t
 }
 
 fn chat_view(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(2), Constraint::Length(3)]).split(area);
+        .constraints([Constraint::Length(2), Constraint::Min(2), Constraint::Length(4)]).split(area);
     let Some((name, trust, linked)) = app.chat_header() else { return };
     let (tl, tc) = trust_label(trust, true);
     let conn = if linked { Span::styled("● connected", Style::default().fg(Color::Green)) } else { Span::styled("○ not connected (messages queue in RAM)", Style::default().fg(Color::Yellow)) };
     let mut head = vec![Line::from(vec![Span::styled(name, Style::default().add_modifier(Modifier::BOLD)), Span::raw("   "), Span::styled(tl, Style::default().fg(tc)), Span::raw("   "), conn])];
-    head.push(Line::from(if trust == Trust::SafetyVerified { "" } else { "WARNING: identity not verified with the safety number (Esc, then v). Anyone who intercepted the key exchange could read this." }));
+    head.push(Line::from(if trust == Trust::SafetyVerified { "" } else { "WARNING: NOT verified: compare the safety number (v)" }));
     f.render_widget(Paragraph::new(head).style(Style::default()), rows[0]);
 
-    // messages: newest at the bottom, wrapped by hand (no per-frame String copies of message text)
+    // messages: newest at the bottom (shifted up by `scroll`), wrapped by hand (no per-frame String copies of message text)
     let w = rows[1].width.saturating_sub(4).max(8) as usize;
     let h = rows[1].height.saturating_sub(2) as usize;
+    let want = h + app.scroll;
     let mut lines: Vec<Line> = Vec::new();
     for l in app.chat_lines().iter().rev() {
         let (tag, style) = if l.mine { (if l.queued { "me (queued)> " } else { "me> " }, Style::default().fg(Color::Cyan)) } else { ("them> ", Style::default().fg(Color::Green)) };
@@ -163,14 +219,23 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
         for (i, c) in chunks.iter().enumerate().rev() {
             lines.push(Line::from(vec![Span::styled(if i == 0 { tag.to_string() } else { " ".repeat(tag.len()) }, style), Span::raw(*c)]));
         }
-        if lines.len() >= h { break; }
+        if lines.len() >= want { break; }
     }
     lines.reverse();
-    let skip = lines.len().saturating_sub(h);
-    f.render_widget(Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).block(Block::bordered().title("Conversation (RAM only, wiped on exit/panic)")), rows[1]);
+    let total = lines.len();
+    let eff = app.scroll.min(total.saturating_sub(h)); // never scroll past the oldest line we have
+    let end = total - eff;
+    let begin = end.saturating_sub(h);
+    let title = if eff > 0 { format!("Conversation (RAM only) - scrolled up {eff} line(s), G = newest") } else { "Conversation (RAM only, wiped on exit/panic)".to_string() };
+    f.render_widget(Paragraph::new(lines.drain(begin..end).collect::<Vec<_>>()).block(Block::bordered().title(title)), rows[1]);
 
-    let input = Line::from(vec![Span::styled("> ", Style::default().fg(Color::Yellow)), Span::raw(app.compose_text()), Span::styled("_", Style::default().add_modifier(Modifier::BOLD))]);
-    f.render_widget(Paragraph::new(vec![input, Line::from(Span::styled("Enter send  |  Esc back  |  F12 panic", Style::default().fg(Color::DarkGray)))]).block(Block::bordered()), rows[2]);
+    let insert = app.mode == Mode::Insert;
+    let inner = rows[2].width.saturating_sub(4) as usize;
+    let mut input = vec![Span::styled("> ", Style::default().fg(Color::Yellow)), Span::raw(tail(app.compose_text(), inner.saturating_sub(1)))];
+    if insert { input.push(Span::styled("_", Style::default().add_modifier(Modifier::BOLD))); }
+    let (mode_title, border) = if insert { ("-- INSERT --", Style::default().fg(Color::Yellow)) } else { ("NORMAL", Style::default().fg(Color::DarkGray)) };
+    let hint = if insert { "Enter send  |  Esc normal mode  |  F12 panic" } else { "i or Enter to type  |  f file  t text  |  Esc back  |  F12 panic" };
+    f.render_widget(Paragraph::new(vec![Line::from(input), Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))]).block(Block::bordered().title(mode_title).border_style(border)), rows[2]);
 }
 
 fn popup(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, w: u16, h: u16) {
@@ -209,27 +274,29 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "Each contact = a NEW keypair. Nothing is cached; messages never hit disk.",
         "",
         "Add someone:  n (name)  ->  e (export your bundle)  ->  send it",
-        "              i (import theirs)  ->  v (compare safety number)",
+        "              I (import theirs)  ->  v (compare safety number)",
         "   or in person on one network:  l (listen) here, c (connect) there.",
         "",
-        "Files: f send JPEG/PNG (metadata stripped), t send plain text, a/r accept/decline, s save, r discard.",
-        "       Files live in RAM only until you save them; names are neutral.",
+        "Two modes, like vim. NORMAL: every key is a command. INSERT: keys are text only.",
+        "  Enter / i  open the chat, or start typing      Esc  leave typing, then the chat",
+        "  j k PgUp PgDn  scroll   g / G  oldest / newest   Tab / Shift+Tab  next / previous contact",
+        "  f send JPEG/PNG   t send plain text   a / r accept / decline   s save   r also discards a file",
+        "  v verify   d delete   o online/offline   K rotate keys   h host-anyway   z acknowledge alert",
         "",
-        "Rotate: K (while online) gives the contact a NEW onion address+key; old copies of your bundle then stop showing when you are online.",
+        "Esc, Esc, Esc: typing -> normal -> details -> PRIVACY SCREEN (Enter unlocks, q quits).",
+        "  The privacy screen only hides the screen: the vault stays open, anyone can press Enter.",
+        "q quits (wipes RAM; asks again if queued messages or unsaved files would be lost).",
         "",
-        "PANIC: F12 or Ctrl+\\  locks, wipes the screen+scrollback and exits at once.",
-        "q / Esc quits (locks) normally.",
-        "",
-        "Press any key.",
+        "PANIC: F12 or Ctrl+\\  locks, wipes the screen+scrollback and exits at once. Press any key.",
     ];
-    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 78, 19);
+    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 100, 21);
     let _ = Alignment::Left;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Config, Key};
+    use crate::app::{Config, Key, Pane};
     use ratatui::{backend::TestBackend, Terminal};
     use seburity_vault::Profile;
 
@@ -279,7 +346,7 @@ mod tests {
         a.handle(Key::Char('n')); for c in "bob".chars() { a.handle(Key::Char(c)); } a.handle(Key::Enter);
         // no peer yet: opening the chat is refused
         a.handle(Key::Enter);
-        assert_ne!(a.screen, Screen::Chat);
+        assert_eq!(a.pane, Pane::Details, "opening a chat without a peer key is refused");
         let mut t = Terminal::new(TestBackend::new(70, 20)).unwrap();
         t.draw(|f| draw(f, &a)).unwrap();
         assert!(text(&t).contains("offline"), "online indicator in the title bar");

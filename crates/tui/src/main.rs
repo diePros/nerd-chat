@@ -145,6 +145,11 @@ fn map_key(k: event::KeyEvent) -> Option<Key> {
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
         KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
         _ => return None,
     })
 }

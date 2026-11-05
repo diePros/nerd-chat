@@ -10,7 +10,7 @@ Honest status first. "Verified" means somebody actually ran it.
 | Reproducible build (same hash on two machines) | **NOT verified** — procedure in §4 |
 | Running on a generic live USB distro | **NOT verified** — checklist in §7 |
 | Running on Tails | **NOT verified, deferred** — plan in §8 |
-| Chat screens | **not built yet** (vault, contacts, pairing, verification, panic, Tor transport exist) |
+| Chat screens | built: contact sidebar + details/conversation pane, vim-style normal/insert modes, privacy screen (3rd Esc), history scrolling; tests in `crates/tui` (the screens have not been tried on Tails) |
 
 ---
 ## 1. Prerequisites (build machine)
@@ -63,17 +63,36 @@ The binary only runs on x86-64 Linux. ARM (Raspberry Pi etc.) needs its own buil
 not tried); one file cannot serve both.
 
 ## 4. Reproducible-build check (do this before trusting a release)
-Goal: two independent builds produce the same SHA-256. This is **untested**; the first run may differ because of
-embedded absolute paths. Try:
+Goal: independent builds of the same commit give the same SHA-256. Status: **verified on ONE machine only** (two builds in different
+directories, `scripts/repro-check.sh`); NOT yet verified across machines or toolchain installs. The toolchain is pinned by
+`rust-toolchain.toml` (channel 1.98.1 + the musl target, installed automatically by rustup) and dependencies by the committed `Cargo.lock`
+(`--locked`); the vendored `snow` lives in `vendor/snow`.
+
+One command (builds the committed HEAD twice in two different directories and compares):
 ```bash
-export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$HOME/.rustup=/rustup"
-export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-cargo build --release --locked --target x86_64-unknown-linux-musl -p seburity-tui
-sha256sum target/x86_64-unknown-linux-musl/release/seburity
+git status --short          # must be clean: the script builds `git archive HEAD`, i.e. only COMMITTED files
+scripts/repro-check.sh      # prints the two hashes and REPRODUCIBLE / NOT reproducible
 ```
-Run it in two different directories (and ideally on two machines with the same toolchain version) and compare. If the
-hashes differ, diff with `diffoscope` and fix before claiming reproducibility. Pinning the toolchain with a
-`rust-toolchain.toml` (channel `1.98.1`) is recommended and **not yet done** (tracker D-4).
+The script sets `SOURCE_DATE_EPOCH`, `CARGO_INCREMENTAL=0`, `--remap-path-prefix` for the source, `~/.cargo` and `~/.rustup`, and
+`-C target-feature=+crt-static`; it builds with `cargo build --release --locked --target x86_64-unknown-linux-musl -p seburity-tui`.
+
+**Across machines** (the real test): run the script on a second machine at the SAME commit and compare the printed hash with the first
+machine's (`git rev-parse HEAD` must match too). Two things can legitimately differ: the toolchain (the pin prevents it) and the system
+linker driver (`cc`/`ld`); if the hashes differ, `diffoscope a b` shows where.
+
+### On Windows with WSL (Ubuntu): yes, this works
+```bash
+# inside the WSL Ubuntu shell (NOT in /mnt/c: build in the Linux filesystem, it is faster and avoids permission/line-ending problems)
+sudo apt update && sudo apt install -y git curl build-essential      # build-essential provides the `cc` linker driver
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+git clone <repo-url> ~/seburity && cd ~/seburity
+git checkout <commit>                      # the commit whose hash you want to compare
+scripts/repro-check.sh                     # rustup installs the pinned 1.98.1 + musl target on first use
+sha256sum target/x86_64-unknown-linux-musl/release/seburity   # only if you also built with the plain command of section 3
+```
+Use `git config core.autocrlf false` before cloning/checking out (CRLF line endings would change the sources and therefore the hash).
+WSL2 is a real Linux kernel, so `scripts/sandbox-check.sh` (seccomp) also works there; WSL1 does not support seccomp (the helper then refuses).
 
 ## 5. Integrity and signing (recommended, not yet automated)
 - Publish the commit hash, `seburity.sha256` and a **detached signature** made on an offline machine, e.g.
