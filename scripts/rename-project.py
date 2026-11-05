@@ -10,7 +10,7 @@ scripts/project-name.txt (and updated), so the script can be run again and again
 
 What changes (current name -> new name): Cargo package names and dependency keys, `use` paths (`old_core` -> `new_core`), the binary
 name, env var prefixes, the title in the UI, docs, scripts, supply-chain policy keys, Cargo.lock (refreshed offline).
-What NEVER changes: the guard test crates/core/tests/frozen_labels.rs, every string in scripts/frozen-labels.txt (disk/wire-format and cryptographic domain-separation labels that contain
+What NEVER changes: the guard test crates/core/tests/frozen_labels.rs, docs/NAMES.md (the history of names), every string in scripts/frozen-labels.txt (disk/wire-format and cryptographic domain-separation labels that contain
 the ORIGINAL codename; renaming them would break existing vaults, bundles and handshakes), and `vendor/` (third-party code).
 After a rename also rename the GitHub repository by hand if you want them to match.
 """
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SKIP_DIRS = {"target", ".git", "vendor", ".claude"}
 EXTS = {".rs", ".toml", ".md", ".sh", ".py", ".txt", ".yml", ".yaml"}
 # files that must keep the legacy codename verbatim
-SKIP_FILES = {"scripts/frozen-labels.txt", "scripts/rename-project.py", "crates/core/tests/frozen_labels.rs", "Cargo.lock", "LICENSE"}
+SKIP_FILES = {"scripts/frozen-labels.txt", "scripts/rename-project.py", "crates/core/tests/frozen_labels.rs", "docs/NAMES.md", "Cargo.lock", "LICENSE"}
 
 
 def files():
