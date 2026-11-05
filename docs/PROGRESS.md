@@ -22,7 +22,8 @@ spelled `Bash` (capital B).
 | 23 | (this commit) | review 16 fixes: fallback ends on DONE announcement, stronger tests, broken-control notice | not re-reviewed | yes | yes, 3/3 |
 | 24 | f4e8993 | file cleaning in a resource-limited helper process (`--clean-worker`), strict wire decoding, `--no-sandbox` | yes (1.53 MB static; --strip through helper verified) | n/a (no transport change) |
 | 25 | (this commit) | review 17 fixes: honest sandbox claims, no_new_privs/setsid/PDEATHSIG, deadline-bound wait, zeroizing | not re-reviewed | yes (static, --strip via helper OK) | n/a |
-| 26 | (this commit) | seccomp allowlist for the cleaning helper: crates/sandbox (one unsafe prctl), interpreter+mutation+kernel tests | review requested | yes | n/a |
+| 26 | 5929fac | seccomp allowlist for the cleaning helper: crates/sandbox (one unsafe prctl), interpreter+mutation+kernel tests | yes (review 18), fixes in cycle 27 | yes | n/a |
+| 27 | (this commit) | review 18 fixes: anonymous-only mmap, clock id limit, test gaps (grid, kernel markers/timeouts, helper seccomp status), exit-code message, hygiene test, scripts/sandbox-check.sh | delta re-review pending | yes (sandbox-check passes) | n/a |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.

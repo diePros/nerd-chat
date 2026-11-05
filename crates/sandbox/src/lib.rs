@@ -3,8 +3,9 @@
 //! Everything else (building the filter) is safe code that is checked by an in-test BPF interpreter against every syscall number.
 //!
 //! The filter KILLS THE PROCESS (SECCOMP_RET_KILL_PROCESS) on any syscall that is not on the list, on a foreign architecture and
-//! on the x32 ABI. Allowed (x86_64 only): `read` on fd 0, `write` on fd 1 and 2, `mmap` without PROT_EXEC, `munmap`, `mremap`,
-//! `madvise`, `brk`, `sigaltstack` (Rust's runtime teardown), `clock_gettime`, `getrandom`, `exit_group`. Nothing else: no
+//! on the x32 ABI. Allowed (x86_64 only): `read` on fd 0, `write` on fd 1 and 2, ANONYMOUS `mmap` without PROT_EXEC, `munmap`,
+//! `mremap`, `madvise`, `brk`, `sigaltstack` (Rust's runtime teardown), `clock_gettime` for the static clock ids 0..=15 only,
+//! `getrandom`, `exit_group`. Nothing else: no
 //! `open*`, `socket`, `connect`, `execve`, `unlink*`, `rename*`, `kill`, `ptrace`, `mprotect`, `close`, `fcntl`, `clone`...
 //!
 //! The caller must have set `no_new_privs` (seccomp refuses to install without it, and we never set it here so that this file
@@ -25,6 +26,7 @@ pub enum Error {
 const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
 const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
 const JSET_K: u16 = 0x45; // BPF_JMP | BPF_JSET | BPF_K
+const JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K (unsigned)
 const RET_K: u16 = 0x06; // BPF_RET | BPF_K
 
 const RET_ALLOW: u32 = 0x7fff_0000; // SECCOMP_RET_ALLOW
@@ -35,17 +37,21 @@ const OFF_ARCH: u32 = 4;
 const fn off_arg_lo(i: u32) -> u32 { 16 + 8 * i }
 const fn off_arg_hi(i: u32) -> u32 { 20 + 8 * i }
 const PROT_EXEC: u32 = 4;
+const MAP_ANONYMOUS: u32 = 0x20; // x86_64
+/// Static clock ids are 0..=15; negative ids are per-process/thread CPU clocks (pid encoded): those would be a side channel.
+const CLOCK_ID_LIMIT: u32 = 16;
 
 fn ld(k: u32) -> Insn { Insn { code: LD_W_ABS, jt: 0, jf: 0, k } }
 fn jeq(k: u32, jt: u8, jf: u8) -> Insn { Insn { code: JEQ_K, jt, jf, k } }
 fn jset(k: u32, jt: u8, jf: u8) -> Insn { Insn { code: JSET_K, jt, jf, k } }
+fn jge(k: u32, jt: u8, jf: u8) -> Insn { Insn { code: JGE_K, jt, jf, k } }
 fn ret(k: u32) -> Insn { Insn { code: RET_K, jt: 0, jf: 0, k } }
 
 /// Syscalls allowed without any argument check.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn plain() -> Vec<u32> {
     use libc::*;
-    [SYS_munmap, SYS_mremap, SYS_madvise, SYS_brk, SYS_sigaltstack, SYS_clock_gettime, SYS_getrandom, SYS_exit_group].iter().map(|&n| n as u32).collect()
+    [SYS_munmap, SYS_mremap, SYS_madvise, SYS_brk, SYS_sigaltstack, SYS_getrandom, SYS_exit_group].iter().map(|&n| n as u32).collect()
 }
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn plain() -> Vec<u32> { Vec::new() }
@@ -61,6 +67,10 @@ const SYS_READ: u32 = libc::SYS_read as u32;
 const SYS_WRITE: u32 = libc::SYS_write as u32;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SYS_MMAP: u32 = libc::SYS_mmap as u32;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const SYS_CLOCK_GETTIME: u32 = libc::SYS_clock_gettime as u32;
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+const SYS_CLOCK_GETTIME: u32 = 0;
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 const SYS_READ: u32 = 0;
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
@@ -69,7 +79,7 @@ const SYS_WRITE: u32 = 0;
 const SYS_MMAP: u32 = 0;
 
 /// Layout (every jump goes FORWARD to the final ALLOW or past a block):
-/// `[arch check] [load nr] [plain rules] [read rule] [write rule] [mmap rule] KILL ALLOW`.
+/// `[arch check] [load nr] [plain rules] [read rule] [write rule] [clock_gettime rule] [mmap rule] KILL ALLOW`.
 /// A block that loads an argument ends in its own `KILL`/`ALLOW`, so the accumulator (which then no longer holds the syscall
 /// number) is never compared against a later rule: a block is either skipped entirely (nr did not match) or decides.
 pub fn filter() -> Vec<Insn> {
@@ -98,9 +108,31 @@ pub fn filter() -> Vec<Insn> {
         for k in 0..m { to_allow.push(base + first_fd + k); }
         p.extend(b);
     }
-    // mmap: allowed unless PROT_EXEC is requested (arg 2 = prot, low word: the kernel reads an int)
+    // clock_gettime: only the static clock ids 0..=15 (a negative id names another process' CPU clock: a side channel)
     {
-        let b: Vec<Insn> = vec![ld(off_arg_lo(2)), jset(PROT_EXEC, 1, 0), ret(RET_ALLOW), ret(RET_KILL)];
+        let b: Vec<Insn> = vec![
+            ld(off_arg_hi(0)),             // 0
+            jeq(0, 0, 3),                  // 1: high word == 0 ? continue : KILL (index 5)
+            ld(off_arg_lo(0)),             // 2
+            jge(CLOCK_ID_LIMIT, 1, 0),     // 3: id >= 16 ? KILL (index 5) : ALLOW (index 4)
+            ret(RET_ALLOW),                // 4
+            ret(RET_KILL),                 // 5
+        ];
+        p.push(jeq(SYS_CLOCK_GETTIME, 0, b.len() as u8));
+        p.extend(b);
+    }
+    // mmap: ANONYMOUS memory only (an fd argument would let a compromised parser map any inherited descriptor, read and even
+    // write it) and never PROT_EXEC. flags = arg 3, prot = arg 2 (both ints: the kernel reads the low word)
+    {
+        let b: Vec<Insn> = vec![
+            ld(off_arg_lo(3)),             // 0
+            jset(MAP_ANONYMOUS, 1, 0),     // 1: anonymous ? continue (skip the KILL) : KILL
+            ret(RET_KILL),                 // 2
+            ld(off_arg_lo(2)),             // 3
+            jset(PROT_EXEC, 1, 0),         // 4: exec ? KILL (index 6) : ALLOW (index 5)
+            ret(RET_ALLOW),                // 5
+            ret(RET_KILL),                 // 6
+        ];
         p.push(jeq(SYS_MMAP, 0, b.len() as u8));
         p.extend(b);
     }

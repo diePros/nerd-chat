@@ -49,10 +49,15 @@ helper's answer is decoded as untrusted input (`seburity_strip::wire`: exact len
 `--no-sandbox` cleans in-process instead.
 
 **Syscall allowlist (cycle 26).** Before it reads any input the helper installs a seccomp-BPF allowlist (crate `crates/sandbox`, the only
-crate with `unsafe`: ONE `prctl` call): `read` on fd 0, `write` on fd 1/2, `mmap` without PROT_EXEC, `munmap`, `mremap`, `madvise`,
-`brk`, `sigaltstack`, `clock_gettime`, `getrandom`, `exit_group`. Everything else kills the helper (SIGSYS): no `open`, `socket`,
+crate with `unsafe`: ONE `prctl` call): `read` on fd 0, `write` on fd 1/2, ANONYMOUS `mmap` without PROT_EXEC (a file-backed mmap would let a compromised parser read/write any
+descriptor inherited from the launcher), `munmap`, `mremap`, `madvise`, `brk`, `sigaltstack`, `clock_gettime` for the static clock ids
+0..=15 only (a per-process CPU clock id is a side channel on the parent/Tor), `getrandom`, `exit_group`. Everything else kills the helper (SIGSYS): no `open`, `socket`,
 `execve`, `unlink`, `rename`, `kill`, `ptrace`, `mprotect`, `close`, `fork`, 32-bit/x32 syscalls. The filter is tested by an in-test
 BPF interpreter over all syscall numbers + 200k random inputs, by mutation checks, and against the real kernel (each forbidden
 call kills a child with SIGSYS). x86_64 Linux only: elsewhere (or without seccomp) the helper refuses and files are refused unless
 `--no-sandbox` is given. Residual: the parser can still lie in its answer (strict decoder) and burn CPU/memory up to the limits;
 Tor, the vault and keys never exist in the helper. The rlimits (NOFILE/FSIZE/NPROC) are defence in depth, not the boundary.
+
+Known limits of the filter (review 18): musl's allocator needs `mprotect` only when `brk` fails (near the 1 GiB address-space cap): then
+the helper is killed and the file refused (fails closed, rare); the kernel logs seccomp kills (audit/dmesg), a small trace that a file
+was refused; `scripts/sandbox-check.sh` re-checks the shipped static binary end to end.

@@ -37,6 +37,15 @@ fn the_helper_runs_under_hard_resource_limits() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let get = |name: &str| limits.lines().find(|l| l.starts_with(name)).map(|l| l.split_whitespace().skip(name.split_whitespace().count()).take(2).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+    // the seccomp filter is installed right before the helper blocks on stdin: wait for it (it comes after the rlimits)
+    let mut status = String::new();
+    for _ in 0..250 {
+        status = std::fs::read_to_string(format!("/proc/{}/status", c.id())).unwrap_or_default();
+        if status.lines().any(|l| l.starts_with("Seccomp:") && l.ends_with('2')) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(status.lines().any(|l| l.starts_with("Seccomp:") && l.ends_with('2')), "the helper must run under a seccomp FILTER: {status}");
+    assert!(status.lines().any(|l| l.starts_with("Seccomp_filters:") && l.ends_with('1')), "{status}");
     assert_eq!(get("Max open files"), "3 3", "{limits}");
     assert_eq!(get("Max file size"), "0 0", "{limits}");
     assert_eq!(get("Max processes"), "0 0", "{limits}");

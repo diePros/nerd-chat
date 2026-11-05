@@ -17,6 +17,8 @@ use std::{io::{Read, Write}, path::Path, process::{Command, Stdio}, sync::mpsc::
 use zeroize::Zeroizing;
 
 const WORKER_FLAG: &str = "--clean-worker";
+/// Exit status of a helper that could not install its sandbox (no filter for this platform, kernel refused): the parent explains.
+const EXIT_NO_SANDBOX: i32 = 4;
 /// Hard wall-clock limit for one cleaning job (the cleaner itself stops after ~8 s of validation work).
 const JOB_TIMEOUT: Duration = Duration::from_secs(25);
 const ANSWER_CAP: u64 = MAX_INPUT as u64 + 8192;
@@ -42,14 +44,12 @@ pub fn worker_main() -> ! {
         let _ = rustix::process::setsid(); // no controlling terminal (/dev/tty)
         // killed together with the parent (panic wipe / exit): no helper outlives the app holding plaintext
         if rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL)).is_err() { die("could not set the death signal"); }
+        // the parent may have died between spawn and the line above (then nobody would signal us): we were re-parented to init/a subreaper
+        if rustix::process::getppid().is_some_and(|p| p.is_init()) { die("the parent is gone"); }
         if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).is_err() { die("could not mark the helper non-dumpable"); }
     }
     // the allowlist is installed BEFORE any untrusted byte is read: from here on only read(0)/write(1,2)/memory/exit are possible
-    match seburity_sandbox::enter() {
-        Ok(()) => {}
-        Err(seburity_sandbox::Error::Unsupported) => die("no seccomp filter for this platform (use --no-sandbox to clean in-process)"),
-        Err(seburity_sandbox::Error::Kernel(e)) => die(&format!("the kernel refused the seccomp filter (errno {e}); use --no-sandbox to clean in-process")),
-    }
+    if seburity_sandbox::enter().is_err() { std::process::exit(EXIT_NO_SANDBOX); }
     let mut input = Zeroizing::new(Vec::with_capacity(MAX_INPUT + 16));
     if std::io::stdin().take(MAX_INPUT as u64 + 16).read_to_end(&mut input).is_err() { std::process::exit(2); }
     let answer = Zeroizing::new(match wire::decode_request(&input) {
@@ -97,6 +97,10 @@ pub fn run_helper(exe: &Path, d: &[u8], mode: Mode) -> Result<Cleaned, StripErro
             };
             match (wire::decode_response(&buf), status) {
                 (r, Ok(s)) if s.success() => r,
+                (r, Ok(s)) if s.code() == Some(EXIT_NO_SANDBOX) => {
+                    if let Ok(mut c) = r { zeroize::Zeroize::zeroize(&mut c.data); }
+                    Err(refuse("the sandbox of the cleaning helper could not be installed here (needs Linux x86_64 with seccomp); the file was refused. Start seburity with --no-sandbox to clean files in-process (less safe).".into()))
+                }
                 (r, Ok(s)) => { if let Ok(mut c) = r { zeroize::Zeroize::zeroize(&mut c.data); } Err(refuse(format!("the cleaning helper died ({s}): the file was refused"))) }
                 (r, Err(e)) => { if let Ok(mut c) = r { zeroize::Zeroize::zeroize(&mut c.data); } Err(refuse(format!("the cleaning helper failed ({e})"))) }
             }
