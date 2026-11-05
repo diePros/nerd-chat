@@ -139,7 +139,7 @@ impl Bundle {
     /// 32-byte BLAKE2b fingerprint over the public keys.
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut h = Blake2b::<U32>::new();
-        h.update(b"seburity-fingerprint-v1");
+        h.update(b"seburity-fingerprint-v2"); // v2: identity keys only (v1 also covered onion/auth/capability): old numbers must NOT match
         let mut body = self.body();
         body[CAP_OFF] = 0; // identity key material only: the capability bit and ...
         body[68..132].fill(0); // ... the transport keys (onion + client-auth) are operational and rotate; the session itself

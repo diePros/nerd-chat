@@ -283,3 +283,15 @@ Not re-reviewed after these fixes (small, test-covered).
 | R14-L2 | `advertised()` ignored a failed save (memory `Some`, vault `None`) | FIXED | `commit_advertised` reverts and the export is cancelled (file removed) / pairing undone |
 | R14-L3 | the advertised bit was fixed even if nothing was sent (export to an existing path, bind failure, failed join) | FIXED | the bit is read-only until the file was written / the pairing was accepted; test |
 | R14-I | roles line ignores the engine's flip; `h` while connected drops the connection; `--strip` must be first arg; alert line not wrapped, `z` only on main screen | OPEN (info) | |
+
+## Review 14 (Opus, e53f0c9 key rotation) — integrated in cycle 17
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R15-M1 | a contact could force endless OFFER/DONE pairs: vault writes + DEL/ADD_ONION of OUR service (circuit churn) | FIXED | one accepted rotation per contact per hour, DONE never re-adds, 6 frames/connection; test |
+| R15-L1 | peer has no fallback to our old onion; a pending rotation cannot be cancelled; if the new service cannot be hosted later the switched contact cannot reach us | OPEN | dial fallback + ADD_ONION retry; no cancel on purpose (strands a switched peer); docs state that the old address stays published while pending |
+| R15-L2 | collision check ignored pending/previous keys and auth keys | FIXED | covers our current+pending onion/auth and other contacts' current+previous; test |
+| R15-L3 | old signed bundles are indistinguishable from current ones (transport keys left the safety number); export while pending carried the retiring address | PARTIAL | export refused while pending. OPEN: signed transport generation counter, refuse older bundles |
+| R15-L4 | a silent contact blocked OUR rotation | FIXED | `peer_old` no longer blocks `K`; test |
+| R15-L5 | safety numbers silently changed on upgrade | FIXED | fingerprint domain tag v2 (old numbers do not match); documented. R2-I3 ("must also cover onion addr + client-auth") is deliberately superseded: those keys are authenticated by the bundle signature/pairing and the session itself uses sign/dh/kem |
+| R15-L6 | UI said "old service is gone" although DEL_ONION errors are ignored; rotation errors bypass the notice limiter | PARTIAL | wording corrected. OPEN: `unhost` result not surfaced |
+| R15-I | MemTransport ignores client auth (peer_old authorization when the DIALER rotates is only traced, not tested); temporary identity copies unzeroized (R2-M3/R4-M2); SBS4 is a one-way vault upgrade | OPEN (info) | |

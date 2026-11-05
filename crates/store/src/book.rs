@@ -7,7 +7,7 @@ pub const MAX_NAME: usize = 64;
 const MAGIC: &[u8; 4] = b"SBS4";
 /// SBS3 (no rotation state) is still read.
 const MAGIC_V3: &[u8; 4] = b"SBS3";
-/// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS3.
+/// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS4 (a ONE-WAY upgrade: older binaries cannot open it).
 const MAGIC_V2: &[u8; 4] = b"SBS2";
 
 /// One contact = one fresh keypair set (unlinkable across contacts) + the peer's public bundle once known.

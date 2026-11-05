@@ -88,6 +88,8 @@ struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
 
 /// One line of conversation. RAM only, wiped when dropped.
 pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool }
+/// A contact may rotate its keys (and so make us re-publish our service) at most this often.
+const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,6 +158,8 @@ pub struct App {
     pending_pair: Option<([u8; 8], ImportedContact, String)>,
     /// The capability bit used in the running/last pairing; recorded in the vault only when the pairing is accepted.
     pair_adv: Option<bool>,
+    /// When we last accepted a key rotation from each contact: a contact cannot make us re-publish our service or rewrite the vault more than once an hour.
+    rot_accepted: HashMap<[u8; 8], Instant>,
     failures: u32,
     locked_until: Option<Instant>,
     lockout: std::sync::Arc<Lockout>,
@@ -199,7 +203,7 @@ impl App {
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
-            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, failures: 0, locked_until: None,
+            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
@@ -599,7 +603,6 @@ impl App {
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)) else { return self.err("No contact selected.") };
         if c.peer.is_none() { return self.err("Pair or import this contact first."); }
         if c.next_transport.is_some() { return self.err("A key rotation for this contact is already waiting for its answer (it is re-proposed on every connection)."); }
-        if c.peer_old.is_some() { return self.err("The contact's own key rotation is not finished yet."); }
         if self.engine.is_none() || !matches!(self.online, Online::Online) { return self.err("Go online first (o): the contact must be reachable to switch keys."); }
         self.vf().store.contacts[i].begin_rotation();
         if !self.save() { self.vf().store.contacts[i].next_transport = None; return; }
@@ -620,6 +623,7 @@ impl App {
                     return;
                 }
                 if c.peer_old.is_some() { return self.err("Ignored a second key rotation from a contact before the first one finished."); }
+                if self.rot_accepted.get(&id).is_some_and(|t| t.elapsed() < ROTATION_MIN_INTERVAL) { return self.err("Ignored a key rotation: this contact already rotated within the last hour."); }
                 if (peer.onion_pub, peer.auth_pub) == (onion, auth) || onion == auth { return self.err("Ignored a key rotation that changes nothing."); }
                 // reject weak/invalid keys and collisions with other contacts exactly like a bundle import
                 let proposed = Bundle::from_parts(peer.sign_pub, peer.dh_pub, onion, auth, peer.can_host, peer.kem_pub);
@@ -633,6 +637,7 @@ impl App {
                 }
                 // ack first (the re-add below closes the connection), then host/dial with the new keys
                 if let Some(e) = &self.engine { e.answer_rotation(id, seburity_chat::proto::KIND_ROTATE_ACK, onion, auth); }
+                self.rot_accepted.insert(id, Instant::now());
                 self.engine_add(i);
                 self.ok("This contact rotated its onion service keys (identity and safety number are unchanged).");
             }
@@ -651,7 +656,7 @@ impl App {
                 // tell the contact it may forget the old keys, then retire our old service
                 if let Some(e) = &self.engine { e.answer_rotation(id, seburity_chat::proto::KIND_ROTATE_DONE, onion, auth); }
                 self.engine_add(i);
-                self.ok("Key rotation complete: your old onion service is gone, copies of your old bundle no longer show when you are online. Send your NEW bundle to anyone who still needs it.");
+                self.ok("Key rotation complete: your old onion service was removed from Tor (it also vanishes when you go offline); copies of your old bundle no longer show when you are online. Send your NEW bundle to anyone who still needs it.");
             }
             seburity_chat::proto::KIND_ROTATE_DONE => {
                 let c = &self.vf().store.contacts[i];
@@ -660,7 +665,8 @@ impl App {
                 let old = c.peer_old;
                 self.vf().store.contacts[i].peer_old = None;
                 if !self.save() { self.vf().store.contacts[i].peer_old = old; return; }
-                self.engine_add(i); // stop authorizing the old client key
+                // no re-add here (a contact could force churn with endless OFFER/DONE pairs): the old client key stops being authorized
+                // at the next natural re-add (restart, going offline/online). It is the contact's OWN old key.
                 self.ok("The contact finished its key rotation; its old keys are forgotten.");
             }
             _ => {}
@@ -778,6 +784,9 @@ impl App {
             }
             Prompt::Export => {
                 let sel = self.sel;
+                if self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)).is_some_and(|c| c.next_transport.is_some()) {
+                    return self.err("A key rotation for this contact is still waiting for its answer: export after it finished (the bundle would carry the address about to be retired).");
+                }
                 let can_host = self.advertised(sel);
                 let Some(c) = self.cur() else { return };
                 let id = &c.identity;
@@ -996,7 +1005,13 @@ impl App {
     fn onion_collision(&self, idx: usize, peer: &Bundle) -> bool {
         let Some(v) = self.vf.as_ref() else { return false };
         v.store.contacts.iter().enumerate().any(|(i, c)| {
-            c.identity.onion_public() == peer.onion_pub || (i != idx && c.peer.as_ref().is_some_and(|p| p.onion_pub == peer.onion_pub))
+            // our current AND pending onion/auth keys, other contacts' current AND previous keys
+            let next = c.next_transport.as_ref().and_then(|t| c.identity.with_transport_secret(t));
+            c.identity.onion_public() == peer.onion_pub
+                || c.identity.auth_public().to_bytes() == peer.auth_pub
+                || next.as_ref().is_some_and(|n| n.onion_public() == peer.onion_pub || n.auth_public().to_bytes() == peer.auth_pub)
+                || (i != idx && (c.peer.as_ref().is_some_and(|p| p.onion_pub == peer.onion_pub || p.auth_pub == peer.auth_pub)
+                    || c.peer_old.is_some_and(|(o, a)| o == peer.onion_pub || a == peer.auth_pub)))
         })
     }
 
@@ -1673,6 +1688,36 @@ mod tests {
         a.on_rotate(id, seburity_chat::proto::KIND_ROTATE_DONE, again.onion_public(), again.auth_public().to_bytes());
         assert!(a.vf.as_ref().unwrap().store.contacts[0].peer_old.is_some());
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].identity.onion_public(), mine.0);
+    }
+
+    #[test]
+    fn a_contact_cannot_force_repeated_rotations_or_block_ours() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        let (offer, done) = (seburity_chat::proto::KIND_ROTATE_OFFER, seburity_chat::proto::KIND_ROTATE_DONE);
+        let k1 = seburity_core::identity::ContactIdentity::generate();
+        let k2 = seburity_core::identity::ContactIdentity::generate();
+        a.on_rotate(id, offer, k1.onion_public(), k1.auth_public().to_bytes());
+        assert!(!a.error, "{}", a.status);
+        a.on_rotate(id, done, k1.onion_public(), k1.auth_public().to_bytes());
+        assert!(a.vf.as_ref().unwrap().store.contacts[0].peer_old.is_none());
+        a.on_rotate(id, offer, k2.onion_public(), k2.auth_public().to_bytes());
+        assert!(a.error && a.status.contains("within the last hour"), "{}", a.status);
+        assert_eq!(peer_onion_of(&a), k1.onion_public(), "the second proposal changed nothing");
+        // while the contact's rotation is unfinished we can still rotate our own keys (needs the engine online)
+        a.vf().store.contacts[0].peer_old = Some(([1; 32], [2; 32]));
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a], |x| x[0].online == Online::Online));
+        a.handle(Key::Char('K'));
+        assert!(!a.error, "{}", a.status);
+        // no export while our rotation is pending
+        a.handle(Key::Char('e')); a.input = d.path().join("x.sbc").to_str().unwrap().into(); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("export after it finished"), "{}", a.status);
+        assert!(!d.path().join("x.sbc").exists());
     }
 
     #[test]
