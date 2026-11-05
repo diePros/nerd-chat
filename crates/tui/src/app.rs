@@ -170,6 +170,8 @@ pub struct App {
     /// accepted, still arriving: contact id -> bucket (counts toward the RAM budget)
     accepted: HashMap<[u8; 8], u32>,
     inbox: HashMap<[u8; 8], Received>,
+    /// file being cleaned on a worker (cleaning is CPU-heavy on hostile input; the UI/panic key must stay live)
+    prep_rx: Option<([u8; 8], Receiver<Result<(seburity_chat::FileOut, Vec<String>), seburity_strip::StripError>>)>,
     kdf_rx: Option<Receiver<KdfMsg>>,
     /// screen to return to if the derivation fails
     kdf_back: Screen,
@@ -188,6 +190,7 @@ impl App {
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
+            prep_rx: None,
             kdf_rx: None, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
@@ -260,6 +263,7 @@ impl App {
         self.chat_with = None;
         self.compose.clear();
         self.code_buf.clear();
+        self.prep_rx = None;
         self.offers.clear();
         self.accepted.clear();
         self.inbox.clear(); // Zeroizing: received files wiped
@@ -593,12 +597,12 @@ impl App {
                     Ok(v) => Zeroizing::new(v),
                     Err(e) => return self.err(format!("Cannot read file: {e}")),
                 };
-                let Some(eng) = &self.engine else { return };
-                match eng.send_file(id, &raw, mode) {
-                    Ok(report) if report.is_empty() => self.ok("Offered (nothing needed removing). Waiting for the contact to accept."),
-                    Ok(report) => { let r = report.join("; "); self.ok(format!("Offered after cleaning: {}. Waiting for the contact to accept.", r.chars().take(300).collect::<String>())) }
-                    Err(e) => self.err(format!("NOT sent: {e}")),
-                }
+                if self.engine.is_none() { return; }
+                if self.prep_rx.is_some() { return self.err("Still cleaning the previous file."); }
+                let (tx, rx) = channel();
+                self.prep_rx = Some((id, rx));
+                self.ok("Cleaning the file (metadata removal) ... F12 = panic.");
+                thread::spawn(move || { let _ = tx.send(seburity_chat::Engine::prepare_file(&raw, mode)); });
             }
             Prompt::SaveFile => {
                 let Some(id) = self.sel_id() else { return };
@@ -942,7 +946,28 @@ impl App {
     }
 
     /// Call every UI tick: collects a finished pairing.
+    fn poll_prep(&mut self) {
+        let Some((id, rx)) = &self.prep_rx else { return };
+        let id = *id;
+        let r = match rx.try_recv() {
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => { self.prep_rx = None; return self.err("File cleaning thread died."); }
+            Ok(r) => r,
+        };
+        self.prep_rx = None;
+        match r {
+            Ok((f, report)) => {
+                if !self.linked.contains(&id) || self.engine.is_none() { return self.err("The contact disconnected while the file was being cleaned: not sent."); }
+                if let Some(e) = &self.engine { e.offer_file(id, f); }
+                if report.is_empty() { self.ok("Offered (nothing needed removing). Waiting for the contact to accept."); }
+                else { let r = report.join("; "); self.ok(format!("Offered after cleaning: {}. Waiting for the contact to accept.", r.chars().take(300).collect::<String>())); }
+            }
+            Err(e) => self.err(format!("NOT sent: {e}")),
+        }
+    }
+
     pub fn poll(&mut self) {
+        self.poll_prep();
         self.poll_kdf();
         self.poll_online();
         let Some(rx) = &self.pair_rx else { return };
@@ -1370,7 +1395,7 @@ mod tests {
         std::fs::write(&src, &jpg).unwrap();
         a.handle(Key::Char('f'));
         type_str(&mut a, src.to_str().unwrap()); a.handle(Key::Enter);
-        assert!(a.status.contains("Offered after cleaning"), "{}", a.status);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].status.contains("Offered after cleaning")), "{}", a.status);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("offered"))), "no offer");
         b.handle(Key::Char('a'));
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))), "file never arrived");

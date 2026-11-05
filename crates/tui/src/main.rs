@@ -60,6 +60,7 @@ fn probe_tor(args: &[String]) -> ! {
 fn strip_cmd(args: &[String]) -> ! {
     use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
+    if args.iter().any(|a| a.starts_with("--") && a != "--text") { eprintln!("unknown option for --strip"); usage() }
     let text = args.iter().any(|a| a == "--text");
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let [input, output] = files[..] else { usage() };

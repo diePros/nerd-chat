@@ -150,6 +150,13 @@ impl Engine {
     /// Clean (metadata stripped by allowlist, unknown formats refused), pad to a size bucket and offer a file to a CONNECTED
     /// contact. Returns the cleaning report. Files are never queued: if the contact is offline the engine says so.
     pub fn send_file(&self, id: [u8; 8], raw: &[u8], mode: seburity_strip::Mode) -> Result<Vec<String>, seburity_strip::StripError> {
+        let (f, report) = Self::prepare_file(raw, mode)?;
+        self.offer_file(id, f);
+        Ok(report)
+    }
+
+    /// The CPU-heavy part (cleaning, padding, hashing) as a pure function: run it on a worker thread so the UI/panic key stay live.
+    pub fn prepare_file(raw: &[u8], mode: seburity_strip::Mode) -> Result<(FileOut, Vec<String>), seburity_strip::StripError> {
         let c = seburity_strip::clean(raw, mode)?;
         let report = c.report;
         let data = Zeroizing::new(c.data);
@@ -158,10 +165,10 @@ impl Engine {
         let mut xid = [0u8; 8];
         getrandom::fill(&mut xid).expect("OS RNG unavailable");
         let mode = if mode == seburity_strip::Mode::PlainText { file::MODE_TEXT } else { file::MODE_AUTO };
-        let f = FileOut { xid, bucket, mode, hash: file::hash(&data), padded: Zeroizing::new(stream) };
-        let _ = self.tx.send(In::Cmd(Command::SendFile { id, file: f }));
-        Ok(report)
+        Ok((FileOut { xid, bucket, mode, hash: file::hash(&data), padded: Zeroizing::new(stream) }, report))
     }
+
+    pub fn offer_file(&self, id: [u8; 8], f: FileOut) { let _ = self.tx.send(In::Cmd(Command::SendFile { id, file: f })); }
 
     /// Answer a `FileOffer`.
     pub fn reply_file(&self, id: [u8; 8], xid: file::Xid, accept: bool) { let _ = self.tx.send(In::Cmd(Command::FileReply { id, xid, accept })); }
@@ -339,6 +346,7 @@ impl Core {
                 rt.backoff = self.t.min_backoff;
                 while let Some(m) = rt.pending.pop_front() { let _ = tx.send(Out::Text(m)); }
                 if !had { let _ = self.ev.send(Event::Connected { id }); }
+                else { let _ = self.ev.send(Event::FileCancelled { id }); } // the replaced connection's transfer state is gone
             }
             In::Conn(ConnEvent::Down { id, gen }) => {
                 let Some(rt) = self.rts.get_mut(&id) else { return };
@@ -870,7 +878,7 @@ mod tests {
     fn raw_send(s: &mut crate::transport::BoxStream, sess: &mut seburity_core::session::Session, me: &ContactIdentity, body: &[u8]) {
         use std::io::Write;
         let w = sess.send(me, body).unwrap();
-        s.write_all(&w).unwrap();
+        let _ = s.write_all(&w); // the engine may already have cut an abusive peer off
     }
 
     /// Read cells until the engine's ACCEPT for `xid` arrives (a correct sender never sends content before it).
@@ -921,6 +929,26 @@ mod tests {
         let (data, resan) = r.unwrap();
         assert!(resan, "receiver must flag that it had to clean the file itself");
         assert!(!has(&data, b"Exif") && !has(&data, b"secret comment"));
+    }
+
+    #[test]
+    fn replacing_a_connection_tells_the_ui_to_clear_file_state() {
+        let net = MemNet::new();
+        let ((l, lb), (d, _db)) = ordered();
+        let (_, db2) = (0, Bundle::from_identity(&d));
+        let el = start(&net, &l, &db2, ID);
+        let dial = net.transport().dial_fn();
+        let end = Instant::now() + Duration::from_secs(5);
+        let connect = || loop {
+            match dial(&lb, &[1; 16]) { Ok(mut s) => { s.set_timeout(Some(Duration::from_secs(5))).unwrap(); let sess = link::dial(&mut s, &d, &lb, &proto::keepalive()).unwrap(); return (s, sess); } Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)), Err(e) => panic!("{e}") }
+        };
+        let (mut s1, mut sess1) = connect();
+        assert!(wait(&el, |e| matches!(e, Event::Connected { .. })));
+        raw_send(&mut s1, &mut sess1, &d, &file::encode_offer(&file::Offer { xid: [8; 8], bucket: file::MIN_BUCKET as u32, mode: 0, hash: [1; 32] }));
+        let (xid, _) = offer_xid(&el);
+        el.reply_file(ID, xid, true);
+        let (_s2, _sess2) = connect(); // the same contact dials again: the old connection is replaced
+        assert!(wait(&el, |e| matches!(e, Event::FileCancelled { .. })), "UI would keep 'arriving' forever and leak its RAM budget");
     }
 
     #[test]

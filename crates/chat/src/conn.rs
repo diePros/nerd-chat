@@ -105,6 +105,8 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
         if n_count.get() > 6 { return true; }
         ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok()
     };
+    // security-relevant notices (integrity failure, refused content) are never rate-limited away
+    let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok();
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::FileCancelled { id, gen })).is_ok();
     let mut bad_frames = 0u32;
     'conn: loop {
@@ -227,10 +229,10 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                                             let data = Zeroizing::new(c.data);
                                             if ev.send(In::Conn(ConnEvent::File { id, gen, data, format: c.format, report: c.report, resanitised })).is_err() { break; }
                                         }
-                                        Err(e) => { if !notice(&ev, &format!("received file refused ({e})")) || !cancelled(&ev) { break; } }
+                                        Err(e) => { if !alert(&ev, &format!("received file refused ({e})")) || !cancelled(&ev) { break; } }
                                     }
                                 }
-                                _ => { if !notice(&ev, "received file failed its integrity check and was discarded") || !cancelled(&ev) { break; } }
+                                _ => { if !alert(&ev, "received file failed its integrity check and was discarded") || !cancelled(&ev) { break; } }
                             }
                         }
                     }

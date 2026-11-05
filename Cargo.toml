@@ -16,3 +16,7 @@ strip = true
 # Crypto crates are far too slow unoptimized (Argon2 512 MiB, ML-KEM); keep deps fast in dev/test.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The parsers handle hostile input; keep their tests (incl. mutation fuzzing) fast.
+[profile.dev.package.seburity-strip]
+opt-level = 3

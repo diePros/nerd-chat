@@ -64,39 +64,39 @@ type Dropped = std::collections::BTreeMap<String, (usize, usize)>;
 
 // ---------------- JPEG ----------------
 /// Exact structural validation of the segments we keep (nothing may hide in extra bytes).
-fn jpeg_segment_ok(m: u8, body: &[u8]) -> bool {
+fn jpeg_segment_ok(m: u8, body: &[u8]) -> Option<usize> {
+    let ok = |b: bool| if b { Some(1) } else { None };
     match m {
         0xDB => { // DQT: (Pq|Tq, 64*(Pq+1) bytes)*
-            let mut i = 0;
-            if body.is_empty() { return false; }
+            let (mut i, mut n) = (0, 0);
+            if body.is_empty() { return None; }
             while i < body.len() {
                 let (pq, tq) = (body[i] >> 4, body[i] & 15);
-                if pq > 1 || tq > 3 { return false; }
-                i += 1 + 64 * (pq as usize + 1);
+                if pq > 1 || tq > 3 { return None; }
+                i += 1 + 64 * (pq as usize + 1); n += 1;
             }
-            i == body.len()
+            if i == body.len() { Some(n) } else { None }
         }
         0xC4 => { // DHT: (Tc|Th, 16 counts, symbols)*
-            let mut i = 0;
-            if body.is_empty() { return false; }
+            let (mut i, mut tables) = (0, 0);
+            if body.is_empty() { return None; }
             while i < body.len() {
-                if body.len() < i + 17 { return false; }
+                if body.len() < i + 17 { return None; }
                 let (tc, th) = (body[i] >> 4, body[i] & 15);
-                if tc > 1 || th > 3 { return false; }
+                if tc > 1 || th > 3 { return None; }
                 let n: usize = body[i + 1..i + 17].iter().map(|&c| c as usize).sum();
-                if n > 256 { return false; }
-                i += 17 + n;
+                if n > 256 { return None; }
+                i += 17 + n; tables += 1;
             }
-            i == body.len()
+            if i == body.len() { Some(tables) } else { None }
         }
         0xC0..=0xC3 | 0xC5..=0xC7 => { // SOF (Huffman): P, Y, X, Nf, 3*Nf
-            body.len() >= 6 && matches!(body[0], 8 | 12 | 16) && (1..=4).contains(&body[5]) && body.len() == 6 + 3 * body[5] as usize
-                && u16::from_be_bytes([body[1], body[2]]) != 0 && u16::from_be_bytes([body[3], body[4]]) != 0
-                // Y may be 0 only with a DNL (which we drop): refuse that case above via the height check
+            ok(body.len() >= 6 && matches!(body[0], 8 | 12 | 16) && (1..=4).contains(&body[5]) && body.len() == 6 + 3 * body[5] as usize
+                && u16::from_be_bytes([body[1], body[2]]) != 0 && u16::from_be_bytes([body[3], body[4]]) != 0)
         }
-        0xDA => !body.is_empty() && (1..=4).contains(&body[0]) && body.len() == 1 + 2 * body[0] as usize + 3, // SOS
-        0xDD => body.len() == 2, // DRI
-        _ => false,
+        0xDA => ok(!body.is_empty() && (1..=4).contains(&body[0]) && body.len() == 1 + 2 * body[0] as usize + 3), // SOS
+        0xDD => ok(body.len() == 2), // DRI
+        _ => None,
     }
 }
 
@@ -107,6 +107,7 @@ fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
     out.extend_from_slice(&[0xFF, 0xD8]);
     let mut i = 2;
     let (mut seen_sof, mut seen_scan) = (false, false);
+    let (mut tables_q, mut tables_h) = (0usize, 0usize);
     loop {
         if i >= d.len() { return Err(StripError::Malformed(M, "missing EOI")); }
         if d[i] != 0xFF { return Err(StripError::Malformed(M, "expected marker")); }
@@ -132,7 +133,10 @@ fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
         let seg = &d[i..i + len];
         i += len;
         if keep {
-            if !jpeg_segment_ok(m, body) { return Err(StripError::Malformed(M, "invalid or padded structural segment")); }
+            let Some(n) = jpeg_segment_ok(m, body) else { return Err(StripError::Malformed(M, "invalid or padded structural segment")); };
+            // table redefinition is legal but unbounded repetition is a covert channel: legitimate files need a handful
+            if m == 0xDB { tables_q += n; if tables_q > 8 { return Err(StripError::Malformed(M, "too many quantisation tables")); } }
+            if m == 0xC4 { tables_h += n; if tables_h > 32 { return Err(StripError::Malformed(M, "too many Huffman tables")); } }
             if matches!(m, 0xC0..=0xC3 | 0xC5..=0xC7) { if seen_sof { return Err(StripError::Malformed(M, "second frame header")); } seen_sof = true; }
             out.extend_from_slice(&[0xFF, m]);
             out.extend_from_slice(seg);
@@ -167,6 +171,7 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
             let v = self.bit & ((1u32 << n) - 1); self.bit >>= n; self.nbits -= n; Some(v)
         }
     }
+    #[derive(Clone)]
     struct Huff { count: [u16; 16], symbol: Vec<u16> }
     fn build(lengths: &[u8]) -> Option<Huff> {
         let mut count = [0u16; 16];
@@ -198,15 +203,21 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
     let (cmf, flg) = (z[0], z[1]);
     if cmf & 0x0F != 8 || cmf >> 4 > 7 || ((cmf as u16) << 8 | flg as u16) % 31 != 0 || flg & 0x20 != 0 { return false; }
     let mut b = Bits { d: &z[2..], pos: 0, bit: 0, nbits: 0 };
-    let mut win = vec![0u8; 32768];
+    let mut win = zeroize::Zeroizing::new(vec![0u8; 32768]);
     let (mut out, mut a, mut bsum) = (0usize, 1u32, 0u32);
+    // work bounds: the validator must never hold a thread (and the panic key) for long on hostile input
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut blocks = 0u32;
     let mut emit = |byte: u8, win: &mut Vec<u8>, out: &mut usize| -> bool {
         if *out >= expect { return false; }
+        if *out & 0xFFFF == 0 && std::time::Instant::now() > deadline { return false; }
         win[*out & 32767] = byte; *out += 1;
         a = (a + byte as u32) % 65521; bsum = (bsum + a) % 65521;
         true
     };
     loop {
+        blocks += 1;
+        if blocks > 20_000 || std::time::Instant::now() > deadline { return false; }
         let Some(last) = b.need(1) else { return false };
         let Some(ty) = b.need(2) else { return false };
         match ty {
@@ -221,11 +232,15 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
                 b.pos += len as usize;
             }
             1 | 2 => {
-                let (lit, dist) = if ty == 1 {
-                    let mut l = [0u8; 288];
-                    for (i, v) in l.iter_mut().enumerate() { *v = if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 }; }
-                    let (Some(a), Some(c)) = (build(&l), build(&[5u8; 30])) else { return false };
-                    (a, c)
+                let (lit, dist): (std::borrow::Cow<Huff>, std::borrow::Cow<Huff>) = if ty == 1 {
+                    static FIXED: std::sync::OnceLock<Option<(Huff, Huff)>> = std::sync::OnceLock::new();
+                    let f = FIXED.get_or_init(|| {
+                        let mut l = [0u8; 288];
+                        for (i, v) in l.iter_mut().enumerate() { *v = if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 }; }
+                        Some((build(&l)?, build(&[5u8; 30])?))
+                    });
+                    let Some((a, c)) = f else { return false };
+                    (std::borrow::Cow::Borrowed(a), std::borrow::Cow::Borrowed(c))
                 } else {
                     let (Some(nlen), Some(ndist), Some(ncode)) = (b.need(5), b.need(5), b.need(4)) else { return false };
                     let (nlen, ndist, ncode) = (nlen as usize + 257, ndist as usize + 1, ncode as usize + 4);
@@ -249,17 +264,17 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
                     }
                     if lens[256] == 0 { return false; }
                     let (Some(a), Some(c)) = (build(&lens[..nlen]), build(&lens[nlen..])) else { return false };
-                    (a, c)
+                    (std::borrow::Cow::Owned(a), std::borrow::Cow::Owned(c))
                 };
                 loop {
-                    let Some(sym) = decode(&mut b, &lit) else { return false };
+                    let Some(sym) = decode(&mut b, lit.as_ref()) else { return false };
                     if sym < 256 { if !emit(sym as u8, &mut win, &mut out) { return false; } continue; }
                     if sym == 256 { break; }
                     let sym = sym as usize - 257;
                     if sym >= 29 { return false; }
                     let Some(e) = b.need(LEXT[sym] as u32) else { return false };
                     let len = LBASE[sym] as usize + e as usize;
-                    let Some(ds) = decode(&mut b, &dist) else { return false };
+                    let Some(ds) = decode(&mut b, dist.as_ref()) else { return false };
                     let ds = ds as usize;
                     if ds >= 30 { return false; }
                     let Some(e) = b.need(DEXT[ds] as u32) else { return false };
@@ -293,18 +308,22 @@ fn raw_size(w: u64, h: u64, depth: u8, ct: u8, interlace: u8) -> Option<usize> {
         }
         t
     };
-    if total > 256 * 1024 * 1024 { return None; } // decompression-bomb guard: bounds the CPU the validator can be made to spend
+    if total > 128 * 1024 * 1024 { return None; } // decompression-bomb guard: bounds the CPU the validator can be made to spend
     usize::try_from(total).ok()
 }
 
 // ---------------- PNG ----------------
 fn crc32(data: &[u8]) -> u32 {
-    let mut table = [0u32; 256];
-    for (n, t) in table.iter_mut().enumerate() {
-        let mut c = n as u32;
-        for _ in 0..8 { c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 }; }
-        *t = c;
-    }
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for (n, e) in t.iter_mut().enumerate() {
+            let mut c = n as u32;
+            for _ in 0..8 { c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 }; }
+            *e = c;
+        }
+        t
+    });
     let mut c = 0xFFFF_FFFFu32;
     for &b in data { c = table[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8); }
     c ^ 0xFFFF_FFFF
@@ -319,7 +338,9 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
     let (mut ihdr, mut idat, mut iend, mut plte, mut trns) = (false, false, false, false, false);
     let mut depth = 0u8;
     let mut dims = (0u64, 0u64, 0u8, 0u8);
-    let mut z: Vec<u8> = Vec::new();
+    let mut z: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(Vec::with_capacity(d.len()));
+    let mut ctype = 0u8;
+    let mut plte_entries = 0usize;
     let mut last_idat_end = 0usize;
     while i < d.len() && !iend {
         if i + 12 > d.len() { return Err(StripError::Malformed(M, "truncated chunk")); }
@@ -337,17 +358,19 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
                 let (w, h) = (u32::from_be_bytes(body[0..4].try_into().unwrap()), u32::from_be_bytes(body[4..8].try_into().unwrap()));
                 depth = body[8];
                 dims = (w as u64, h as u64, body[9], body[12]);
+                ctype = body[9];
                 if w == 0 || h == 0 || w > 0x7FFF_FFFF || h > 0x7FFF_FFFF || !matches!(depth, 1 | 2 | 4 | 8 | 16) || !matches!(body[9], 0 | 2 | 3 | 4 | 6) || body[10] != 0 || body[11] != 0 || body[12] > 1 {
                     return Err(StripError::Malformed(M, "invalid IHDR values"));
                 }
                 ihdr = true; out.extend_from_slice(whole);
             }
-            b"PLTE" => {
+            // PLTE is kept only where it is REQUIRED (palette images); a "suggested palette" on other colour types is dropped.
+            b"PLTE" if ctype == 3 => {
                 if !ihdr || idat || plte || trns || len == 0 || len % 3 != 0 || len > 768 || len / 3 > (1usize << depth.min(8)) { return Err(StripError::Malformed(M, "invalid PLTE")); }
-                plte = true; out.extend_from_slice(whole);
+                plte = true; plte_entries = len / 3; out.extend_from_slice(whole);
             }
-            b"tRNS" => {
-                if !ihdr || idat || trns || len == 0 || len > 256 { return Err(StripError::Malformed(M, "invalid tRNS")); }
+            // tRNS only with its exact legal length per colour type (grey 2, RGB 6, palette <= entries); never with alpha types.
+            b"tRNS" if !trns && !idat && ihdr && match ctype { 0 => len == 2, 2 => len == 6, 3 => plte && len <= plte_entries, _ => false } => {
                 trns = true; out.extend_from_slice(whole);
             }
             b"IDAT" => { if !ihdr { return Err(StripError::Malformed(M, "IDAT before IHDR")); } if idat && i != last_idat_end { return Err(StripError::Malformed(M, "IDAT chunks not consecutive")); } idat = true; z.extend_from_slice(body); last_idat_end = i + 12 + len; out.extend_from_slice(whole); }
@@ -356,6 +379,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
                 let name = match ty {
                     b"tEXt" | b"zTXt" | b"iTXt" => "text chunks (author/comment/software/XMP)",
                     b"eXIf" => "EXIF block",
+                    b"PLTE" | b"tRNS" => "palette/transparency data not legal for this image type",
                     b"tIME" => "modification time",
                     b"iCCP" => "ICC colour profile",
                     _ => "other ancillary chunks", // ONE aggregate entry: chunk types are attacker-chosen
@@ -366,6 +390,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
         i += 12 + len;
     }
     if !iend { return Err(StripError::Malformed(M, "missing IEND")); }
+    if ctype == 3 && !plte { return Err(StripError::Malformed(M, "palette image without PLTE")); }
     let expect = raw_size(dims.0, dims.1, depth, dims.2, dims.3).ok_or(StripError::Malformed(M, "implausible image size"))?;
     if !zlib_valid(&z, expect) { return Err(StripError::Malformed(M, "image data is not exactly one well-formed zlib stream of the size IHDR implies")); }
     if i < d.len() { dropped.entry("data after IEND".into()).or_default().1 += d.len() - i; }
@@ -389,10 +414,13 @@ fn text(d: &[u8]) -> Result<Cleaned, StripError> {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         let c = if c == '\r' { if chars.peek() == Some(&'\n') { continue } else { '\n' } } else { c };
-        let combining = matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F);
-        if combining { run += 1; } else { run = 0; }
-        if (seburity_core::text::is_unsafe_char(c) && c != '\n' && c != '\t') || (combining && run > seburity_core::text::MAX_COMBINING_RUN) { removed += 1; } else { out.push(c); }
+        let combining = seburity_core::text::is_combining(c);
+        if seburity_core::text::is_unsafe_char(c) && c != '\n' && c != '\t' { removed += 1; continue; } // removed characters do NOT reset the run
+        if combining { run += 1; if run > seburity_core::text::MAX_COMBINING_RUN { removed += 1; continue; } } else { run = 0; }
+        out.push(c);
     }
+    // the OUTPUT must not look like a structured document either (a leading invisible character used to hide it)
+    if looks_structured(&out) { return Err(StripError::StructuredText); }
     let mut report = vec!["plain text: ONLY invisible/control characters are removed; any document metadata inside the text is NOT understood".to_string()];
     if removed > 0 { report.push(format!("control/invisible/bidi/format characters: {removed} removed")); }
     Ok(Cleaned { format: Format::Text, data: out.into_bytes(), report })
@@ -580,6 +608,54 @@ mod tests {
         assert!(c.report.len() <= MAX_REPORT && c.report.iter().any(|l| l.contains("676")), "{:?}", c.report);
     }
 
+    #[test]
+    fn covert_channels_in_palette_transparency_and_tables_are_closed() {
+        // grayscale image with a 256-byte "tRNS" and a 768-byte "PLTE": both dropped, not copied
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        v.extend(chunk(b"PLTE", &[0x41; 768])); v.extend(chunk(b"tRNS", &[0x42; 256]));
+        v.extend(chunk(b"IDAT", &idat2())); v.extend(chunk(b"IEND", &[]));
+        let c = clean(&v).unwrap();
+        assert!(!c.data.windows(4).any(|w| w == [0x41; 4] || w == [0x42; 4]), "payload survived");
+        // the legal 2-byte grey tRNS is kept
+        let mut ok = b"\x89PNG\r\n\x1a\n".to_vec();
+        ok.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0])); ok.extend(chunk(b"tRNS", &[0, 7])); ok.extend(chunk(b"IDAT", &idat2())); ok.extend(chunk(b"IEND", &[]));
+        assert_eq!(clean(&ok).unwrap().data, ok);
+        // JPEG: 100 redefinitions of an unused table are refused
+        let mut j = vec![0xFF, 0xD8];
+        for _ in 0..100 { j.extend(seg(0xDB, &[3; 1].iter().chain([0x42u8; 64].iter()).copied().collect::<Vec<u8>>())); }
+        j.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); j.extend(seg(0xC4, &[0; 17])); j.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0])); j.extend_from_slice(&[0x11, 0xFF, 0xD9]);
+        assert!(clean(&j).is_err());
+    }
+
+    #[test]
+    fn text_cleaning_is_idempotent_safe_and_cannot_hide_a_document_or_stacked_marks() {
+        assert!(text_clean("\u{200B}{\\rtf1{\\info{\\author Jane}}}".as_bytes()).is_err(), "leading invisible char must not hide an RTF");
+        assert!(text_clean("\u{202E}<svg><metadata>owner=jdoe</metadata></svg>".as_bytes()).is_err());
+        let sneaky = format!("a{}", "\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{200B}".repeat(20));
+        let out = text_clean(sneaky.as_bytes()).unwrap().data;
+        assert!(String::from_utf8(out.clone()).unwrap().chars().filter(|c| seburity_core::text::is_combining(*c)).count() <= seburity_core::text::MAX_COMBINING_RUN);
+        assert_eq!(text_clean(&out).unwrap().data, out, "idempotent");
+    }
+
+    #[test]
+    fn many_empty_deflate_blocks_are_refused_quickly() {
+        // 25_000 empty fixed-Huffman blocks (10 bits each), then a final stored block: valid zlib, hostile work factor
+        let mut bits: Vec<bool> = vec![];
+        let push = |bits: &mut Vec<bool>, v: u32, n: u32| for i in 0..n { bits.push(v >> i & 1 == 1) };
+        for _ in 0..25_000 { push(&mut bits, 0, 1); push(&mut bits, 1, 2); push(&mut bits, 0, 7); }
+        push(&mut bits, 1, 1); push(&mut bits, 0, 2);
+        while bits.len() % 8 != 0 { bits.push(false); }
+        let mut z = vec![0x78, 0x01];
+        for c in bits.chunks(8) { z.push(c.iter().enumerate().fold(0u8, |a, (i, &b)| a | (b as u8) << i)); }
+        z.extend_from_slice(&[2, 0, 0xFD, 0xFF, 0, 0, 0x00, 0x02, 0x00, 0x01]);
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0])); v.extend(chunk(b"IDAT", &z)); v.extend(chunk(b"IEND", &[]));
+        let t = std::time::Instant::now();
+        assert!(clean(&v).is_err(), "block-count cap");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     /// Deterministic mutation fuzzing: hostile input may be refused but must NEVER panic (panic = abort kills the whole app).
     #[test]
     fn mutated_inputs_never_panic() {
@@ -595,6 +671,15 @@ mod tests {
                 }
                 let _ = super::clean(&v, Mode::Auto);
                 let _ = super::clean(&v, Mode::PlainText);
+            }
+        }
+        // CRC-fixing mutator: mutate the zlib payload itself so the mutants actually reach the deflate validator
+        for f in [include_str!("../testdata/zlib_dynamic_64x64_gray.hex"), include_str!("../testdata/zlib_fixed_64x64_gray.hex")] {
+            let z = unhex(f);
+            for _ in 0..6000 {
+                let mut m = z.clone();
+                for _ in 0..(1 + rnd() % 3) { let i = (rnd() as usize) % m.len(); m[i] ^= 1 << (rnd() % 8); }
+                let _ = super::clean(&png64(&m), Mode::Auto);
             }
         }
     }

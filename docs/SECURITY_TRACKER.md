@@ -227,3 +227,16 @@ No Critical. Opus review integrated:
 | R9-I | TooLarge message, stale doc claims, single-key accept without contact name | FIXED | message says 8 MiB, docs rewritten, accept/decline status names the contact |
 | R9-open | fuzz harness / standalone strip / sandboxing | PARTIAL | DONE: deterministic mutation fuzz test (`mutated_inputs_never_panic`, 16k inputs per run), `seburity --strip IN OUT`. OPEN: libFuzzer/cargo-fuzz target, seccomp/Landlock sandbox of the parsers |
 | R10-self | while testing the new CLI I found the save error path unlinked an EXISTING file the user tried to overwrite (TUI save and `--strip`) and an arithmetic overflow in the PNG size calculation (panic = abort would kill the app) | FIXED | create_new first, only remove a file we created; u128 arithmetic; regression tests |
+
+## Review 10 — file sharing, round 2 (commits b60636e, 8f24120)
+No Critical, no panics (326k mutants through the zlib validator; 10,562 Python-zlib PNGs and 11 real JPEGs all accepted). Integrated:
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R10-H1 | CPU DoS: valid 8 MiB PNG of ~6.7M empty deflate blocks = 23 s (release) on the UI thread; per-chunk CRC table rebuild; bomb 3 s | FIXED | static fixed-Huffman and CRC tables, 20k-block cap, 4 s deadline inside the validator, raw-size cap 128 MiB, sender-side cleaning moved to a worker thread (`prepare_file`; panic key live); tests |
+| R10-M1 | polyglots/payloads survive (ZIP in stored deflate block or after JPEG entropy data, repeated unused tables, PLTE/tRNS payloads); docs over-claimed | PARTIAL | FIXED: PLTE only for palette images, tRNS only with exact legal length, table-count caps, docs now say cleaning stops ACCIDENTAL leaks only. ACCEPTED/OPEN: a cooperating sender can still hide data in pixel streams (needs sandboxed decode + re-encode) |
+| R10-M2 | replacing a connection dropped Down/FileCancelled as stale: UI kept "File arriving..." forever and leaked its 24 MiB budget; a contact could do it on purpose | FIXED | `FileCancelled` on replacement; test `replacing_a_connection_tells_the_ui_to_clear_file_state` |
+| R10-L1/L2 | plain-text structured check only on input (leading ZWSP hid an RTF); combining cap bypass via removable chars | FIXED | check output too, removed chars no longer reset the run, shared `core::text::is_combining`; idempotence test |
+| R10-L3 | `z`/`win`/error buffers not zeroized | FIXED | `Zeroizing` for the IDAT copy and the inflate window |
+| R10-L4 | notice limiter swallowed security notices | FIXED | integrity/refusal notices bypass the limiter. OPEN: sticky warnings in the UI |
+| R10-I | fuzz test did not reach the validator; `--strip` ignored unknown flags | FIXED | CRC-fixing mutator (12k mutants/run), unknown flags rejected |
+NOT re-reviewed after these fixes (small, test-covered): ask for a round 3 before relying on it.
