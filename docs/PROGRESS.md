@@ -34,7 +34,7 @@ All tracker rows FIXED or ACCEPTED with a written reason, except the audit/Tails
 unfixed Medium+; workspace tests, static musl build, repro check and live Tor tests green on the final commit.
 
 ## WAITING FOR THE USER (blocks the pre-production gate)
-1. Allow installing `cargo-deny` (supply-chain check; deny.toml exists, never run) and, later, cargo-vet.
+1. (done: cargo-deny passes, cargo-vet initialised; 210 crates only exempted, see tracker D-4)
 2. Parser sandbox: needs either a new dependency (e.g. a Landlock/seccomp crate) or a small `unsafe` module; a design decision, see tracker R9-open.
 3. cargo-fuzz target (new tool).
 4. Tails test and professional audit (human).
