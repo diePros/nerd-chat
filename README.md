@@ -1,4 +1,4 @@
-# seburity
+# nerd-chat
 
 A serverless, Tor-routed, end-to-end encrypted chat for people who have reason to be careful. No server, no accounts, no phone numbers,
 no cloud: you exchange keys with each contact in person (file, QR-less local link with a one-time code), every contact gets its own fresh
@@ -24,7 +24,7 @@ key pair and its own onion service, and everything runs from a **single static L
 ```bash
 git clone <this repository> && cd <repository>
 cargo test --workspace                                              # expect all green
-cargo build --release --locked --target x86_64-unknown-linux-musl -p seburity-tui   # static binary (pinned toolchain, see rust-toolchain.toml)
+cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui   # static binary (pinned toolchain, see rust-toolchain.toml)
 ```
 Details, checksums, the reproducible-build check (also on WSL) and live-USB notes: `docs/BUILD_AND_RUN.md`; first steps and the key map: `docs/GETTING_STARTED.md`.
 Needs `tor` installed for chat (or an existing Tor via `--tor-control`). x86_64 Linux only; the file-cleaning sandbox needs seccomp.

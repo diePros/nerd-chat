@@ -18,9 +18,9 @@ strip = true
 opt-level = 3
 
 # The parsers handle hostile input; keep their tests (incl. mutation fuzzing) fast.
-[profile.dev.package.seburity-strip]
+[profile.dev.package.nerd-chat-strip]
 opt-level = 3
 
-# snow 0.10.0 never wipes key material. vendor/snow is the unmodified crate plus Drop-time zeroization (see vendor/snow/SEBURITY-PATCH.md).
+# snow 0.10.0 never wipes key material. vendor/snow is the unmodified crate plus Drop-time zeroization (see vendor/snow/NERD-CHAT-PATCH.md).
 [patch.crates-io]
 snow = { path = "vendor/snow" }

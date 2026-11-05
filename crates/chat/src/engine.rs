@@ -18,8 +18,8 @@ use crate::{
     proto,
     transport::{BoxStream, DialFn, Transport},
 };
-use seburity_core::{bundle::Bundle, identity::ContactIdentity};
-use seburity_net::{guard::HandshakeGuard, link};
+use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
+use nerd_chat_net::{guard::HandshakeGuard, link};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, mpsc::{channel, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
@@ -111,7 +111,7 @@ pub enum Event {
     /// An offer or transfer ended without a file (expired, stalled, refused, failed its check): clear any "offered" state.
     FileCancelled { id: [u8; 8] },
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
-    File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
+    File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
     /// The contact sent a key-rotation frame (`kind` = proto::KIND_ROTATE_*) carrying its new (onion, auth) public keys.
     Rotate { id: [u8; 8], kind: u8, onion: [u8; 32], auth: [u8; 32] },
@@ -124,7 +124,7 @@ pub(crate) enum ConnEvent {
     Notice { id: [u8; 8], gen: u64, text: String, alert: bool },
     FileOffer { id: [u8; 8], gen: u64, xid: file::Xid, bucket: u32 },
     FileCancelled { id: [u8; 8], gen: u64 },
-    File { id: [u8; 8], gen: u64, data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
+    File { id: [u8; 8], gen: u64, data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8], gen: u64 },
     Rotate { id: [u8; 8], kind: u8, keys: [u8; 64] },
     DialFailed { id: [u8; 8], epoch: u64 },
@@ -173,22 +173,22 @@ impl Engine {
 
     /// Clean (metadata stripped by allowlist, unknown formats refused), pad to a size bucket and offer a file to a CONNECTED
     /// contact. Returns the cleaning report. Files are never queued: if the contact is offline the engine says so.
-    pub fn send_file(&self, id: [u8; 8], raw: &[u8], mode: seburity_strip::Mode) -> Result<Vec<String>, seburity_strip::StripError> {
+    pub fn send_file(&self, id: [u8; 8], raw: &[u8], mode: nerd_chat_strip::Mode) -> Result<Vec<String>, nerd_chat_strip::StripError> {
         let (f, report) = Self::prepare_file(raw, mode)?;
         self.offer_file(id, f);
         Ok(report)
     }
 
     /// The CPU-heavy part (cleaning, padding, hashing) as a pure function: run it on a worker thread so the UI/panic key stay live.
-    pub fn prepare_file(raw: &[u8], mode: seburity_strip::Mode) -> Result<(FileOut, Vec<String>), seburity_strip::StripError> {
-        let c = seburity_strip::clean_hooked(raw, mode)?;
+    pub fn prepare_file(raw: &[u8], mode: nerd_chat_strip::Mode) -> Result<(FileOut, Vec<String>), nerd_chat_strip::StripError> {
+        let c = nerd_chat_strip::clean_hooked(raw, mode)?;
         let report = c.report;
         let data = Zeroizing::new(c.data);
-        let Some(stream) = file::build_stream(&data) else { return Err(seburity_strip::StripError::TooLarge) };
+        let Some(stream) = file::build_stream(&data) else { return Err(nerd_chat_strip::StripError::TooLarge) };
         let bucket = stream.len() as u32;
         let mut xid = [0u8; 8];
         getrandom::fill(&mut xid).expect("OS RNG unavailable");
-        let mode = if mode == seburity_strip::Mode::PlainText { file::MODE_TEXT } else { file::MODE_AUTO };
+        let mode = if mode == nerd_chat_strip::Mode::PlainText { file::MODE_TEXT } else { file::MODE_AUTO };
         Ok((FileOut { xid, bucket, mode, hash: file::hash(&data), padded: Zeroizing::new(stream) }, report))
     }
 
@@ -790,7 +790,7 @@ mod tests {
         for _ in 0..60 {                                        // far beyond the old burst of 5
             if let Ok(mut s) = dial(&lb, &[3; 16]) {
                 use std::io::Write;
-                let _ = s.write_all(&vec![0xAB; seburity_core::session::MSG1_LEN]);
+                let _ = s.write_all(&vec![0xAB; nerd_chat_core::session::MSG1_LEN]);
             }
         }
         let ed = start(&net, &d, &lb, ID);                       // now the real peer arrives
@@ -1096,7 +1096,7 @@ mod tests {
     fn file_is_stripped_accepted_padded_and_delivered() {
         let (el, ed) = pair();
         let raw = jpeg(40_000);
-        let report = ed.send_file(ID, &raw, seburity_strip::Mode::Auto).unwrap();
+        let report = ed.send_file(ID, &raw, nerd_chat_strip::Mode::Auto).unwrap();
         assert!(!report.is_empty(), "report lists what was removed");
         let (xid, bucket) = offer_xid(&el);
         assert_eq!(bucket as usize, 65_536, "offer announces only the padded bucket, not the size");
@@ -1116,13 +1116,13 @@ mod tests {
     #[test]
     fn declined_file_sends_no_content_and_unsupported_formats_are_refused() {
         let (el, ed) = pair();
-        ed.send_file(ID, &jpeg(1000), seburity_strip::Mode::Auto).unwrap();
+        ed.send_file(ID, &jpeg(1000), nerd_chat_strip::Mode::Auto).unwrap();
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, false);
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("declined"))));
         assert!(!wait_for(&el, Duration::from_millis(500), |ev| matches!(ev, Event::File { .. })));
-        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01", seburity_strip::Mode::Auto).is_err(), "unknown format must be refused");
-        assert!(ed.send_file(ID, &[], seburity_strip::Mode::Auto).is_err());
+        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01", nerd_chat_strip::Mode::Auto).is_err(), "unknown format must be refused");
+        assert!(ed.send_file(ID, &[], nerd_chat_strip::Mode::Auto).is_err());
     }
 
     #[test]
@@ -1130,12 +1130,12 @@ mod tests {
         let net = MemNet::new();
         let ((_l, lb), (d, _db)) = ordered();
         let ed = start(&net, &d, &lb, ID);
-        ed.send_file(ID, &jpeg(100), seburity_strip::Mode::Auto).unwrap();
+        ed.send_file(ID, &jpeg(100), nerd_chat_strip::Mode::Auto).unwrap();
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("never queued"))));
     }
 
     /// A raw authenticated peer that speaks the file protocol badly.
-    fn raw_peer() -> (Engine, crate::transport::BoxStream, seburity_core::session::Session, ContactIdentity) {
+    fn raw_peer() -> (Engine, crate::transport::BoxStream, nerd_chat_core::session::Session, ContactIdentity) {
         let net = MemNet::new();
         let ((l, lb), (d, db)) = ordered();
         let el = start(&net, &l, &db, ID);
@@ -1148,17 +1148,17 @@ mod tests {
         (el, s, sess, d)
     }
 
-    fn raw_send(s: &mut crate::transport::BoxStream, sess: &mut seburity_core::session::Session, me: &ContactIdentity, body: &[u8]) {
+    fn raw_send(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity, body: &[u8]) {
         use std::io::Write;
         let w = sess.send(me, body).unwrap();
         let _ = s.write_all(&w); // the engine may already have cut an abusive peer off
     }
 
     /// Read cells until the engine's ACCEPT for `xid` arrives (a correct sender never sends content before it).
-    fn raw_wait_accept(s: &mut crate::transport::BoxStream, sess: &mut seburity_core::session::Session, me: &ContactIdentity, xid: file::Xid) {
+    fn raw_wait_accept(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity, xid: file::Xid) {
         use std::io::Read;
         for _ in 0..50 {
-            let mut cell = vec![0u8; seburity_core::session::WIRE_CELL_LEN];
+            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
             s.read_exact(&mut cell).unwrap();
             let m = sess.recv(me, &cell).unwrap();
             if m.body.first() == Some(&file::KIND_FILE_ACCEPT) && file::parse_ctl(&m.body) == Some(xid) { return; }
@@ -1252,16 +1252,16 @@ mod tests {
     #[test]
     fn plain_text_is_an_explicit_mode_and_structured_documents_are_refused() {
         let (el, ed) = pair();
-        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", seburity_strip::Mode::Auto).is_err());
-        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", seburity_strip::Mode::PlainText).is_err());
-        let report = ed.send_file(ID, "note\u{202E}\u{E0041} plain".as_bytes(), seburity_strip::Mode::PlainText).unwrap();
+        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", nerd_chat_strip::Mode::Auto).is_err());
+        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", nerd_chat_strip::Mode::PlainText).is_err());
+        let report = ed.send_file(ID, "note\u{202E}\u{E0041} plain".as_bytes(), nerd_chat_strip::Mode::PlainText).unwrap();
         assert!(report.iter().any(|l| l.contains("NOT understood")));
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, true);
         let mut r = None;
         assert!(wait(&el, |ev| if let Event::File { data, format, .. } = ev { r = Some((data.to_vec(), *format)); true } else { false }));
         let (data, f) = r.unwrap();
-        assert_eq!(f, seburity_strip::Format::Text);
+        assert_eq!(f, nerd_chat_strip::Format::Text);
         assert_eq!(data, b"note plain");
     }
 

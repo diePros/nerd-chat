@@ -1,23 +1,23 @@
 [package]
 publish = false
-name = "seburity-tui"
+name = "nerd-chat-tui"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "seburity"
+name = "nerd-chat"
 path = "src/main.rs"
 
 [dependencies]
-seburity-core = { path = "../core" }
-seburity-vault = { path = "../vault" }
-seburity-store = { path = "../store" }
-seburity-exchange = { path = "../exchange" }
-seburity-net = { path = "../net" }
-seburity-chat = { path = "../chat" }
-seburity-strip = { path = "../strip" }
-seburity-sandbox = { path = "../sandbox" }
+nerd-chat-core = { path = "../core" }
+nerd-chat-vault = { path = "../vault" }
+nerd-chat-store = { path = "../store" }
+nerd-chat-exchange = { path = "../exchange" }
+nerd-chat-net = { path = "../net" }
+nerd-chat-chat = { path = "../chat" }
+nerd-chat-strip = { path = "../strip" }
+nerd-chat-sandbox = { path = "../sandbox" }
 ratatui = "0.30"
 zeroize = "1"
 getrandom = "0.3"
@@ -25,5 +25,5 @@ rustix = { version = "1", features = ["process", "thread"] }
 signal-hook = "0.3"
 
 [dev-dependencies]
-seburity-vault = { path = "../vault", features = ["insecure-test-kdf"] }
+nerd-chat-vault = { path = "../vault", features = ["insecure-test-kdf"] }
 tempfile = "3"

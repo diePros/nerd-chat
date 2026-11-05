@@ -1,8 +1,8 @@
 //! LIVE test: two engines, each with its OWN tor, chat over the real Tor network. Needs `tor` in PATH + Internet.
-//!   cargo test -p seburity-chat --test live_chat -- --ignored --nocapture
-use seburity_chat::{transport::{BoxStream, DialFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
-use seburity_core::{bundle::Bundle, identity::ContactIdentity};
-use seburity_net::tor::spawn::{find_tor, SpawnConfig};
+//!   cargo test -p nerd-chat-chat --test live_chat -- --ignored --nocapture
+use nerd_chat_chat::{transport::{BoxStream, DialFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
+use nerd_chat_net::tor::spawn::{find_tor, SpawnConfig};
 use std::{thread, time::{Duration, Instant}};
 use zeroize::Zeroizing;
 
@@ -90,7 +90,7 @@ fn chat_works_over_real_tor_when_one_side_cannot_host() {
 #[test]
 #[ignore = "needs tor and network"]
 fn key_rotation_works_over_real_tor() {
-    use seburity_chat::proto::{KIND_ROTATE_ACK, KIND_ROTATE_DONE, KIND_ROTATE_OFFER};
+    use nerd_chat_chat::proto::{KIND_ROTATE_ACK, KIND_ROTATE_DONE, KIND_ROTATE_OFFER};
     let tor = find_tor().expect("`tor` not found in PATH");
     let (host, dialer) = loop {
         let (x, y) = (ContactIdentity::generate(), ContactIdentity::generate());

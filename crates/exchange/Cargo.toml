@@ -1,13 +1,13 @@
 [package]
 publish = false
-name = "seburity-exchange"
+name = "nerd-chat-exchange"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-seburity-core = { path = "../core" }
-seburity-net = { path = "../net" }
+nerd-chat-core = { path = "../core" }
+nerd-chat-net = { path = "../net" }
 spake2 = "0.4"
 curve25519-dalek = "4"
 chacha20poly1305 = "0.10"

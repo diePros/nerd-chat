@@ -1,11 +1,11 @@
 //! UI state machine (no rendering, no terminal): driven by key events, fully testable.
 use crate::secret::{ComposeBuf, SecretBuf};
-use seburity_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
-use seburity_net::tor::{control::AuthPref, spawn::{find_tor, SpawnConfig}, Addr};
-use seburity_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
-use seburity_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
-use seburity_store::{read_regular_file, OpenInfo, StoreError, VaultFile};
-use seburity_vault::Profile;
+use nerd_chat_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use nerd_chat_net::tor::{control::AuthPref, spawn::{find_tor, SpawnConfig}, Addr};
+use nerd_chat_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
+use nerd_chat_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
+use nerd_chat_store::{read_regular_file, OpenInfo, StoreError, VaultFile};
+use nerd_chat_vault::Profile;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -194,12 +194,12 @@ pub struct App {
     quit_armed: bool,
     compose: ComposeBuf,
     /// pending incoming file offers (contact id -> (transfer id, size))
-    offers: HashMap<[u8; 8], (seburity_chat::file::Xid, u32)>,
+    offers: HashMap<[u8; 8], (nerd_chat_chat::file::Xid, u32)>,
     /// accepted, still arriving: contact id -> bucket (counts toward the RAM budget)
     accepted: HashMap<[u8; 8], u32>,
     inbox: HashMap<[u8; 8], Received>,
     /// file being cleaned on a worker (cleaning is CPU-heavy on hostile input; the UI/panic key must stay live)
-    prep_rx: Option<([u8; 8], Receiver<Result<(seburity_chat::FileOut, Vec<String>), seburity_strip::StripError>>)>,
+    prep_rx: Option<([u8; 8], Receiver<Result<(nerd_chat_chat::FileOut, Vec<String>), nerd_chat_strip::StripError>>)>,
     /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
     pub alerts: Vec<(String, u32)>,
     /// Alerts that did not fit (never evict an unacknowledged one).
@@ -482,11 +482,11 @@ impl App {
             KdfMsg::Opened(Err(e)) => {
                 self.screen = back;
                 match e {
-                    StoreError::Vault(seburity_vault::VaultError::Rollback { found, expected }) =>
+                    StoreError::Vault(nerd_chat_vault::VaultError::Rollback { found, expected }) =>
                         self.err(format!("ROLLBACK DETECTED: vault save #{found} is older than #{expected}. An old copy was substituted. Refusing to open.")),
-                    StoreError::Vault(seburity_vault::VaultError::Tampered) =>
+                    StoreError::Vault(nerd_chat_vault::VaultError::Tampered) =>
                         self.err("Password correct but the vault file is CORRUPTED or TAMPERED with."),
-                    StoreError::Vault(seburity_vault::VaultError::WrongCredentials) => {
+                    StoreError::Vault(nerd_chat_vault::VaultError::WrongCredentials) => {
                         self.failures += 1;
                         if self.failures >= 3 {
                             let wait = 5u64 << (self.failures - 3).min(6);
@@ -699,7 +699,7 @@ impl App {
         }
     }
 
-    fn our_cap(&self, c: &seburity_store::Contact) -> bool { c.adv_can_host.unwrap_or(self.cfg.can_host) }
+    fn our_cap(&self, c: &nerd_chat_store::Contact) -> bool { c.adv_can_host.unwrap_or(self.cfg.can_host) }
 
     /// Option C: host an onion service for the selected contact although the roles would make us only dial.
     fn toggle_host_anyway(&mut self) {
@@ -715,7 +715,7 @@ impl App {
         self.vf().store.contacts[i].host_anyway = on;
         if !self.save() { self.vf().store.contacts[i].host_anyway = was; return; } // keep memory and vault in step
         // only roles where we DIAL are affected; otherwise leave the running connection alone (a re-add would drop it)
-        let dials = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)).and_then(|c| c.peer.as_ref().map(|p| seburity_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can))).unwrap_or(false);
+        let dials = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)).and_then(|c| c.peer.as_ref().map(|p| nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can))).unwrap_or(false);
         if dials { self.engine_add(i); }
         if on { self.err("HOST ANYWAY is ON for this contact: while online you publish an onion service for them, so anyone holding THEIR copy of your bundle can see when you are online. Use only if they cannot host (their bundle said so wrongly)."); }
         else { self.ok("Host anyway is off: you only host for this contact when the roles say so."); }
@@ -726,7 +726,7 @@ impl App {
         let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
         let p = c.peer.as_ref()?;
         let can = self.our_cap(c);
-        let dials = seburity_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
+        let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
         Some((p.can_host, c.host_anyway, !dials || (c.host_anyway && can)))
     }
 
@@ -748,12 +748,12 @@ impl App {
     fn on_rotate(&mut self, id: [u8; 8], kind: u8, onion: [u8; 32], auth: [u8; 32]) {
         let Some(i) = self.vf.as_ref().and_then(|v| v.store.contacts.iter().position(|c| c.id == id)) else { return };
         match kind {
-            seburity_chat::proto::KIND_ROTATE_OFFER => {
+            nerd_chat_chat::proto::KIND_ROTATE_OFFER => {
                 let c = &self.vf().store.contacts[i];
                 let Some(peer) = c.peer.clone() else { return };
                 if (peer.onion_pub, peer.auth_pub) == (onion, auth) && c.peer_old.is_some() {
                     // already switched (our ack was lost): acknowledge again
-                    if let Some(e) = &self.engine { e.answer_rotation(id, seburity_chat::proto::KIND_ROTATE_ACK, onion, auth); }
+                    if let Some(e) = &self.engine { e.answer_rotation(id, nerd_chat_chat::proto::KIND_ROTATE_ACK, onion, auth); }
                     return;
                 }
                 if c.peer_old.is_some() { return self.err("Ignored a second key rotation from a contact before the first one finished."); }
@@ -770,12 +770,12 @@ impl App {
                     return; // no ack: the contact keeps proposing
                 }
                 // ack first (the re-add below closes the connection), then host/dial with the new keys
-                if let Some(e) = &self.engine { e.answer_rotation(id, seburity_chat::proto::KIND_ROTATE_ACK, onion, auth); }
+                if let Some(e) = &self.engine { e.answer_rotation(id, nerd_chat_chat::proto::KIND_ROTATE_ACK, onion, auth); }
                 self.rot_accepted.insert(id, Instant::now());
                 self.engine_add(i);
                 self.ok("This contact rotated its onion service keys (identity and safety number are unchanged).");
             }
-            seburity_chat::proto::KIND_ROTATE_ACK => {
+            nerd_chat_chat::proto::KIND_ROTATE_ACK => {
                 let c = &self.vf().store.contacts[i];
                 let Some(t) = c.next_transport.clone() else { return };
                 let Some(next) = c.identity.with_transport_secret(&t) else { return };
@@ -788,11 +788,11 @@ impl App {
                     return;
                 }
                 // tell the contact it may forget the old keys, then retire our old service
-                if let Some(e) = &self.engine { e.answer_rotation(id, seburity_chat::proto::KIND_ROTATE_DONE, onion, auth); }
+                if let Some(e) = &self.engine { e.answer_rotation(id, nerd_chat_chat::proto::KIND_ROTATE_DONE, onion, auth); }
                 self.engine_add(i);
                 self.ok("Key rotation complete: your old onion service was removed from Tor (it also vanishes when you go offline); copies of your old bundle no longer show when you are online. Send your NEW bundle to anyone who still needs it.");
             }
-            seburity_chat::proto::KIND_ROTATE_DONE => {
+            nerd_chat_chat::proto::KIND_ROTATE_DONE => {
                 let c = &self.vf().store.contacts[i];
                 let Some(peer) = c.peer.as_ref() else { return };
                 if c.peer_old.is_none() || (peer.onion_pub, peer.auth_pub) != (onion, auth) { return; }
@@ -870,7 +870,7 @@ impl App {
 
     fn vf(&mut self) -> &mut VaultFile { self.vf.as_mut().expect("unlocked") }
     /// The selected contact (borrow-friendly: computes the index itself).
-    fn cur(&mut self) -> Option<&mut seburity_store::Contact> {
+    fn cur(&mut self) -> Option<&mut nerd_chat_store::Contact> {
         let i = self.sel;
         self.vf.as_mut()?.store.contacts.get_mut(i)
     }
@@ -892,10 +892,10 @@ impl App {
                 Err(e) => self.err(format!("{e}")),
             },
             Prompt::SendFile | Prompt::SendText => {
-                let mode = if p == Prompt::SendText { seburity_strip::Mode::PlainText } else { seburity_strip::Mode::Auto };
+                let mode = if p == Prompt::SendText { nerd_chat_strip::Mode::PlainText } else { nerd_chat_strip::Mode::Auto };
                 let Some(id) = self.sel_id() else { return };
                 if !self.linked.contains(&id) { return self.err("Contact is no longer connected."); }
-                let raw = match read_regular_file(&PathBuf::from(&text), seburity_chat::file::MAX_FILE as u64 * 2) {
+                let raw = match read_regular_file(&PathBuf::from(&text), nerd_chat_chat::file::MAX_FILE as u64 * 2) {
                     Ok(v) => Zeroizing::new(v),
                     Err(e) => return self.err(format!("Cannot read file: {e}")),
                 };
@@ -904,7 +904,7 @@ impl App {
                 let (tx, rx) = channel();
                 self.prep_rx = Some((id, rx));
                 self.ok("Cleaning the file (metadata removal) ... F12 = panic.");
-                thread::spawn(move || { let _ = tx.send(seburity_chat::Engine::prepare_file(&raw, mode)); });
+                thread::spawn(move || { let _ = tx.send(nerd_chat_chat::Engine::prepare_file(&raw, mode)); });
             }
             Prompt::SaveFile => {
                 let Some(id) = self.sel_id() else { return };
@@ -947,7 +947,7 @@ impl App {
                 match r {
                     Err(e) => self.err(format!("Cannot read {text}: {e}")),
                     Ok(s) => match file::dearmor(&s) {
-                        Err(_) => self.err("Not a valid Seburity contact file."),
+                        Err(_) => self.err("Not a valid Nerd-chat contact file."),
                         Ok(b) => {
                             let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
                             if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return; }
@@ -1137,7 +1137,7 @@ impl App {
     }
 
     /// Everything the engine needs for a contact, incl. an unfinished key rotation (both directions).
-    fn cfg_of(&self, c: &seburity_store::Contact) -> Option<ContactCfg> {
+    fn cfg_of(&self, c: &nerd_chat_store::Contact) -> Option<ContactCfg> {
         let p = c.peer.as_ref()?;
         Some(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.our_cap(c), c.host_anyway)
             .with_rotation(&c.identity, c.next_transport.as_deref(), c.peer_old))
@@ -1265,7 +1265,7 @@ impl App {
                     self.status = "A contact offers a file: select them, then a = accept / r = decline.".into();
                 }
                 Event::File { id, data, format, report, resanitised } => {
-                    let ext = match format { seburity_strip::Format::Jpeg => "jpg", seburity_strip::Format::Png => "png", seburity_strip::Format::Text => "txt" };
+                    let ext = match format { nerd_chat_strip::Format::Jpeg => "jpg", nerd_chat_strip::Format::Png => "png", nerd_chat_strip::Format::Text => "txt" };
                     self.accepted.remove(&id);
                     self.inbox.insert(id, Received { data, ext });
                     self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ").chars().take(200).collect::<String>()) }
@@ -1356,7 +1356,7 @@ impl App {
     }
 }
 
-fn pair_result(r: Result<seburity_exchange::pair::Paired, ExchangeError>, _me: &ContactIdentity) -> Result<(ImportedContact, String), ExchangeError> {
+fn pair_result(r: Result<nerd_chat_exchange::pair::Paired, ExchangeError>, _me: &ContactIdentity) -> Result<(ImportedContact, String), ExchangeError> {
     r.map(|p| (p.contact, p.safety_number))
 }
 
@@ -1364,7 +1364,7 @@ fn pair_result(r: Result<seburity_exchange::pair::Paired, ExchangeError>, _me: &
 mod tests {
     use super::*;
     use std::time::Duration;
-    use seburity_chat::{Timing, Transport};
+    use nerd_chat_chat::{Timing, Transport};
     use std::sync::atomic::AtomicBool;
 
     pub fn type_str(a: &mut App, s: &str) { for c in s.chars() { a.handle(Key::Char(c)); } }
@@ -1716,7 +1716,7 @@ mod tests {
                  min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
     }
 
-    fn net_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet) -> App {
+    fn net_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet) -> App {
         let mut c = cfg(Some(dir.join(name)));
         let net = net.clone();
         c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(net.transport()) as Box<dyn Transport>)));
@@ -1760,7 +1760,7 @@ mod tests {
     #[test]
     fn key_rotation_through_the_screens_in_both_directions() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
@@ -1802,15 +1802,15 @@ mod tests {
     #[test]
     fn hostile_rotation_proposals_are_refused_without_changing_anything() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         let before = peer_onion_of(&a);
-        let offer = seburity_chat::proto::KIND_ROTATE_OFFER;
+        let offer = nerd_chat_chat::proto::KIND_ROTATE_OFFER;
         let mine = (onion_of(&a), a.vf.as_ref().unwrap().store.contacts[0].identity.auth_public().to_bytes());
-        let fresh = seburity_core::identity::ContactIdentity::generate();
+        let fresh = nerd_chat_core::identity::ContactIdentity::generate();
         let good = (fresh.onion_public(), fresh.auth_public().to_bytes());
         a.on_rotate(id, offer, [0; 32], good.1);                       // weak onion key
         assert!(a.error, "{}", a.status); assert_eq!(peer_onion_of(&a), before);
@@ -1823,13 +1823,13 @@ mod tests {
         assert!(!a.error, "{}", a.status);
         assert_eq!(peer_onion_of(&a), good.0);
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].peer_old.map(|o| o.0), Some(before));
-        let again = seburity_core::identity::ContactIdentity::generate();
+        let again = nerd_chat_core::identity::ContactIdentity::generate();
         a.on_rotate(id, offer, again.onion_public(), again.auth_public().to_bytes()); // a second one before DONE
         assert!(a.error && a.status.contains("second"), "{}", a.status);
         assert_eq!(peer_onion_of(&a), good.0);
         // an ACK or DONE for something we never proposed does nothing
-        a.on_rotate(id, seburity_chat::proto::KIND_ROTATE_ACK, good.0, good.1);
-        a.on_rotate(id, seburity_chat::proto::KIND_ROTATE_DONE, again.onion_public(), again.auth_public().to_bytes());
+        a.on_rotate(id, nerd_chat_chat::proto::KIND_ROTATE_ACK, good.0, good.1);
+        a.on_rotate(id, nerd_chat_chat::proto::KIND_ROTATE_DONE, again.onion_public(), again.auth_public().to_bytes());
         assert!(a.vf.as_ref().unwrap().store.contacts[0].peer_old.is_some());
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].identity.onion_public(), mine.0);
     }
@@ -1837,14 +1837,14 @@ mod tests {
     #[test]
     fn a_contact_cannot_force_repeated_rotations_or_block_ours() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        let (offer, done) = (seburity_chat::proto::KIND_ROTATE_OFFER, seburity_chat::proto::KIND_ROTATE_DONE);
-        let k1 = seburity_core::identity::ContactIdentity::generate();
-        let k2 = seburity_core::identity::ContactIdentity::generate();
+        let (offer, done) = (nerd_chat_chat::proto::KIND_ROTATE_OFFER, nerd_chat_chat::proto::KIND_ROTATE_DONE);
+        let k1 = nerd_chat_core::identity::ContactIdentity::generate();
+        let k2 = nerd_chat_core::identity::ContactIdentity::generate();
         a.on_rotate(id, offer, k1.onion_public(), k1.auth_public().to_bytes());
         assert!(!a.error, "{}", a.status);
         a.on_rotate(id, done, k1.onion_public(), k1.auth_public().to_bytes());
@@ -1867,7 +1867,7 @@ mod tests {
     #[test]
     fn two_users_chat_through_the_screens() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
@@ -1904,7 +1904,7 @@ mod tests {
     #[test]
     fn file_send_accept_save_with_neutral_name_and_panic_wipes_received_files() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
@@ -1978,7 +1978,7 @@ mod tests {
     #[test]
     fn unsaved_files_are_never_silently_replaced_and_can_be_discarded() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
@@ -2012,7 +2012,7 @@ mod tests {
     #[test]
     fn capability_travels_with_pairing_and_host_anyway_is_a_saved_explicit_choice() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         a.cfg.can_host = false;                                   // a's Tor cannot host: says so in the bundle it sends
@@ -2035,12 +2035,12 @@ mod tests {
         let f = d.path().join("own.sbc");
         a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
         let txt = std::fs::read_to_string(&f).unwrap();
-        assert!(!seburity_exchange::file::dearmor(&txt).unwrap().can_host, "the exported bundle must say that this Tor cannot host");
+        assert!(!nerd_chat_exchange::file::dearmor(&txt).unwrap().can_host, "the exported bundle must say that this Tor cannot host");
         // review 12 (M1/L2): what we told a contact is FIXED: a later run without --cannot-host exports the same bit, and roles use it
         a.cfg.can_host = true;
         let f2 = d.path().join("own2.sbc");
         a.handle(Key::Char('e')); a.input = f2.to_str().unwrap().into(); a.handle(Key::Enter);
-        assert!(!seburity_exchange::file::dearmor(&std::fs::read_to_string(&f2).unwrap()).unwrap().can_host, "advertised capability must not change per export");
+        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(&f2).unwrap()).unwrap().can_host, "advertised capability must not change per export");
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
         assert_eq!(a.cap_mismatch(), Some(false), "today's flag differs from what the contact was told: the UI must say so");
         a.cfg.can_host = false;
@@ -2057,7 +2057,7 @@ mod tests {
     #[test]
     fn contact_added_while_online_connects_and_offline_is_refused_cleanly() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         // typing while offline: refused, nothing sent
@@ -2096,7 +2096,7 @@ mod tests {
     #[test]
     fn delete_while_online_and_panic_wipe_everything_in_the_chat() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());
@@ -2119,7 +2119,7 @@ mod tests {
     }
 
     /// A transport factory that blocks until released: lets a test change contacts while tor is still "starting".
-    fn gated_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet, gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> App {
+    fn gated_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet, gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> App {
         let mut c = cfg(Some(dir.join(name)));
         let net = net.clone();
         c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| {
@@ -2139,7 +2139,7 @@ mod tests {
     #[test]
     fn contact_deleted_while_starting_is_removed_from_the_engine() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let gate = std::sync::Arc::new(AtomicBool::new(false));
         let mut a = gated_app(d.path(), "a.vault", &net, gate.clone()); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
@@ -2161,7 +2161,7 @@ mod tests {
     #[test]
     fn contact_linked_while_starting_connects_after_ready() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let gate = std::sync::Arc::new(AtomicBool::new(false));
         let mut a = gated_app(d.path(), "a.vault", &net, gate.clone()); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
@@ -2408,7 +2408,7 @@ mod tests {
         a.handle(Key::Esc);
         let locked = screen_text(&a, 110, 24);
         assert!(locked.contains("LOCKED") && locked.contains("Enter = unlock") && locked.contains("a security alert is waiting"));
-        for leak in ["bobsecret", "topsecretmessage", "something bad", "Contacts", "Details", "SEBURITY", "[4]", "Safety number", "99999-88888", "127.0.0.1:4444", "Paired"] { assert!(!locked.contains(leak), "the privacy screen leaked {leak:?}"); }
+        for leak in ["bobsecret", "topsecretmessage", "something bad", "Contacts", "Details", "NERD-CHAT", "[4]", "Safety number", "99999-88888", "127.0.0.1:4444", "Paired"] { assert!(!locked.contains(leak), "the privacy screen leaked {leak:?}"); }
         let narrow = screen_text(&a, 30, 8);
         assert!(!narrow.contains("bobsecret"));
     }
@@ -2416,7 +2416,7 @@ mod tests {
     #[test]
     fn the_app_keeps_running_underneath_the_privacy_screen() {
         let d = tempfile::tempdir().unwrap();
-        let net = seburity_chat::MemNet::new();
+        let net = nerd_chat_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, d.path());

@@ -1,4 +1,4 @@
-# Build, test and run Seburity (static binary, live systems, Tails)
+# Build, test and run Nerd-chat (static binary, live systems, Tails)
 
 Honest status first. "Verified" means somebody actually ran it.
 
@@ -28,7 +28,7 @@ x86_64-linux-musl-gcc": treat that as a signal to find and remove the dependency
 
 ## 2. Run the tests
 ```bash
-cd ~/Documents/Code/seburity
+cd ~/Documents/Code/nerd-chat
 cargo test --workspace                       # about 1 min the first time, 20-30 s afterwards
 ```
 Rules:
@@ -38,22 +38,22 @@ Rules:
 
 Live Tor test (needs `tor` installed and Internet; takes minutes):
 ```bash
-cargo test -p seburity-net --test tor_live -- --ignored --nocapture
+cargo test -p nerd-chat-net --test tor_live -- --ignored --nocapture
 ```
 You should see `bootstrap NN%`, `hosting <address>.onion`, maybe a few `dial not yet`, then `test ... ok`.
 Re-run it after any change in `crates/net/src/tor` or after upgrading Tor.
 
 ## 3. Build the static binary
 ```bash
-cd ~/Documents/Code/seburity
+cd ~/Documents/Code/nerd-chat
 git status --short                           # must be clean: you want to know exactly what you built
 git rev-parse HEAD                           # note the commit
-cargo build --release --locked --target x86_64-unknown-linux-musl -p seburity-tui
-B=target/x86_64-unknown-linux-musl/release/seburity
+cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui
+B=target/x86_64-unknown-linux-musl/release/nerd-chat
 file $B                                      # expect: ELF 64-bit ... static-pie linked
 ldd $B                                       # expect: statically linked  (or: not a dynamic executable)
 ls -la $B                                    # about 1.1 MB
-sha256sum $B | tee seburity.sha256           # record next to the commit hash
+sha256sum $B | tee nerd-chat.sha256           # record next to the commit hash
 $B --probe-tor                               # smoke test: runs and prints a report
 ```
 `--locked` makes the build fail instead of silently updating dependencies: `Cargo.lock` is committed on purpose.
@@ -74,7 +74,7 @@ git status --short          # must be clean: the script builds `git archive HEAD
 scripts/repro-check.sh      # prints the two hashes and REPRODUCIBLE / NOT reproducible
 ```
 The script sets `SOURCE_DATE_EPOCH`, `CARGO_INCREMENTAL=0`, `--remap-path-prefix` for the source, `~/.cargo` and `~/.rustup`, and
-`-C target-feature=+crt-static`; it builds with `cargo build --release --locked --target x86_64-unknown-linux-musl -p seburity-tui`.
+`-C target-feature=+crt-static`; it builds with `cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui`.
 
 **Across machines** (the real test): run the script on a second machine at the SAME commit and compare the printed hash with the first
 machine's (`git rev-parse HEAD` must match too). Two things can legitimately differ: the toolchain (the pin prevents it) and the system
@@ -86,18 +86,18 @@ linker driver (`cc`/`ld`); if the hashes differ, `diffoscope a b` shows where.
 sudo apt update && sudo apt install -y git curl build-essential      # build-essential provides the `cc` linker driver
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
-git clone <repo-url> ~/seburity && cd ~/seburity
+git clone <repo-url> ~/nerd-chat && cd ~/nerd-chat
 git checkout <commit>                      # the commit whose hash you want to compare
 scripts/repro-check.sh                     # rustup installs the pinned 1.98.1 + musl target on first use
-sha256sum target/x86_64-unknown-linux-musl/release/seburity   # only if you also built with the plain command of section 3
+sha256sum target/x86_64-unknown-linux-musl/release/nerd-chat   # only if you also built with the plain command of section 3
 ```
 Use `git config core.autocrlf false` before cloning/checking out (CRLF line endings would change the sources and therefore the hash).
 WSL2 is a real Linux kernel, so `scripts/sandbox-check.sh` (seccomp) also works there; WSL1 does not support seccomp (the helper then refuses).
 
 ## 5. Integrity and signing (recommended, not yet automated)
-- Publish the commit hash, `seburity.sha256` and a **detached signature** made on an offline machine, e.g.
-  `gpg --armor --detach-sign seburity` or `minisign -Sm seburity`.
-- On the target machine verify BEFORE running: `sha256sum -c seburity.sha256` and the signature. Compare the signing key
+- Publish the commit hash, `nerd-chat.sha256` and a **detached signature** made on an offline machine, e.g.
+  `gpg --armor --detach-sign nerd-chat` or `minisign -Sm nerd-chat`.
+- On the target machine verify BEFORE running: `sha256sum -c nerd-chat.sha256` and the signature. Compare the signing key
   fingerprint over a second channel (voice / in person), the same way you compare safety numbers.
 - Never run a binary that arrived through the same channel as its checksum and nothing else.
 - Dependency hygiene still to set up: `cargo deny check`, `cargo vet`, `cargo audit`
@@ -107,35 +107,35 @@ WSL2 is a real Linux kernel, so `scripts/sandbox-check.sh` (seccomp) also works 
 Use **two** sticks if you can; their roles must be different devices:
 ```
 STICK-A (the program + vault)            STICK-B (the second factor)
-  seburity            (the static file)    key.bin           (keyfile, 64 random bytes)
-  seburity.sha256 + .sig                   seburity.counter  (rollback counter)
-  seburity.vault      (created on 1st run)
+  nerd-chat            (the static file)    key.bin           (keyfile, 64 random bytes)
+  nerd-chat.sha256 + .sig                   nerd-chat.counter  (rollback counter)
+  nerd-chat.vault      (created on 1st run)
 ```
 ```bash
 head -c 64 /dev/urandom > /media/$USER/STICK-B/key.bin            # create once; losing it = losing the vault
 chmod 600 /media/$USER/STICK-B/key.bin                            # no effect on FAT, harmless
-cp seburity seburity.sha256 /media/$USER/STICK-A/
+cp nerd-chat nerd-chat.sha256 /media/$USER/STICK-A/
 sync
 ```
 Run with the second factor:
 ```bash
-./seburity --vault /media/$USER/STICK-A/seburity.vault \
+./nerd-chat --vault /media/$USER/STICK-A/nerd-chat.vault \
            --keyfile /media/$USER/STICK-B/key.bin \
-           --counter-file /media/$USER/STICK-B/seburity.counter
+           --counter-file /media/$USER/STICK-B/nerd-chat.counter
 ```
 Back up the keyfile separately and offline; without the keyfile AND the passphrase the vault cannot be opened (by design).
 FAT/exFAT sticks ignore file permissions: the vault is encrypted, but treat the sticks as sensitive objects.
 
 ## 7. Generic live Linux (checklist, untested on real hardware)
 ```bash
-cat /proc/swaps                  # must print only the header. Seburity REFUSES to start otherwise: sudo swapoff -a   (or --allow-swap at your own risk)
+cat /proc/swaps                  # must print only the header. Nerd-chat REFUSES to start otherwise: sudo swapoff -a   (or --allow-swap at your own risk)
 free -m                          # little RAM? add --low-mem (128 MiB key derivation instead of 512 MiB)
 mount | grep -E "STICK|media"    # 'noexec' on the stick? then:
-cp /media/$USER/STICK-A/seburity /tmp/ && chmod +x /tmp/seburity && /tmp/seburity ...
-ulimit -c                        # 0 expected; Seburity also sets RLIMIT_CORE=0 and non-dumpable itself
+cp /media/$USER/STICK-A/nerd-chat /tmp/ && chmod +x /tmp/nerd-chat && /tmp/nerd-chat ...
+ulimit -c                        # 0 expected; Nerd-chat also sets RLIMIT_CORE=0 and non-dumpable itself
 ```
 Do not mount or touch the computer's internal disks. Prefer a live system that wipes RAM on shutdown. Power off to end
-the session; Seburity's panic key cleans its own process, not RAM remanence or the terminal emulator's memory.
+the session; Nerd-chat's panic key cleans its own process, not RAM remanence or the terminal emulator's memory.
 
 ## 8. Tails (deferred; this is the plan so the later test is quick)
 What exists today vs what will be tested:
@@ -149,12 +149,12 @@ What exists today vs what will be tested:
 When you do the Tails session:
 ```bash
 # 1. get the binary on (second stick or Persistent Storage), verify it:
-sha256sum -c seburity.sha256
-chmod +x ./seburity            # if "Permission denied": copy it to /tmp or ~ and chmod there (noexec mounts)
+sha256sum -c nerd-chat.sha256
+chmod +x ./nerd-chat            # if "Permission denied": copy it to /tmp or ~ and chmod there (noexec mounts)
 # 2. ask the environment:
-./seburity --probe-tor --probe-onion > probe.txt; cat probe.txt
+./nerd-chat --probe-tor --probe-onion > probe.txt; cat probe.txt
 # if the report says the control port's owner is NOT TRUSTED but you know it is Tails' own tor, repeat with:
-./seburity --probe-tor --probe-onion --tor-trust-control > probe2.txt; cat probe2.txt
+./nerd-chat --probe-tor --probe-onion --tor-trust-control > probe2.txt; cat probe2.txt
 ```
 Interpret `probe.txt`:
 - `RESULT: control port works` and `ADD_ONION ... ALLOWED` -> EXTERNAL mode can host and dial: full chat possible.
@@ -167,7 +167,7 @@ Do **not** run `sudo` for anything; none of this needs administration rights.
 
 ## 9. Best practices
 Build and supply chain
-- Build on a clean, trusted machine; note the commit hash and keep `seburity.sha256` with it; always `--locked`.
+- Build on a clean, trusted machine; note the commit hash and keep `nerd-chat.sha256` with it; always `--locked`.
 - Rebuild from source rather than trusting binaries from others, until reproducible builds are verified (§4).
 - Update dependencies deliberately (`cargo update -p NAME`), read the diff of `Cargo.lock`, re-run all tests incl. the live test.
 - Keep a record of the Tor version used for the live test (currently 0.4.9.11) and re-test on upgrades.
@@ -185,7 +185,7 @@ Operation
   clipboard managers; do not paste passwords.
 - Keep the vault, keyfile and counter on different devices; keep keyfile backups offline.
 - After any rollback suspicion (`ROLLBACK DETECTED`): stop, do not "fix" it by deleting the counter file; find out why an old copy appeared.
-- Treat the machine as untrusted for anything beyond what Seburity can protect: a compromised OS defeats every software
+- Treat the machine as untrusted for anything beyond what Nerd-chat can protect: a compromised OS defeats every software
   protection. Prefer a freshly booted amnesic live system.
 
 Tor

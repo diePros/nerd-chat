@@ -1,5 +1,5 @@
 use crate::{book::Store, StoreError};
-use seburity_vault::{Profile, Vault, VaultError};
+use nerd_chat_vault::{Profile, Vault, VaultError};
 use std::{fs, io::Write, path::{Path, PathBuf}, sync::atomic::{AtomicBool, Ordering}};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;

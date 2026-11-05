@@ -1,5 +1,5 @@
-//! seburity: terminal UI. Usage:
-//!   seburity [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]
+//! nerd-chat: terminal UI. Usage:
+//!   nerd-chat [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]
 #![forbid(unsafe_code)]
 
 mod app;
@@ -13,13 +13,13 @@ use ratatui::crossterm::{
     execute,
     terminal::{Clear, ClearType},
 };
-use seburity_vault::Profile;
+use nerd_chat_vault::Profile;
 use std::{io::stdout, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
 use zeroize::Zeroizing;
 
 fn usage() -> ! {
-    eprintln!("usage: seburity [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
-  --vault PATH         vault file (default ./seburity.vault). Put it on your USB stick.\n\
+    eprintln!("usage: nerd-chat [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
+  --vault PATH         vault file (default ./nerd-chat.vault). Put it on your USB stick.\n\
   --ram                RAM-only: never write anything to disk\n\
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
   --keyfile PATH       second factor file (>= 32 bytes), keep it on a SEPARATE device\n\
@@ -38,10 +38,10 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
-/// `seburity --probe-tor [--probe-onion] [--tor-control ADDR] [--tor-cookie PATH]`: report what the Tor on this
+/// `nerd-chat --probe-tor [--probe-onion] [--tor-control ADDR] [--tor-cookie PATH]`: report what the Tor on this
 /// machine allows, then exit. Passive unless --probe-onion (creates and removes one throwaway onion service).
 fn probe_tor(args: &[String]) -> ! {
-    use seburity_net::tor::{control::AuthPref, probe::{probe, Candidates}, Addr};
+    use nerd_chat_net::tor::{control::AuthPref, probe::{probe, Candidates}, Addr};
     let (mut onion, mut ctl, mut cookie, mut trust) = (false, None, None, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -60,7 +60,7 @@ fn probe_tor(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
-/// `seburity --strip IN OUT [--text]`: clean one file offline (no network, no vault), write to a NEW file (0600), print the report.
+/// `nerd-chat --strip IN OUT [--text]`: clean one file offline (no network, no vault), write to a NEW file (0600), print the report.
 fn strip_cmd(args: &[String]) -> ! {
     use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
@@ -71,12 +71,12 @@ fn strip_cmd(args: &[String]) -> ! {
     // the file contents sit in this process' memory: same swap and core-dump rules as the chat itself
     for w in harden() { eprintln!("warning: {w}"); }
     if !args.iter().any(|a| a == "--allow-swap") { refuse_if_swap(); }
-    let raw = match seburity_store::read_regular_file(&PathBuf::from(input), seburity_strip::MAX_INPUT as u64) {
+    let raw = match nerd_chat_store::read_regular_file(&PathBuf::from(input), nerd_chat_strip::MAX_INPUT as u64) {
         Ok(v) => Zeroizing::new(v),
         Err(e) => { eprintln!("cannot read {input}: {e}"); std::process::exit(1) }
     };
-    let mode = if text { seburity_strip::Mode::PlainText } else { seburity_strip::Mode::Auto };
-    let c = match seburity_strip::clean_hooked(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
+    let mode = if text { nerd_chat_strip::Mode::PlainText } else { nerd_chat_strip::Mode::Auto };
+    let c = match nerd_chat_strip::clean_hooked(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
     // create_new first: an EXISTING file is never touched, and only a file WE created is removed on a write error
     let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(output) {
         Ok(f) => f,
@@ -94,7 +94,7 @@ fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "--strip") { strip_cmd(&raw[1..]); }
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
-    let mut path = Some(PathBuf::from("seburity.vault"));
+    let mut path = Some(PathBuf::from("nerd-chat.vault"));
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
     let mut allow_swap = false;
@@ -109,8 +109,8 @@ fn parse_args() -> Config {
             "--no-sandbox" => {} // handled at startup: clean files in-process instead of in the limited helper
             "--cannot-host" => cannot_host = true,
             "--tor-path" => tor.tor_path = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
-            "--tor-control" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
-            "--tor-socks" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-control" => match it.next().and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-socks" => match it.next().and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
             "--tor-cookie" => tor.cookie = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--tor-trust-control" => tor.trust_control = true,
             "--counter-file" => counter = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
@@ -212,7 +212,7 @@ fn main() {
     {
         let args: Vec<String> = std::env::args().collect();
         if cleaner::is_worker_invocation(&args) { cleaner::worker_main(); }
-        if !args.iter().any(|a| a == "--no-sandbox") { seburity_strip::set_cleaner(cleaner::sandboxed_clean); }
+        if !args.iter().any(|a| a == "--no-sandbox") { nerd_chat_strip::set_cleaner(cleaner::sandboxed_clean); }
     }
     for w in harden() { eprintln!("warning: {w}"); }
     let cfg = parse_args();

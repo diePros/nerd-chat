@@ -1,4 +1,4 @@
-//! seburity-core: identities, contact bundles, signed messages, fixed-size cells.
+//! nerd-chat-core: identities, contact bundles, signed messages, fixed-size cells.
 #![forbid(unsafe_code)]
 
 pub mod bundle;

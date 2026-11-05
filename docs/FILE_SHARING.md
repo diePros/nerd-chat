@@ -23,7 +23,7 @@
   combining runs capped. Structured documents (RTF/PDF/PS/XML/SVG/HTML/mail/shell) refused.
 
 ## Offline use
-`seburity --strip IN OUT [--text]` cleans one file with no network and no vault; OUT must not exist (never overwritten), mode 0600.
+`nerd-chat --strip IN OUT [--text]` cleans one file with no network and no vault; OUT must not exist (never overwritten), mode 0600.
 
 ## Honest limits
 - **Cleaning protects against ACCIDENTAL metadata leaks, not against a sender who wants to smuggle data.** A cooperating sender can
@@ -41,11 +41,11 @@
 
 ## Where the parsers run (cycle 24)
 Cleaning of hostile files (a contact's file you receive, a file you send, `--strip`) does NOT run inside the process that holds
-your keys. `seburity` starts a copy of itself as `seburity --clean-worker` (environment cleared, never sees keys or the vault)
+your keys. `nerd-chat` starts a copy of itself as `nerd-chat --clean-worker` (environment cleared, never sees keys or the vault)
 with CPU (30 s), address-space (1 GiB), no-core-dump limits, `no_new_privs`, its own session (no controlling terminal), a
 kill-with-parent signal (no helper outlives a panic wipe/exit) and a 25 s wall-clock kill in the parent; it refuses to run as root
 or if any of these cannot be applied. A parser crash, endless loop or memory bomb only kills the helper (the job is refused). The
-helper's answer is decoded as untrusted input (`seburity_strip::wire`: exact lengths, caps, control characters neutralised).
+helper's answer is decoded as untrusted input (`nerd_chat_strip::wire`: exact lengths, caps, control characters neutralised).
 `--no-sandbox` cleans in-process instead.
 
 **Syscall allowlist (cycle 26).** Before it reads any input the helper installs a seccomp-BPF allowlist (crate `crates/sandbox`, the only

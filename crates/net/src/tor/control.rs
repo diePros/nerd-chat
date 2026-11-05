@@ -4,7 +4,7 @@
 use super::{trust, Target, TorError};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, KeyInit, Mac};
-use seburity_core::onion::{base32_encode, parse_onion_address, service_id};
+use nerd_chat_core::onion::{base32_encode, parse_onion_address, service_id};
 use sha2::Sha256;
 use std::{io::{Read, Write}, net::SocketAddr, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
@@ -594,7 +594,7 @@ pub(crate) mod tests {
 
     #[test]
     fn add_onion_exact_command_checks_and_pow_fallback() {
-        use seburity_core::identity::ContactIdentity;
+        use nerd_chat_core::identity::ContactIdentity;
         let id = ContactIdentity::generate();
         let peer_auth = [9u8; 32];
         let sid = service_id(&id.onion_public());
@@ -612,8 +612,8 @@ pub(crate) mod tests {
         assert!(seen[0].contains("PoWDefensesEnabled") && !seen[1].contains("PoWDefensesEnabled") && seen[1].contains("Flags=V3Auth"));
         // unix target
         let (mut c, h) = fake(vec![("ADD_ONION", format!("250-ServiceID={sid}\r\n250 OK\r\n"))]);
-        c.add_onion(&id.onion_expanded_secret(), 1, &Target::Unix("/dev/shm/seburity-ab/app.sock".into()), &[peer_auth], &id.onion_public()).unwrap();
-        assert!(h.join().unwrap()[0].contains("Port=1,unix:/dev/shm/seburity-ab/app.sock"));
+        c.add_onion(&id.onion_expanded_secret(), 1, &Target::Unix("/dev/shm/nerd-chat-ab/app.sock".into()), &[peer_auth], &id.onion_public()).unwrap();
+        assert!(h.join().unwrap()[0].contains("Port=1,unix:/dev/shm/nerd-chat-ab/app.sock"));
         // wrong id from tor, no auth clients, unsafe unix path: all refused
         let (mut c, h) = fake(vec![("ADD_ONION", "250-ServiceID=aaaa\r\n250 OK\r\n".into())]);
         assert!(c.add_onion(&id.onion_expanded_secret(), 1, &target, &[peer_auth], &id.onion_public()).is_err());

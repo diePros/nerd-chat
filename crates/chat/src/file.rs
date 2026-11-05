@@ -2,13 +2,13 @@
 //!
 //! Privacy/security rules:
 //! * NO file name and no MIME type ever goes on the wire (the receiver names the file itself).
-//! * The sender strips metadata first (`seburity-strip`); the receiver re-strips (quarantine) and uses ITS copy.
+//! * The sender strips metadata first (`nerd-chat-strip`); the receiver re-strips (quarantine) and uses ITS copy.
 //! * The receiver must ACCEPT an offer before a single content byte is sent (no unsolicited bulk data, no RAM exhaustion).
 //! * The stream is `len(4) | content | zeros`, padded to a power-of-two bucket: the offer carries ONLY the bucket, so neither the
 //!   network nor the receiver-before-accepting learns the exact length (the length travels inside the accepted stream).
 //! * Integrity: BLAKE2s-256 of the true content is in the (signed) offer; one transfer at a time per connection; hard caps.
 use blake2::{Blake2s256, Digest};
-use seburity_core::message::MAX_BODY;
+use nerd_chat_core::message::MAX_BODY;
 
 pub const KIND_FILE_OFFER: u8 = 5;
 pub const KIND_FILE_CHUNK: u8 = 6;

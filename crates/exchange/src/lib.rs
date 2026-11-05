@@ -5,7 +5,7 @@
 pub mod file;
 pub mod pair;
 
-use seburity_core::{bundle::{Bundle, safety_number}, trust::Trust};
+use nerd_chat_core::{bundle::{Bundle, safety_number}, trust::Trust};
 
 /// How a contact's bundle reached us.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

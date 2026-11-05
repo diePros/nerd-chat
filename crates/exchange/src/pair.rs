@@ -19,8 +19,8 @@ use crate::{ExchangeError, ImportedContact};
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
 use curve25519_dalek::edwards::CompressedEdwardsY;
-use seburity_core::{bundle::{safety_number, Bundle, BUNDLE_LEN}, identity::ContactIdentity};
-use seburity_net::{guard::HandshakeGuard, link};
+use nerd_chat_core::{bundle::{safety_number, Bundle, BUNDLE_LEN}, identity::ContactIdentity};
+use nerd_chat_net::{guard::HandshakeGuard, link};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::{
     io::{Read, Write},
@@ -250,7 +250,7 @@ fn check_point(msg: &[u8]) -> Result<(), ExchangeError> {
 /// `claimed`: test hook letting an adversarial peer present a DIFFERENT bundle than its identity's.
 ///
 /// I/O order: B (the joiner) always speaks first, so a listener stays SILENT until a joiner
-/// writes (a port scanner gets no Seburity banner). Outcome note: the last message is A's confirmation
+/// writes (a port scanner gets no Nerd-chat banner). Outcome note: the last message is A's confirmation
 /// cell, so if it is lost A may have committed while B failed; users should confirm on both sides.
 fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, can_host: bool, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
     let mut b = Bounded { s: stream, end: Instant::now() + deadline };
@@ -315,7 +315,7 @@ fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[
     match role {
         Role::B => {
             let mut sess = link::dial(&mut b, me, &theirs, &t).map_err(|_| ExchangeError::ProofFailed)?;
-            let mut cell = vec![0u8; seburity_core::session::WIRE_CELL_LEN];
+            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
             b.read_exact(&mut cell).map_err(|_| ExchangeError::Io)?;
             let m = sess.recv(me, &cell).map_err(|_| ExchangeError::ProofFailed)?;
             if !ct_eq(&m.body, &t) { return Err(ExchangeError::ProofFailed); }
@@ -334,7 +334,7 @@ fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seburity_core::trust::Trust;
+    use nerd_chat_core::trust::Trust;
     use std::os::unix::net::UnixStream;
     use std::thread;
 

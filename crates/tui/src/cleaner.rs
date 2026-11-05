@@ -3,16 +3,16 @@
 //!
 //! What this IS: containment of parser CRASHES and runaway CPU/memory/time. A crash (`panic = "abort"`), an endless loop or a
 //! memory bomb only kills the helper and the file is refused; the helper never sees keys, the vault or the environment, and its
-//! answer is decoded as untrusted input (`seburity_strip::wire`).
+//! answer is decoded as untrusted input (`nerd_chat_strip::wire`).
 //!
-//! On top of that the helper installs a seccomp-BPF ALLOWLIST (crate `seburity-sandbox`, x86_64 only) BEFORE it reads a single
+//! On top of that the helper installs a seccomp-BPF ALLOWLIST (crate `nerd-chat-sandbox`, x86_64 only) BEFORE it reads a single
 //! untrusted byte: afterwards it can only read fd 0, write fd 1/2, manage memory (no PROT_EXEC) and exit. Any other syscall
 //! (open, socket, execve, unlink, kill, ptrace, mprotect, close, fork...) kills it with SIGSYS and the file is refused. A
 //! compromised parser can therefore no longer read files, reach the network, change files or signal the parent. Where no
 //! filter exists (other architectures, kernels without seccomp) the helper refuses to run (`--no-sandbox` is the explicit way out).
 //! Remaining weakness: the parser still shares the pipe to the parent, so it can lie in its answer (hence the strict decoder) and
 //! it can burn CPU/memory up to the limits (hence the rlimits and the timeout).
-use seburity_strip::{wire, Cleaned, Mode, StripError, MAX_INPUT};
+use nerd_chat_strip::{wire, Cleaned, Mode, StripError, MAX_INPUT};
 use std::{io::{Read, Write}, path::Path, process::{Command, Stdio}, sync::mpsc::channel, thread, time::Duration};
 use zeroize::Zeroizing;
 
@@ -20,7 +20,7 @@ const WORKER_FLAG: &str = "--clean-worker";
 /// Exit status of a helper that could not install its sandbox (no filter for this platform, kernel refused): the parent explains.
 const EXIT_NO_SANDBOX: i32 = 4;
 /// The parent tells the helper its pid so the helper can notice that it was orphaned before the death signal was armed.
-const PARENT_ENV: &str = "SEBURITY_PARENT";
+const PARENT_ENV: &str = "NERD_CHAT_PARENT";
 /// Hard wall-clock limit for one cleaning job (the cleaner itself stops after ~8 s of validation work).
 const JOB_TIMEOUT: Duration = Duration::from_secs(25);
 const ANSWER_CAP: u64 = MAX_INPUT as u64 + 8192;
@@ -56,11 +56,11 @@ pub fn worker_main() -> ! {
         if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).is_err() { die("could not mark the helper non-dumpable"); }
     }
     // the allowlist is installed BEFORE any untrusted byte is read: from here on only read(0)/write(1,2)/memory/exit are possible
-    if seburity_sandbox::enter().is_err() { std::process::exit(EXIT_NO_SANDBOX); }
+    if nerd_chat_sandbox::enter().is_err() { std::process::exit(EXIT_NO_SANDBOX); }
     let mut input = Zeroizing::new(Vec::with_capacity(MAX_INPUT + 16));
     if std::io::stdin().take(MAX_INPUT as u64 + 16).read_to_end(&mut input).is_err() { std::process::exit(2); }
     let answer = Zeroizing::new(match wire::decode_request(&input) {
-        Some((mode, data)) => wire::encode_response(&seburity_strip::clean(data, mode)),
+        Some((mode, data)) => wire::encode_response(&nerd_chat_strip::clean(data, mode)),
         None => wire::encode_response(&Err(StripError::Refused("bad request".into()))),
     });
     let mut out = std::io::stdout();
@@ -124,7 +124,7 @@ pub fn run_helper(exe: &Path, d: &[u8], mode: Mode) -> Result<Cleaned, StripErro
                     // exit 4 can be FORGED by a compromised parser (`exit_group` is allowed): never take it at face value. A probe
                     // helper that sees only a benign request shows whether this machine really cannot sandbox.
                     if probe_says_no_sandbox(exe) {
-                        Err(refuse("the sandbox of the cleaning helper could not be installed here (needs Linux x86_64 with seccomp); the file was refused. Start seburity with --no-sandbox to clean files in-process (less safe).".into()))
+                        Err(refuse("the sandbox of the cleaning helper could not be installed here (needs Linux x86_64 with seccomp); the file was refused. Start nerd-chat with --no-sandbox to clean files in-process (less safe).".into()))
                     } else {
                         Err(refuse("the cleaning helper failed abnormally on this file: it may be an attack; the file was refused".into()))
                     }

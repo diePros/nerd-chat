@@ -1,14 +1,14 @@
 [package]
 publish = false
-name = "seburity-chat"
+name = "nerd-chat-chat"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-seburity-core = { path = "../core" }
-seburity-net = { path = "../net" }
+nerd-chat-core = { path = "../core" }
+nerd-chat-net = { path = "../net" }
 zeroize = "1"
 getrandom = "0.3"
-seburity-strip = { path = "../strip" }
+nerd-chat-strip = { path = "../strip" }
 blake2 = "0.11"

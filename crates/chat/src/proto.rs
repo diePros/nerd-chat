@@ -1,6 +1,6 @@
 //! Application framing inside one signed message body: `kind(1) | payload`.
 //! Long texts are split into chunks (a body is at most `MAX_BODY` bytes); the receiver reassembles with hard caps.
-use seburity_core::message::MAX_BODY;
+use nerd_chat_core::message::MAX_BODY;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const KIND_TEXT_FINAL: u8 = 1;
@@ -44,8 +44,8 @@ pub fn encode_text(text: &str) -> Vec<Zeroizing<Vec<u8>>> {
     out
 }
 
-/// Peer-supplied text can never steer a terminal or spoof direction (see `seburity_core::text`).
-pub fn clean(text: &str) -> Zeroizing<String> { seburity_core::text::sanitize(text) }
+/// Peer-supplied text can never steer a terminal or spoof direction (see `nerd_chat_core::text`).
+pub fn clean(text: &str) -> Zeroizing<String> { nerd_chat_core::text::sanitize(text) }
 
 /// Reassembles chunked texts. The buffer has its FINAL capacity from the start and never reallocates, so no
 /// partial plaintext is ever left behind in freed heap (R6-L3).

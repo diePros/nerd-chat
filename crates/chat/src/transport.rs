@@ -1,8 +1,8 @@
 //! How streams reach a contact. The engine only sees `Transport`; Tor and the in-memory test network both implement it.
 //! Role per contact (decided by the engine): the LISTENER hosts its onion service for that contact, the DIALER only dials.
 //! Only listeners publish a service, so a user is not visible online for contacts that never need to dial them.
-use seburity_core::{bundle::Bundle, identity::ContactIdentity};
-use seburity_net::tor::{
+use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
+use nerd_chat_net::tor::{
     control::AuthPref,
     spawn::SpawnConfig,
     Addr, Dialer, Stream, Target, Tor,
@@ -134,7 +134,7 @@ impl Transport for TorTransport {
                 let addr = l.local_addr().map_err(|e| e.to_string())?;
                 // ANY local user can connect to this port: only tor (its account), root or we may, unless the user vouched for all
                 (Target::Tcp(addr), Box::new(move || l.accept().ok().and_then(|(s, from)| {
-                    if !trust_local && !seburity_net::tor::trust::check_tcp_client(&from).verified { return None; } // dropped unread
+                    if !trust_local && !nerd_chat_net::tor::trust::check_tcp_client(&from).verified { return None; } // dropped unread
                     let _ = s.set_nonblocking(false);
                     Some(Box::new(s) as BoxStream)
                 })))

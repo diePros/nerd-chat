@@ -3,7 +3,7 @@
 Per contact there are two onion services, one hosted by each side. A hosts `a.onion` for B; B dials it. Each onion
 service REQUIRES v3 client authorization: only the contact whose auth key is in our bundle can CONNECT (the part of the
 descriptor with the introduction points is encrypted to the authorized client keys). Onion identity and auth keys are
-separate per-contact keys (the Ed25519 signing key never leaves Seburity). Both addresses and auth keys are inside the
+separate per-contact keys (the Ed25519 signing key never leaves Nerd-chat). Both addresses and auth keys are inside the
 signed bundle, so the safety number covers them.
 
 **What client authorization does NOT do (review 5):** it does not hide that the service exists. Anyone who learns the
@@ -17,7 +17,7 @@ descriptor uploads can correlate; Tor's own protections apply, nothing here adds
 ## The two modes
 | | EXTERNAL (Tails, Whonix, system tor, Tor Browser's tor) | SPAWN (any machine with a `tor` binary) |
 |---|---|---|
-| Who runs tor | the system | Seburity starts it in a private RAM dir, kills it on exit |
+| Who runs tor | the system | Nerd-chat starts it in a private RAM dir, kills it on exit |
 | Host onion service | via the system tor's CONTROL port (`ADD_ONION`) — needs control access | same, over a unix socket in a 0700 dir |
 | Dial a contact | via the system tor's SOCKS port (works even with NO control access) | same |
 | Config/bridges | whatever the system uses (Tails manages bridges itself) | `--tor-bridge` lines (planned flag) go into our torrc |
@@ -27,7 +27,7 @@ What changes for Tails specifically:
 1. **Never start a second tor there.** Tails' firewall only lets its own tor reach the Internet; a second tor would just fail.
    Use EXTERNAL mode, which reuses the system tor (and therefore Tails' bridge/obfuscation settings).
 2. **Hosting needs the control port.** Whether the `amnesia` user may use it (and whether `ADD_ONION` is allowed) is NOT in
-   Tails' public design docs (checked), so it must be tested on a real Tails: `seburity --probe-tor --probe-onion`.
+   Tails' public design docs (checked), so it must be tested on a real Tails: `nerd-chat --probe-tor --probe-onion`.
    If hosting is refused, you can still dial contacts who host; both sides on such systems can't chat unless one side can host.
 3. Tails' firewall treats LAN/loopback as open per its design page, so the local pairing link (l / c) is expected to work
    between two LAN machines. Untested.
@@ -36,7 +36,7 @@ What changes for Tails specifically:
 ## Who may we talk secrets to? (External mode, review 5)
 Hosting an onion service means sending tor the onion SECRET key; dialing sends the client-auth SECRET. SAFECOOKIE does not
 prove that the thing on the control socket is the tor you think it is (a local process squatting on 127.0.0.1:9051 can relay
-to a real tor and pass the proof through). So before authenticating, Seburity checks the OS-level owner of the endpoint:
+to a real tor and pass the proof through). So before authenticating, Nerd-chat checks the OS-level owner of the endpoint:
 a unix socket's peer uid (SO_PEERCRED), or the uid of the LISTEN socket for a TCP port (/proc/net/tcp*). The owner must be
 **you, root, or the owner of the system tor's cookie file** (`/run/tor/control.authcookie`). Otherwise nothing is sent and the
 error says why. Cookie files are only read from that well-known location or from `--tor-cookie PATH`, never from a path
@@ -50,10 +50,10 @@ network lets you run your own tor.
 
 ## Probe (run this on any machine, esp. Tails)
 ```
-seburity --probe-tor                # passive: finds control/SOCKS ports, auth methods, cookie readability
-seburity --probe-tor --probe-onion  # also creates + deletes ONE throwaway onion service (needs bootstrapped tor)
-seburity --probe-tor --tor-control unix:/run/tor/control --tor-cookie /run/tor/control.authcookie
-seburity --probe-tor --probe-onion --tor-trust-control   # you vouch for the control port's owner (Tails/Whonix filtered ports)
+nerd-chat --probe-tor                # passive: finds control/SOCKS ports, auth methods, cookie readability
+nerd-chat --probe-tor --probe-onion  # also creates + deletes ONE throwaway onion service (needs bootstrapped tor)
+nerd-chat --probe-tor --tor-control unix:/run/tor/control --tor-cookie /run/tor/control.authcookie
+nerd-chat --probe-tor --probe-onion --tor-trust-control   # you vouch for the control port's owner (Tails/Whonix filtered ports)
 ```
 The report states for every control port whether its owner check passed (`owner check: ... TRUSTED / NOT TRUSTED`) and why.
 
@@ -73,7 +73,7 @@ The report states for every control port whether its owner check passed (`owner 
   torrc validated, empty `--defaults-torrc`, cleared environment, `PATH` lookup ignores relative entries, stale directories
   of dead processes are swept, `SocksPort ... ExtendedErrors OnionTrafficOnly` (readable onion errors, no clearnet dials).
 
-## Chat engine (crate `seburity-chat`)
+## Chat engine (crate `nerd-chat-chat`)
 - **One connection per pair.** For each contact the party whose Ed25519 signing key is smaller DIALS, the other LISTENS (hosts its
   onion service for that contact). Only listeners publish a service, so you are not visible online for contacts that never dial you.
   A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).

@@ -14,20 +14,20 @@ fn nnp() { assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0
 /// Runs inside the child process only.
 #[test]
 fn child_dispatch() {
-    let Ok(case) = std::env::var("SEBURITY_SANDBOX_CASE") else { return };
+    let Ok(case) = std::env::var("NERD_CHAT_SANDBOX_CASE") else { return };
     println!("CHILD-RAN:{case}");
     if case == "no_nnp" {
         // without no_new_privs the kernel must refuse (EACCES) and we must report it, never run unprotected
-        let r = seburity_sandbox::enter();
+        let r = nerd_chat_sandbox::enter();
         println!("NNP-RESULT:{r:?}");
-        unsafe { libc::syscall(libc::SYS_exit_group, if r == Err(seburity_sandbox::Error::Kernel(libc::EACCES)) { 0 } else { 1 }) };
+        unsafe { libc::syscall(libc::SYS_exit_group, if r == Err(nerd_chat_sandbox::Error::Kernel(libc::EACCES)) { 0 } else { 1 }) };
     }
     // everything a case needs from the OS is prepared BEFORE the filter (several of these calls are forbidden afterwards)
     let ppid = unsafe { libc::getppid() };
     let file = std::fs::File::open("/proc/self/exe").unwrap();
     let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
     nnp();
-    seburity_sandbox::enter().expect("install");
+    nerd_chat_sandbox::enter().expect("install");
     unsafe {
         let z = std::ptr::null::<u8>();
         match case.as_str() {
@@ -47,7 +47,7 @@ fn child_dispatch() {
             }
             "open" => { libc::syscall(libc::SYS_openat, libc::AT_FDCWD, b"/etc/hostname\0".as_ptr(), libc::O_RDONLY); }
             "socket" => { libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0); }
-            "execve" => { let argv = [z, z]; libc::syscall(libc::SYS_execve, b"/nonexistent-seburity-path\0".as_ptr(), argv.as_ptr(), argv.as_ptr()); }  // ENOENT if it were allowed: exit 77, never a loader dying for another reason
+            "execve" => { let argv = [z, z]; libc::syscall(libc::SYS_execve, b"/nonexistent-nerd-chat-path\0".as_ptr(), argv.as_ptr(), argv.as_ptr()); }  // ENOENT if it were allowed: exit 77, never a loader dying for another reason
             "kill_parent" => { libc::syscall(libc::SYS_kill, ppid, 0); }
             "mprotect" => { libc::syscall(libc::SYS_mprotect, 0, 0, 0); }
             "mmap_exec" => { libc::syscall(libc::SYS_mmap, 0, 4096, libc::PROT_READ | libc::PROT_EXEC, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1i64, 0); }
@@ -62,7 +62,7 @@ fn child_dispatch() {
             "write_fd3" => { libc::syscall(libc::SYS_write, 3, b"x".as_ptr(), 1); }
             "read_fd1" => { let mut b = [0u8; 1]; libc::syscall(libc::SYS_read, 1, b.as_mut_ptr(), 1); }
             "close" => { libc::syscall(libc::SYS_close, 2); }
-            "unlink" => { libc::syscall(libc::SYS_unlink, b"/tmp/seburity-sandbox-nonexistent\0".as_ptr()); }
+            "unlink" => { libc::syscall(libc::SYS_unlink, b"/tmp/nerd-chat-sandbox-nonexistent\0".as_ptr()); }
             "fork" => { libc::syscall(libc::SYS_fork); }
             "ptrace" => { libc::syscall(libc::SYS_ptrace, 2 /* PTRACE_PEEKDATA */, 1, 0, 0); } // returns EPERM/ESRCH if it were allowed (TRACEME would hang the run)
             "prctl" => { libc::syscall(libc::SYS_prctl, libc::PR_SET_DUMPABLE, 1, 0, 0, 0); }
@@ -80,7 +80,7 @@ struct Outcome { status: std::process::ExitStatus, stdout: String }
 
 fn run_case(case: &str) -> Outcome {
     let mut c = Command::new(std::env::current_exe().unwrap()).args(["--exact", "child_dispatch", "--nocapture", "--test-threads=1"])
-        .env("SEBURITY_SANDBOX_CASE", case).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        .env("NERD_CHAT_SANDBOX_CASE", case).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
     let mut out = c.stdout.take().unwrap();
     let reader = std::thread::spawn(move || { let mut s = String::new(); let _ = out.read_to_string(&mut s); s });
     let end = Instant::now() + Duration::from_secs(20);

@@ -120,7 +120,7 @@ pub fn open(a: &Addr, timeout: Duration) -> Result<Box<dyn Stream>, TorError> {
 }
 
 use control::{AuthPref, Controller};
-use seburity_core::{bundle::Bundle, identity::ContactIdentity, onion::service_id};
+use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity, onion::service_id};
 
 /// A connection to a running tor (ours or someone else's) that can host and dial contact onion services.
 pub struct Tor {
@@ -350,7 +350,7 @@ mod tests {
             let mut g = [0u8; 3]; c.read_exact(&mut g).unwrap(); assert_eq!(g, [5, 1, 2]); c.write_all(&[5, 2]).unwrap();
             let mut a = [0u8; 2]; c.read_exact(&mut a).unwrap(); assert_eq!(a, [1, 16]);
             let mut u = [0u8; 16]; c.read_exact(&mut u).unwrap();
-            assert!(u.iter().all(u8::is_ascii_hexdigit) && !u.starts_with(b"seburity"), "neutral random username");
+            assert!(u.iter().all(u8::is_ascii_hexdigit) && !u.starts_with(b"nerd-chat"), "neutral random username");
             let mut pl = [0u8; 1]; c.read_exact(&mut pl).unwrap(); assert_eq!(pl[0], 32);
             let mut p = [0u8; 32]; c.read_exact(&mut p).unwrap(); assert_eq!(&p[..], "ab".repeat(16).as_bytes());
             c.write_all(&[1, 0]).unwrap();

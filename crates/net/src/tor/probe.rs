@@ -1,7 +1,7 @@
-//! `seburity --probe-tor`: find out what the Tor on THIS machine allows (Tails, Whonix, system tor...).
+//! `nerd-chat --probe-tor`: find out what the Tor on THIS machine allows (Tails, Whonix, system tor...).
 //! Passive by default; `try_onion` additionally creates and removes one throwaway onion service.
 use super::{control::{sanitize, AuthPref, Controller}, open, open_control, Addr, Target, TorError};
-use seburity_core::{bundle::Bundle, identity::ContactIdentity};
+use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 pub struct Candidates { pub control: Vec<Addr>, pub socks: Vec<Addr> }
@@ -67,7 +67,7 @@ pub fn probe(c: &Candidates, try_onion: bool, auth: &AuthPref, trust_control: bo
             }
         }
     }
-    if working_ctl.is_none() { out.push("RESULT: no authenticated control port. Seburity can still DIAL contacts through a SOCKS port, but cannot HOST onion services here.".into()); }
+    if working_ctl.is_none() { out.push("RESULT: no authenticated control port. Nerd-chat can still DIAL contacts through a SOCKS port, but cannot HOST onion services here.".into()); }
     else { out.push("RESULT: control port works: both dialing and hosting are possible".into()); }
     out
 }
