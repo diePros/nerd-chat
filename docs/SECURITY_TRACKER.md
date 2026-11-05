@@ -295,3 +295,11 @@ Not re-reviewed after these fixes (small, test-covered).
 | R15-L5 | safety numbers silently changed on upgrade | FIXED | fingerprint domain tag v2 (old numbers do not match); documented. R2-I3 ("must also cover onion addr + client-auth") is deliberately superseded: those keys are authenticated by the bundle signature/pairing and the session itself uses sign/dh/kem |
 | R15-L6 | UI said "old service is gone" although DEL_ONION errors are ignored; rotation errors bypass the notice limiter | PARTIAL | wording corrected. OPEN: `unhost` result not surfaced |
 | R15-I | MemTransport ignores client auth (peer_old authorization when the DIALER rotates is only traced, not tested); temporary identity copies unzeroized (R2-M3/R4-M2); SBS4 is a one-way vault upgrade | OPEN (info) | |
+
+## Review 16 (Opus, 9e02c15..ec9ad7a: dial fallback + service retry) — integrated in cycle 23
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R16-1 | the fallback to the peer's old address (and our client-auth credential for it) survived the end of its rotation: needless dials, stale credential in a shared tor until restart | FIXED | the peer's DONE announcement of keys equal to those we dial drops the fallback and forgets the credential without any re-add; test with a recording transport |
+| R16-2 | tests did not prove "proposed only after the service runs" / the fallback credential handling | FIXED | the retry test asserts the new service already ran when the OFFER arrives; the fallback-end test asserts the forget call |
+| R16-3 | the retry could never recover from a broken control connection and promised "retrying" | PARTIAL | broken-connection errors stop the retry and say to go offline/online. OPEN: healing swaps the control connection and tor drops all non-detached services (pre-existing `healthy_ctl` hazard, R8-L5 area) |
+| R16-4/5 | fixed 60 s retry, no cap/jitter; fallback setup failure was silent | PARTIAL | failure now produces a notice. OPEN (minor): jitter/cap; ADD_ONION still synchronous on the engine thread (R8-L5) |

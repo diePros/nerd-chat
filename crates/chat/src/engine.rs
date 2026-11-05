@@ -344,7 +344,10 @@ impl Core {
         if we_dial {
             if let Some((o, a)) = cfg.peer_old {
                 let fb = cfg.peer.clone().with_transport(o, a);
-                match self.transport.add_contact_ex(&me, &fb, &[], false) { Ok(_) => fallback = Some(fb), Err(_) => {} }
+                match self.transport.add_contact_ex(&me, &fb, &[], false) {
+                    Ok(_) => fallback = Some(fb),
+                    Err(e) => self.notice(Some(cfg.id), format!("no fallback to the contact's old address ({e}); only its new address is tried")),
+                }
             }
         }
         self.rts.insert(cfg.id, Rt {
@@ -455,6 +458,13 @@ impl Core {
                 // ago: the ack of a rotation commonly races with the peer's reconnect over the new service.
                 if self.rts.contains_key(&id) {
                     let (onion, auth): ([u8; 32], [u8; 32]) = (keys[..32].try_into().unwrap(), keys[32..].try_into().unwrap());
+                    // The peer announces the keys it runs now: when they are the ones we already dial, its rotation is over, so the
+                    // fallback to its old address (and our client-auth credential for it) goes away without re-publishing anything.
+                    let fb = match self.rts.get_mut(&id) {
+                        Some(rt) if kind == proto::KIND_ROTATE_DONE && (rt.peer.onion_pub, rt.peer.auth_pub) == (onion, auth) => rt.fallback.take(),
+                        _ => None,
+                    };
+                    if let Some(fb) = fb { self.transport.remove_contact(&[0u8; 32], &fb.onion_pub); }
                     let _ = self.ev.send(Event::Rotate { id, kind, onion, auth });
                 }
             }
@@ -508,6 +518,11 @@ impl Core {
                         let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_OFFER, keys: k });
                     }
                     self.notice(Some(id), "key rotation: the new onion service is running now");
+                }
+                Err(e) if e.contains("unusable state") => {
+                    // a broken control connection never heals by retrying (and healing would drop every service): say so
+                    if let Some(rt) = self.rts.get_mut(&id) { rt.retry = None; }
+                    self.notice(Some(id), "key rotation: the control connection to Tor is broken; go offline and online again to finish it");
                 }
                 _ => { if let Some(x) = self.rts.get_mut(&id).and_then(|r| r.retry.as_mut()) { x.at = now + self.t.max_backoff; } }
             }
@@ -906,11 +921,13 @@ mod tests {
     }
 
     /// Refuses the first attempt to host one particular onion key (a transient ADD_ONION failure), then works.
-    struct FailNewOnion { inner: crate::transport::MemTransport, onion: [u8; 32], failed: bool }
+    struct FailNewOnion { inner: crate::transport::MemTransport, onion: [u8; 32], failed: bool, hosted_now: Arc<AtomicBool> }
     impl Transport for FailNewOnion {
         fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
             if listen && me.onion_public() == self.onion && !self.failed { self.failed = true; return Err("transient ADD_ONION failure".into()); }
-            self.inner.add_contact(me, peer, listen)
+            let r = self.inner.add_contact(me, peer, listen);
+            if listen && me.onion_public() == self.onion && r.is_ok() { self.hosted_now.store(true, Ordering::SeqCst); }
+            r
         }
         fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.inner.remove_contact(a, b) }
         fn dial_fn(&self) -> DialFn { self.inner.dial_fn() }
@@ -922,19 +939,51 @@ mod tests {
         let ((l, lb), (d, db)) = ordered();
         let t = ContactIdentity::fresh_transport_secret();
         let lb2 = Bundle::from_identity(&l.with_transport_secret(&t).unwrap());
-        let tr = FailNewOnion { inner: net.transport(), onion: lb2.onion_pub, failed: false };
+        let hosted_now = Arc::new(AtomicBool::new(false));
+        let tr = FailNewOnion { inner: net.transport(), onion: lb2.onion_pub, failed: false, hosted_now: hosted_now.clone() };
         let ea = Engine::start(Box::new(tr), vec![ContactCfg::new(ID, &l, db.clone()).with_rotation(&l, Some(&t), None)], fast());
         let eb = start(&net, &d, &lb, ID);
         assert!(connected(&ea) && connected(&eb));
         // while the new service is down nothing may be proposed; once the retry succeeds the offer arrives by itself
         let mut offered = false;
         for _ in 0..200 {
-            while let Ok(e) = eb.events.try_recv() { if let Event::Rotate { kind: proto::KIND_ROTATE_OFFER, onion, .. } = e { assert_eq!(onion, lb2.onion_pub); offered = true; } }
+            while let Ok(e) = eb.events.try_recv() { if let Event::Rotate { kind: proto::KIND_ROTATE_OFFER, onion, .. } = e {
+                assert_eq!(onion, lb2.onion_pub);
+                assert!(hosted_now.load(Ordering::SeqCst), "the new address was proposed BEFORE its service ran");
+                offered = true;
+            } }
             if offered { break; }
             thread::sleep(Duration::from_millis(25));
         }
         assert!(offered, "the retried new service was never proposed");
         assert!(net.is_hosted(&lb.onion_pub) && net.is_hosted(&lb2.onion_pub));
+    }
+
+    /// Records which (peer) onion keys the engine forgot client-auth for.
+    struct Recorder { inner: crate::transport::MemTransport, forgotten: Arc<Mutex<Vec<[u8; 32]>>> }
+    impl Transport for Recorder {
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> { self.inner.add_contact(me, peer, listen) }
+        fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.forgotten.lock().unwrap().push(*b); self.inner.remove_contact(a, b) }
+        fn dial_fn(&self) -> DialFn { self.inner.dial_fn() }
+    }
+
+    #[test]
+    fn the_fallback_to_the_old_address_ends_when_the_peer_announces_its_new_keys() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let t = ContactIdentity::fresh_transport_secret();
+        let l2 = l.with_transport_secret(&t).unwrap();
+        let lb2 = Bundle::from_identity(&l2);
+        let el = start(&net, &l2, &db, ID);                                  // the host runs ONLY its new keys/address
+        let forgotten = Arc::new(Mutex::new(Vec::new()));
+        let tr = Recorder { inner: net.transport(), forgotten: forgotten.clone() };
+        let ed = Engine::start(Box::new(tr), vec![ContactCfg::new(ID, &d, lb2.clone()).with_rotation(&d, None, Some((lb.onion_pub, lb.auth_pub)))], fast());
+        assert!(connected(&el) && connected(&ed));
+        // the host's announcement of its current keys on Up == the keys we dial: the old address and our credential for it must go
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end && !forgotten.lock().unwrap().contains(&lb.onion_pub) { thread::sleep(Duration::from_millis(25)); }
+        assert!(forgotten.lock().unwrap().contains(&lb.onion_pub), "client-auth for the retired address was never forgotten");
+        assert!(!net.is_hosted(&lb.onion_pub), "nothing is hosted for the old address");
     }
 
     #[test]
