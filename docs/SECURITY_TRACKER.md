@@ -209,3 +209,6 @@ No Critical/High. Opus review integrated:
 | R8-I9 | `Screen::Working` has no cancel/timeout on a hung filesystem | OPEN (info) | F12/signals work |
 | R8-I10 | `add_onion` error after a 250 reply leaves an untracked live service until control closes | OPEN | |
 | R8-tests | missing tests: lazily hosted service removal on remove/offline/shutdown, `fails` reset on connection, create-path KDF + panic, TorTransport cleanup after flip | OPEN | |
+
+## File sharing (started)
+- `crates/strip` (allowlist stripper) written with planted-metadata tests; NOT yet reviewed by Opus. Open: protocol/engine/TUI integration, receiver quotas, opaque-blob mode, more formats, sandboxing, parser fuzzing. See docs/FILE_SHARING.md.
