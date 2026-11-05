@@ -7,14 +7,10 @@ pub mod pair;
 
 use nerd_chat_core::{bundle::{Bundle, safety_number}, trust::Trust};
 
-/// How a contact's bundle reached us.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Method { File, Pake }
-
 /// A contact bundle plus how far it is authenticated. Fields are private: the only ways to raise
 /// trust are a completed `pair` run (`CodeAuthenticated`) or `confirm` with a `SafetyView`.
 #[derive(Clone, Debug)]
-pub struct ImportedContact { bundle: Bundle, method: Method, trust: Trust }
+pub struct ImportedContact { bundle: Bundle, trust: Trust }
 
 /// What the user must be shown (and compare out-of-band) before `confirm`. Only obtainable from the contact itself.
 #[derive(Debug)]
@@ -22,11 +18,10 @@ pub struct SafetyView { pub number: String, key: [u8; 32] }
 
 impl ImportedContact {
     /// File/QR/paste import: always `Unverified`.
-    pub fn from_file(bundle: Bundle) -> Self { Self { bundle, method: Method::File, trust: Trust::Unverified } }
-    pub(crate) fn from_pake(bundle: Bundle) -> Self { Self { bundle, method: Method::Pake, trust: Trust::CodeAuthenticated } }
+    pub fn from_file(bundle: Bundle) -> Self { Self { bundle, trust: Trust::Unverified } }
+    pub(crate) fn from_pake(bundle: Bundle) -> Self { Self { bundle, trust: Trust::CodeAuthenticated } }
 
     pub fn bundle(&self) -> &Bundle { &self.bundle }
-    pub fn method(&self) -> Method { self.method }
     pub fn trust(&self) -> Trust { self.trust }
     pub fn into_parts(self) -> (Bundle, Trust) { (self.bundle, self.trust) }
 

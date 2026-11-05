@@ -11,7 +11,6 @@ const HEADER: usize = 32 + 32 + 32 + 8 + 8; // sender, recipient, session, count
 pub const MAX_BODY: usize = crate::cell::CELL_PAYLOAD_MAX - HEADER - 2 - 64;
 
 /// Identify a party by its signing public key.
-pub type PartyId = [u8; 32];
 
 /// Decrypted, verified message. Body is wiped on drop; Debug never prints it.
 pub struct Signed { pub counter: u64, pub timestamp: u64, pub body: Zeroizing<Vec<u8>> }

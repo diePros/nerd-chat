@@ -29,7 +29,6 @@ impl<const N: usize> FixedBuf<N> {
     /// The text as a borrowed &str (empty if somehow invalid): rendering needs no copy.
     pub fn as_str(&self) -> &str { std::str::from_utf8(&self.0).unwrap_or("") }
     pub fn chars(&self) -> usize { self.as_str().chars().count() }
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool { self.0.is_empty() }
     pub fn eq(&self, o: &Self) -> bool { self.0.len() == o.0.len() && self.0.iter().zip(o.0.iter()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0 }
     pub fn clear(&mut self) { use zeroize::Zeroize; self.0.zeroize(); self.0.clear(); }

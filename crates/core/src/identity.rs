@@ -48,14 +48,6 @@ impl ContactIdentity {
         Some(Self { sign: SigningKey::from_bytes(&s), dh: StaticSecret::from(*d), kem, kem_seed: k, onion_seed: o, auth: StaticSecret::from(*a) })
     }
 
-    /// The rotatable part (onion seed | client-auth secret), 64 bytes, for the vault's pending-rotation slot.
-    pub fn transport_secret(&self) -> Zeroizing<[u8; 64]> {
-        let mut t = Zeroizing::new([0u8; 64]);
-        t[..32].copy_from_slice(&*self.onion_seed);
-        t[32..].copy_from_slice(&self.auth.to_bytes());
-        t
-    }
-
     /// A fresh random transport secret (new onion identity + new client-auth key).
     pub fn fresh_transport_secret() -> Zeroizing<[u8; 64]> {
         let mut t = Zeroizing::new([0u8; 64]);
@@ -104,7 +96,6 @@ mod tests {
         assert!(a.kem_public() == b.kem_public());
         assert_ne!(a.onion_public(), b.onion_public());
         assert_ne!(a.auth_public().to_bytes(), b.auth_public().to_bytes());
-        assert_eq!(*b.transport_secret(), *t);
         assert_eq!(&b.secret_bytes()[..128], &a.secret_bytes()[..128]);
     }
 }

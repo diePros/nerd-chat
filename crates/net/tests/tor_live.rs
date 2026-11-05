@@ -31,14 +31,14 @@ fn two_contacts_chat_over_real_onion_service_with_client_auth() {
         s.write_all(&sess.send(&a2, b"hello from A").unwrap()).unwrap();
     });
 
-    let id = tor.host(&a, &bb, &local).expect("ADD_ONION");
+    let id = tor.host_with(&a, &bb, &[], &local).expect("ADD_ONION");
     eprintln!("hosting {id}.onion for the contact");
     tor.allow_dial(&b, &ab).expect("client auth add");
 
     // descriptor upload takes a while: retry the dial
     let start = Instant::now();
     let mut stream = loop {
-        match tor.dial(&ab, &[7u8; 16]) {
+        match tor.dialer().dial(&ab, &[7u8; 16]) {
             Ok(s) => break s,
             Err(e) if start.elapsed() < Duration::from_secs(180) => { eprintln!("dial not yet: {e}"); thread::sleep(Duration::from_secs(5)); }
             Err(e) => panic!("could not dial: {e}"),

@@ -24,7 +24,7 @@ use nerd_chat_net::{guard::HandshakeGuard, link};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::{
     io::{Read, Write},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -61,10 +61,6 @@ impl PairStream for std::os::unix::net::UnixStream {
 pub struct Lockout(Mutex<(u32, Option<Instant>)>);
 
 impl Lockout {
-    fn global() -> Arc<Lockout> {
-        static G: OnceLock<Arc<Lockout>> = OnceLock::new();
-        G.get_or_init(|| Arc::new(Lockout::default())).clone()
-    }
     /// Seconds to wait before the next attempt (0 = go). First 2 failures are free, then 30 s * 2^n (cap 1 h).
     pub fn remaining(&self) -> u64 {
         let g = self.0.lock().unwrap();
@@ -112,8 +108,6 @@ pub struct PairingOffer { code: Zeroizing<[u8; CODE_DIGITS]>, expires: Instant, 
 
 impl PairingOffer {
     /// Returns the offer and the digits to show the user. Fails while locked out.
-    pub fn generate() -> Result<(Self, Zeroizing<String>), ExchangeError> { Self::generate_in(Lockout::global()) }
-
     pub fn generate_in(lockout: Arc<Lockout>) -> Result<(Self, Zeroizing<String>), ExchangeError> {
         lockout.guard()?;
         let code = fresh_digits();
@@ -141,8 +135,6 @@ pub struct PairingJoin { code: Zeroizing<[u8; CODE_DIGITS]>, lockout: Arc<Lockou
 
 impl PairingJoin {
     /// Accepts `12345-67890`, spaces, or plain digits.
-    pub fn parse(input: &str) -> Result<Self, ExchangeError> { Self::parse_in(input, Lockout::global()) }
-
     pub fn parse_in(input: &str, lockout: Arc<Lockout>) -> Result<Self, ExchangeError> {
         let mut code = Zeroizing::new([0u8; CODE_DIGITS]);
         let mut n = 0;

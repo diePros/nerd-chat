@@ -288,12 +288,8 @@ impl App {
     }
     /// Number of typed characters in the (hidden) join-code buffer.
     pub fn code_chars(&self) -> usize { self.code_buf.chars() }
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn pairing_active(&self) -> bool { self.pair_ctl.is_some() }
     pub fn view_number(&self) -> Option<&str> { self.view.as_ref().map(|v| v.number.as_str()) }
     pub fn is_ram_only(&self) -> bool { self.cfg.path.is_none() }
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn unlocked(&self) -> bool { self.vf.is_some() }
 
     fn ok(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = false; }
     fn err(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = true; }
@@ -1478,7 +1474,7 @@ mod tests {
         assert_eq!(b.handle(Key::F12), Action::Panic);
         assert_eq!(b.screen, Screen::Wiped);
         thread::sleep(Duration::from_millis(100)); b.poll();
-        assert!(!b.unlocked() && b.screen == Screen::Wiped, "late result must not resurrect the vault");
+        assert!(!b.vf.is_some() && b.screen == Screen::Wiped, "late result must not resurrect the vault");
     }
 
     #[test]
@@ -1574,7 +1570,7 @@ mod tests {
             let mut a = create_app(d.path(), &format!("v{k:?}")); add(&mut a, "bob");
             a.handle(Key::Char('d')); type_str(&mut a, "ye"); // mid-prompt
             assert_eq!(a.handle(k), Action::Panic);
-            assert!(!a.unlocked() && a.screen == Screen::Wiped);
+            assert!(!a.vf.is_some() && a.screen == Screen::Wiped);
             assert!(a.input.is_empty() && a.status.is_empty() && a.pw.is_empty());
             assert_eq!(a.contacts_len(), 0);
             assert_eq!(a.handle(Key::Char('x')), Action::Quit, "nothing left to interact with");
@@ -1611,7 +1607,7 @@ mod tests {
         b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter);
         type_str(&mut b, &code); b.handle(Key::Enter);
         let t = Instant::now();
-        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) {
+        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) {
             a.poll(); b.poll(); thread::sleep(Duration::from_millis(50));
         }
         assert!(a.screen == Screen::Main && b.screen == Screen::Main, "a finished pairing must NOT open a prompt by itself");
@@ -1633,10 +1629,10 @@ mod tests {
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
         for bad in ["0.0.0.0:0", "8.8.8.8:4000", "[::]:0"] {
             a.handle(Key::Char('l')); a.input.clear(); type_str(&mut a, bad); a.handle(Key::Enter);
-            assert!(a.error && !a.pairing_active() && a.status.contains("Refusing"), "{bad}: {}", a.status);
+            assert!(a.error && !a.pair_ctl.is_some() && a.status.contains("Refusing"), "{bad}: {}", a.status);
         }
         a.handle(Key::Char('l')); a.handle(Key::Enter); // default 127.0.0.1:0 is fine
-        assert!(a.pairing_active());
+        assert!(a.pair_ctl.is_some());
     }
 
     #[test]
@@ -1644,15 +1640,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
         a.handle(Key::Char('l')); a.handle(Key::Enter);
-        assert!(a.pairing_active());
+        assert!(a.pair_ctl.is_some());
         a.handle(Key::Char('x'));
-        assert!(!a.pairing_active() && a.pair_info.is_none());
+        assert!(!a.pair_ctl.is_some() && a.pair_info.is_none());
         // a second listen works again, and panic joins the worker quickly
         a.handle(Key::Char('l')); a.handle(Key::Enter);
-        assert!(a.pairing_active());
+        assert!(a.pair_ctl.is_some());
         let t = Instant::now();
         a.handle(Key::F12);
-        assert!(!a.pairing_active() && t.elapsed() < Duration::from_secs(2));
+        assert!(!a.pair_ctl.is_some() && t.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -1678,7 +1674,7 @@ mod tests {
         let code = info.split("CODE: ").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
         b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter); type_str(&mut b, &code); b.handle(Key::Enter);
         let t = Instant::now();
-        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
         a.handle(Key::Char('P'));
         a.handle(Key::Esc);
         assert_eq!(a.screen, Screen::Main);
@@ -2218,7 +2214,7 @@ mod tests {
         b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter);
         type_str(&mut b, "0000000000"); b.handle(Key::Enter);
         let t = Instant::now();
-        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
         assert!(a.error && b.error, "{} / {}", a.status, b.status);
         assert!(a.selected_detail().unwrap().2.is_none() && b.selected_detail().unwrap().2.is_none());
     }
@@ -2448,7 +2444,7 @@ mod tests {
         a.sel = 1; a.handle(Key::Char('i')); type_str(&mut a, "he");               // typing a message to carol
         b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter); type_str(&mut b, &code); b.handle(Key::Enter);
         let t = Instant::now();
-        while (a.pairing_active() || b.pairing_active()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
         assert!(a.pending_pair.is_some(), "{}", a.status);
         assert_eq!((a.screen == Screen::Main, a.pane, a.mode), (true, Pane::Chat, Mode::Insert), "still typing, no prompt, mode untouched");
         // the keys the user types now are TEXT: a `y` and Enter must not answer anything
@@ -2478,7 +2474,7 @@ mod tests {
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob"); add(&mut a, "carol");
         a.pending_pair = Some(([0; 8], ImportedContact::from_file(Bundle::from_identity(&ContactIdentity::generate())), "123".into()));
         a.sel = 1; a.handle(Key::Char('l'));
-        assert!(a.error && a.status.contains("press P") && !a.pairing_active(), "{}", a.status);
+        assert!(a.error && a.status.contains("press P") && !a.pair_ctl.is_some(), "{}", a.status);
     }
 
     #[test]

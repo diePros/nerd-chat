@@ -147,12 +147,6 @@ impl VaultFile {
         Ok(())
     }
 
-    pub fn is_ram_only(&self) -> bool { self.path.is_none() }
-    pub fn counter_same_device(&self) -> bool {
-        match (&self.path, &self.counter_path) { (Some(p), Some(c)) => same_device(p, c), _ => false }
-    }
-    pub fn counter(&self) -> u64 { self.vault.counter() }
-
     /// Re-verifies the old password, rotates the data key, saves.
     pub fn change_password(&mut self, old_pw: &[u8], old_kf: Option<&[u8]>, new_pw: &[u8], new_kf: Option<&[u8]>, profile: Profile) -> Result<(), StoreError> {
         let data = self.store.encode();
@@ -180,7 +174,7 @@ mod tests {
         let (vf2, info) = VaultFile::open(&p, None, b"pw", None).unwrap();
         assert_eq!(vf2.store.contacts[0].name, "alice");
         assert!(!info.rollback_unchecked);
-        assert_eq!(info.counter, vf.counter());
+        assert_eq!(info.counter, vf.vault.counter());
         assert!(matches!(VaultFile::open(&p, None, b"bad", None), Err(StoreError::Vault(VaultError::WrongCredentials))));
         assert!(matches!(VaultFile::create(Some(&p), None, b"pw", None, P), Err(StoreError::Exists)));
     }
@@ -227,7 +221,7 @@ mod tests {
         let mut vf = VaultFile::create(None, None, b"pw", None, P).unwrap();
         vf.store.add_contact("x").unwrap();
         vf.save().unwrap();
-        assert!(vf.is_ram_only());
+        assert!(vf.path.is_none());
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
     }
 

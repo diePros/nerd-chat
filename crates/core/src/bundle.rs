@@ -148,9 +148,6 @@ impl Bundle {
         h.finalize().into()
     }
 
-    /// Human-comparable fingerprint: 8 groups of 5 decimal digits (~133 bits).
-    /// Prefer [`safety_number`], which both parties see identically.
-    pub fn fingerprint_digits(&self) -> String { digits(&self.fingerprint()) }
 }
 
 fn digits(f: &[u8; 32]) -> String {
@@ -227,7 +224,6 @@ mod tests {
         let a = Bundle::from_identity(&ContactIdentity::generate());
         let b = Bundle::from_identity(&ContactIdentity::generate());
         assert_ne!(a.fingerprint(), b.fingerprint());
-        assert_eq!(a.fingerprint_digits().split(' ').count(), 8);
     }
 
     #[test]

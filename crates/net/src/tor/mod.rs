@@ -206,7 +206,6 @@ impl Tor {
         })))
     }
 
-    pub fn bootstrap_progress(&mut self) -> Result<u8, TorError> { self.ctl.bootstrap_progress() }
 
     /// The private (0700, RAM) directory of our own spawned tor, if any: a safe place for our onion-target unix sockets.
     pub fn spawn_dir(&self) -> Option<&std::path::Path> { self._spawned.as_ref().map(|s| s.dir()) }
@@ -223,8 +222,6 @@ impl Tor {
     /// Host OUR onion service for this contact: reachable only by the peer's authorized client key.
     /// `target` is where our listener accepts the (Noise) connections tor forwards: prefer a unix socket in a 0700 dir
     /// when tor runs as us (spawn mode); external tors need TCP loopback.
-    pub fn host(&mut self, me: &ContactIdentity, peer: &Bundle, target: &Target) -> Result<String, TorError> { self.host_with(me, peer, &[], target) }
-
     /// Like `host`, but also authorizes `extra_auth` client keys (the peer's previous key during a key rotation).
     pub fn host_with(&mut self, me: &ContactIdentity, peer: &Bundle, extra_auth: &[[u8; 32]], target: &Target) -> Result<String, TorError> {
         let mut auth = vec![peer.auth_pub];
@@ -255,9 +252,6 @@ impl Tor {
 
     /// A cheap, thread-safe handle that can dial through this tor's SOCKS port without the control connection.
     pub fn dialer(&self) -> Dialer { Dialer { socks: self.socks.clone(), user: self.iso_user.clone() } }
-
-    /// Dial the peer's onion service. `isolation` makes tor use a separate circuit per value (use one per contact).
-    pub fn dial(&mut self, peer: &Bundle, isolation: &[u8; 16]) -> Result<Box<dyn Stream>, TorError> { self.dialer().dial(peer, isolation) }
 }
 
 /// Dials contact onion services through a tor's SOCKS port (clone it into worker threads).
@@ -363,9 +357,9 @@ mod tests {
             c.write_all(b"hello").unwrap(); // application data right after the SOCKS reply
         });
         let (ctl_a, _ctl_b) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut tor = Tor::from_parts(Controller::new(Box::new(ctl_a)), Addr::Unix(sock), None);
+        let tor = Tor::from_parts(Controller::new(Box::new(ctl_a)), Addr::Unix(sock), None);
         let peer = Bundle::from_identity(&ContactIdentity::generate());
-        let mut s = tor.dial(&peer, &[0xab; 16]).unwrap();
+        let mut s = tor.dialer().dial(&peer, &[0xab; 16]).unwrap();
         let mut b = [0u8; 5]; s.read_exact(&mut b).unwrap();
         assert_eq!(&b, b"hello", "SOCKS reply fully consumed; stream positioned at app data");
         h.join().unwrap();
