@@ -490,7 +490,8 @@ impl App {
     fn reply_offer(&mut self, accept: bool) {
         let Some(id) = self.sel_id() else { return };
         if !self.offers.contains_key(&id) {
-            // `r` with no pending offer discards a received file that is still in RAM
+            // `r` with no pending offer discards a received file that is still in RAM (or a stuck 'arriving' state)
+            if !accept && self.accepted.remove(&id).is_some() { return self.ok("Cleared the stale 'file arriving' state."); }
             if !accept && self.inbox.remove(&id).is_some() { return self.ok("Received file discarded (wiped from RAM)."); }
             return self.err("No file offer from this contact.");
         }
@@ -657,6 +658,7 @@ impl App {
                     if let Some(id) = gone {
                         if let Some(e) = &self.engine { e.remove(id); }
                         self.chats.remove(&id); self.linked.remove(&id); self.unread.remove(&id);
+                        self.inbox.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); // a deleted contact's file must not linger in RAM
                     }
                     self.vf().store.remove(i);
                     self.sel = self.sel.saturating_sub(1);
@@ -785,6 +787,7 @@ impl App {
                 self.stop_rx = Some(rx);
                 self.online = Online::Stopping;
                 self.linked.clear();
+                self.offers.clear(); self.accepted.clear(); // no Disconnected events will arrive for the old engine's connections
                 self.ok("Going offline: closing connections and removing onion services...");
             }
             Online::Offline | Online::Failed(_) => self.start_online(),
@@ -895,7 +898,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(StartMsg::Progress(p)) => self.online = Online::Starting(p),
-                    Ok(StartMsg::Ready(e)) => { self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
+                    Ok(StartMsg::Ready(e)) => { self.offers.clear(); self.accepted.clear(); self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
                     Ok(StartMsg::Failed(m)) => { self.online = Online::Failed(m.clone()); keep = false; self.err(format!("Could not go online: {m}")); break; }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => { self.online = Online::Failed("start thread died".into()); keep = false; break; }
@@ -1419,6 +1422,23 @@ mod tests {
     }
 
     /// Regression: the save error path used to unlink the path, destroying an EXISTING file the user tried to overwrite.
+    #[test]
+    fn deleting_a_contact_or_going_offline_clears_file_state() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        let id = a.sel_id().unwrap();
+        a.inbox.insert(id, Received { data: Zeroizing::new(b"secret".to_vec()), ext: "txt" });
+        a.offers.insert(id, ([1; 8], 16384)); a.accepted.insert(id, 16384);
+        a.online = Online::Online; // pretend; no engine
+        a.handle(Key::Char('o'));
+        assert!(a.offers.is_empty() && a.accepted.is_empty(), "going offline must clear transfer state");
+        a.online = Online::Offline;
+        a.offers.insert(id, ([1; 8], 16384)); a.accepted.insert(id, 16384);
+        a.handle(Key::Char('r'));  // clears the stale 'arriving' state? offers has priority: decline path
+        a.handle(Key::Char('d')); type_str(&mut a, "yes"); a.handle(Key::Enter);
+        assert!(a.inbox.is_empty() && a.offers.is_empty() && a.accepted.is_empty(), "deleted contact's file must leave RAM");
+    }
+
     #[test]
     fn saving_onto_an_existing_file_refuses_and_leaves_it_untouched() {
         let d = tempfile::tempdir().unwrap();

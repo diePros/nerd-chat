@@ -239,4 +239,15 @@ No Critical, no panics (326k mutants through the zlib validator; 10,562 Python-z
 | R10-L3 | `z`/`win`/error buffers not zeroized | FIXED | `Zeroizing` for the IDAT copy and the inflate window |
 | R10-L4 | notice limiter swallowed security notices | FIXED | integrity/refusal notices bypass the limiter. OPEN: sticky warnings in the UI |
 | R10-I | fuzz test did not reach the validator; `--strip` ignored unknown flags | FIXED | CRC-fixing mutator (12k mutants/run), unknown flags rejected |
-NOT re-reviewed after these fixes (small, test-covered): ask for a round 3 before relying on it.
+
+## Review 11 — file sharing, round 3 (commit 7f043e6)
+No Critical/High; all Review-10 fixes verified (hostile-PNG worst case 2.2 s release; real PIL/libjpeg PNGs and JPEGs all accepted). Integrated:
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R11-M1 | deleting a contact left their unsaved received file in RAM (unreachable, counted against the budget) | FIXED | inbox/offers/accepted cleared on delete; test |
+| R11-M2 | going offline left stale offers/accepted (UI stuck on "File arriving", later offers auto-declined) | FIXED | cleared on offline and on new engine Ready; `r` also clears a stuck state; test |
+| R11-L1 | 20k-block cap refused valid PNGs (memLevel=1, per-row sync flush); 4 s deadline hardware-dependent | FIXED | only EMPTY blocks capped (2000), total 1M, deadline 8 s (cleaning is off the UI thread). Known: a much slower machine may still refuse a huge hostile-shaped valid PNG after transfer |
+| R11-L2 | structured-text refusal bypassed by NBSP/ideographic space/combining marks; e-mail headers not caught; docs overclaimed | FIXED | skip all blanks/format/combining chars; RFC822 header detection; test |
+| R11-L3 | error-path copies of images not wiped | FIXED | `Zeroizing` output buffers in jpeg/png/text |
+| R11-I | misleading palette report text; `--strip` runs before the swap check; replaced-connection transfers vanish without a notice | PARTIAL | report text fixed; OPEN: swap check for `--strip`, notice on replacement |
+Round 4 not run: remaining items are minor; run one before wider use.

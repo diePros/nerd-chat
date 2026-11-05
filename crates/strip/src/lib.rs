@@ -102,7 +102,7 @@ fn jpeg_segment_ok(m: u8, body: &[u8]) -> Option<usize> {
 
 fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
     const M: &str = "JPEG";
-    let mut out = Vec::with_capacity(d.len());
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(d.len())); // wiped on every error path
     let mut dropped = Dropped::new();
     out.extend_from_slice(&[0xFF, 0xD8]);
     let mut i = 2;
@@ -156,7 +156,7 @@ fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
             let e = dropped.entry(name).or_default(); e.0 += 1; e.1 += len + 2;
         }
     }
-    Ok(Cleaned { format: Format::Jpeg, data: out, report: finish(dropped) })
+    Ok(Cleaned { format: Format::Jpeg, data: std::mem::take(&mut *out), report: finish(dropped) })
 }
 
 // ---------------- zlib/deflate validator (no output kept) ----------------
@@ -206,8 +206,8 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
     let mut win = zeroize::Zeroizing::new(vec![0u8; 32768]);
     let (mut out, mut a, mut bsum) = (0usize, 1u32, 0u32);
     // work bounds: the validator must never hold a thread (and the panic key) for long on hostile input
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-    let mut blocks = 0u32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let (mut blocks, mut empty_blocks) = (0u32, 0u32);
     let mut emit = |byte: u8, win: &mut Vec<u8>, out: &mut usize| -> bool {
         if *out >= expect { return false; }
         if *out & 0xFFFF == 0 && std::time::Instant::now() > deadline { return false; }
@@ -217,7 +217,8 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
     };
     loop {
         blocks += 1;
-        if blocks > 20_000 || std::time::Instant::now() > deadline { return false; }
+        if blocks > 1_000_000 || empty_blocks > 2_000 || std::time::Instant::now() > deadline { return false; }
+        let out_before = out;
         let Some(last) = b.need(1) else { return false };
         let Some(ty) = b.need(2) else { return false };
         match ty {
@@ -285,6 +286,7 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
             }
             _ => return false,
         }
+        if out == out_before { empty_blocks += 1; } // blocks that emit nothing are the only pure-overhead kind: cap them hard
         if last == 1 { break; }
     }
     if out != expect { return false; }
@@ -331,7 +333,7 @@ fn crc32(data: &[u8]) -> u32 {
 
 fn png(d: &[u8]) -> Result<Cleaned, StripError> {
     const M: &str = "PNG";
-    let mut out = Vec::with_capacity(d.len());
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(d.len()));
     out.extend_from_slice(&d[..8]);
     let mut i = 8;
     let mut dropped = Dropped::new();
@@ -379,7 +381,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
                 let name = match ty {
                     b"tEXt" | b"zTXt" | b"iTXt" => "text chunks (author/comment/software/XMP)",
                     b"eXIf" => "EXIF block",
-                    b"PLTE" | b"tRNS" => "palette/transparency data not legal for this image type",
+                    b"PLTE" | b"tRNS" => "palette/transparency data not needed for this image type",
                     b"tIME" => "modification time",
                     b"iCCP" => "ICC colour profile",
                     _ => "other ancillary chunks", // ONE aggregate entry: chunk types are attacker-chosen
@@ -394,22 +396,27 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
     let expect = raw_size(dims.0, dims.1, depth, dims.2, dims.3).ok_or(StripError::Malformed(M, "implausible image size"))?;
     if !zlib_valid(&z, expect) { return Err(StripError::Malformed(M, "image data is not exactly one well-formed zlib stream of the size IHDR implies")); }
     if i < d.len() { dropped.entry("data after IEND".into()).or_default().1 += d.len() - i; }
-    Ok(Cleaned { format: Format::Png, data: out, report: finish(dropped) })
+    Ok(Cleaned { format: Format::Png, data: std::mem::take(&mut *out), report: finish(dropped) })
 }
 
 // ---------------- plain text (explicit choice) ----------------
 /// Content that is really a structured document: refused even in plain-text mode (its metadata would pass untouched).
 fn looks_structured(s: &str) -> bool {
-    let t = s.trim_start_matches(['\u{FEFF}', ' ', '\t', '\r', '\n']);
+    // skip EVERYTHING invisible or blank first (NBSP, ideographic space, combining marks, bidi/format characters...)
+    let t = s.trim_start_matches(|c: char| c.is_whitespace() || seburity_core::text::is_unsafe_char(c) || seburity_core::text::is_combining(c));
     let lower: String = t.chars().take(64).flat_map(char::to_lowercase).collect();
-    ["{\\rtf", "%pdf", "%!", "<?xml", "<svg", "<!doctype", "<html", "<", "begin:v", "#!", "from ", "mime-version", "return-path:", "received:"].iter().any(|p| lower.starts_with(p))
+    if ["{\\rtf", "%pdf", "%!", "<?xml", "<svg", "<!doctype", "<html", "<", "begin:v", "#!", "from ", "mime-version"].iter().any(|p| lower.starts_with(p)) { return true; }
+    // RFC 822 / e-mail headers ("Delivered-To:", "Received:", "X-Originating-IP:" ... carry addresses and IPs)
+    let first = lower.split('\n').next().unwrap_or("");
+    const MAIL: [&str; 13] = ["delivered-to:", "received:", "return-path:", "x-", "to:", "subject:", "date:", "message-id:", "content-type:", "reply-to:", "cc:", "bcc:", "sender:"];
+    MAIL.iter().any(|h| first.starts_with(h))
 }
 
 fn text(d: &[u8]) -> Result<Cleaned, StripError> {
     if d.is_empty() { return Err(StripError::Unsupported); }
     let s = std::str::from_utf8(d).map_err(|_| StripError::Malformed("text", "not UTF-8"))?;
     if d.contains(&0) || looks_structured(s) { return Err(StripError::StructuredText); }
-    let mut out = String::with_capacity(s.len());
+    let mut out = zeroize::Zeroizing::new(String::with_capacity(s.len()));
     let (mut removed, mut run) = (0usize, 0usize);
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -423,7 +430,7 @@ fn text(d: &[u8]) -> Result<Cleaned, StripError> {
     if looks_structured(&out) { return Err(StripError::StructuredText); }
     let mut report = vec!["plain text: ONLY invisible/control characters are removed; any document metadata inside the text is NOT understood".to_string()];
     if removed > 0 { report.push(format!("control/invisible/bidi/format characters: {removed} removed")); }
-    Ok(Cleaned { format: Format::Text, data: out.into_bytes(), report })
+    Ok(Cleaned { format: Format::Text, data: std::mem::take(&mut *out).into_bytes(), report })
 }
 
 #[cfg(test)]
@@ -636,6 +643,15 @@ mod tests {
         let out = text_clean(sneaky.as_bytes()).unwrap().data;
         assert!(String::from_utf8(out.clone()).unwrap().chars().filter(|c| seburity_core::text::is_combining(*c)).count() <= seburity_core::text::MAX_COMBINING_RUN);
         assert_eq!(text_clean(&out).unwrap().data, out, "idempotent");
+    }
+
+    #[test]
+    fn structured_text_check_skips_every_kind_of_blank_and_catches_mail_headers() {
+        for doc in ["\u{00A0}{\\rtf1{\\info{\\author Jane Doe}}}", "\u{3000}<html><meta name=author content=x>", "\u{2000}<svg><metadata>x</metadata></svg>", "\u{0301}{\\rtf1}", "\u{00A0}%!PS-Adobe\n%%Creator: x",
+                    "Delivered-To: me@example.org\nX-Originating-IP: [203.0.113.7]\nSubject: hi\n\nbody", "Received: from mail.example.org by x\n"] {
+            assert!(text_clean(doc.as_bytes()).is_err(), "{doc:?}");
+        }
+        assert!(text_clean(b"Dear all,\nthe meeting is at noon.\n").is_ok());
     }
 
     #[test]
