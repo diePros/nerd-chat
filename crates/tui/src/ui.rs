@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows[2]);
     }
-    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  h host-anyway  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
@@ -94,6 +94,7 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
         Some((name, trust, sn)) => {
             let (l, c) = trust_label(trust, sn.is_some());
             let mut v = vec![Line::from(Span::styled(name, Style::default().add_modifier(Modifier::BOLD))), Line::from(Span::styled(l, Style::default().fg(c))), Line::from("")];
+            let paired = sn.is_some();
             match sn {
                 Some(n) => {
                     v.push(Line::from("Safety number (both of you must see the SAME digits):"));
@@ -106,6 +107,12 @@ fn main_view(f: &mut Frame, area: Rect, app: &App) {
                     v.push(Line::from("Next: e = export YOUR public bundle and send it,"));
                     v.push(Line::from("      i = import THEIR bundle file, or"));
                     v.push(Line::from("      l / c = pair directly over LAN with a one-time code."));
+                }
+            }
+            if let Some((peer_can_host, anyway)) = app.contact_caps() {
+                if paired {
+                    v.push(Line::from(""));
+                    v.push(Line::from(format!("Hosting: contact {} host; host anyway: {} (h)", if peer_can_host { "CAN" } else { "CANNOT" }, if anyway { "ON (your presence is visible to holders of their copy of your bundle)" } else { "off" })));
                 }
             }
             if let Some(fs) = app.file_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(fs, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }

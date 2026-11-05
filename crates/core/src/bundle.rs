@@ -9,8 +9,9 @@ use ml_kem::{EncapsulationKey768, KeyExport};
 
 pub const KEM_PUB_LEN: usize = 1184;
 
-const MAGIC: &[u8; 4] = b"SBC3";
-const BODY_LEN: usize = 4 + 32 + 32 + 32 + 32 + KEM_PUB_LEN;
+const MAGIC: &[u8; 4] = b"SBC4";
+const CAP_OFF: usize = 132;
+const BODY_LEN: usize = 4 + 32 + 32 + 32 + 32 + 1 + KEM_PUB_LEN;
 pub const BUNDLE_LEN: usize = BODY_LEN + 64;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -21,6 +22,10 @@ pub struct Bundle {
     pub onion_pub: [u8; 32],
     /// Client-authorization key: the OTHER party's onion service must authorize this key.
     pub auth_pub: [u8; 32],
+    /// Capability, signed with the rest: this party CAN host an onion service (false e.g. on a Tails whose Tor control port
+    /// refuses ADD_ONION). The roles are chosen from it, so nobody has to publish a service just to find out. NOT part of the
+    /// fingerprint/safety number (it is operational, and both sides must compute the same number from key material only).
+    pub can_host: bool,
     pub kem_pub: [u8; KEM_PUB_LEN],
 }
 
@@ -31,9 +36,12 @@ impl Bundle {
             dh_pub: id.dh_public().to_bytes(),
             onion_pub: id.onion_public(),
             auth_pub: id.auth_public().to_bytes(),
+            can_host: true,
             kem_pub: id.kem_public().to_bytes().as_slice().try_into().expect("ML-KEM-768 ek length"),
         }
     }
+
+    pub fn with_can_host(mut self, can_host: bool) -> Self { self.can_host = can_host; self }
 
     fn body(&self) -> [u8; BODY_LEN] {
         let mut b = [0u8; BODY_LEN];
@@ -42,7 +50,8 @@ impl Bundle {
         b[36..68].copy_from_slice(&self.dh_pub);
         b[68..100].copy_from_slice(&self.onion_pub);
         b[100..132].copy_from_slice(&self.auth_pub);
-        b[132..].copy_from_slice(&self.kem_pub);
+        b[CAP_OFF] = self.can_host as u8;
+        b[CAP_OFF + 1..].copy_from_slice(&self.kem_pub);
         b
     }
 
@@ -62,7 +71,8 @@ impl Bundle {
             dh_pub: b[36..68].try_into().unwrap(),
             onion_pub: b[68..100].try_into().unwrap(),
             auth_pub: b[100..132].try_into().unwrap(),
-            kem_pub: b[132..BODY_LEN].try_into().unwrap(),
+            can_host: match b[CAP_OFF] { 0 => false, 1 => true, _ => return Err(Error::Malformed) },
+            kem_pub: b[CAP_OFF + 1..BODY_LEN].try_into().unwrap(),
         };
         // Reject a malformed/invalid ML-KEM key up front rather than at handshake time.
         me.kem_key()?;
@@ -77,8 +87,8 @@ impl Bundle {
 
     /// Rebuild a bundle from stored public parts (e.g. from the authenticated vault) applying
     /// the same key validity checks as `decode`.
-    pub fn from_parts(sign_pub: [u8; 32], dh_pub: [u8; 32], onion_pub: [u8; 32], auth_pub: [u8; 32], kem_pub: [u8; KEM_PUB_LEN]) -> Result<Self, Error> {
-        let me = Self { sign_pub, dh_pub, onion_pub, auth_pub, kem_pub };
+    pub fn from_parts(sign_pub: [u8; 32], dh_pub: [u8; 32], onion_pub: [u8; 32], auth_pub: [u8; 32], can_host: bool, kem_pub: [u8; KEM_PUB_LEN]) -> Result<Self, Error> {
+        let me = Self { sign_pub, dh_pub, onion_pub, auth_pub, can_host, kem_pub };
         me.verifying_key()?;
         me.check_dh_pub()?;
         me.check_onion_keys()?;
@@ -127,7 +137,9 @@ impl Bundle {
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut h = Blake2b::<U32>::new();
         h.update(b"seburity-fingerprint-v1");
-        h.update(self.body());
+        let mut body = self.body();
+        body[CAP_OFF] = 0; // key material only
+        h.update(body);
         h.finalize().into()
     }
 
@@ -173,6 +185,23 @@ mod tests {
             assert!(Bundle::decode(&t).is_err(), "byte {i}");
         }
         assert_eq!(Bundle::decode(&enc[..enc.len() - 1]), Err(Error::Malformed));
+    }
+
+    #[test]
+    fn capability_is_signed_but_not_part_of_the_safety_number() {
+        let id = ContactIdentity::generate();
+        let yes = Bundle::from_identity(&id);
+        let no = yes.clone().with_can_host(false);
+        assert!(Bundle::decode(&yes.encode(&id)).unwrap().can_host);
+        assert!(!Bundle::decode(&no.encode(&id)).unwrap().can_host);
+        assert_eq!(yes.fingerprint(), no.fingerprint(), "both sides must compute the same number whatever the capability");
+        let other = Bundle::from_identity(&ContactIdentity::generate());
+        assert_eq!(safety_number(&yes, &other), safety_number(&no, &other));
+        // flipping the bit without the key breaks the signature; a value other than 0/1 is malformed
+        let mut enc = yes.encode(&id); enc[CAP_OFF] = 0;
+        assert_eq!(Bundle::decode(&enc), Err(Error::BadSignature));
+        enc[CAP_OFF] = 2;
+        assert_eq!(Bundle::decode(&enc), Err(Error::Malformed));
     }
 
     #[test]

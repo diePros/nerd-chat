@@ -26,6 +26,8 @@ fn usage() -> ! {
   --tor-path PATH      tor binary to start when going online (default: `tor` from PATH)\n\
   --tor-control ADDR   use an already running tor (127.0.0.1:9051 or unix:/run/tor/control) instead of starting one;\n\
                        with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
+  --cannot-host        our Tor cannot host onion services (Tails with a restricted control port): bundles you export/pair say so,\n\
+                       so the contact hosts for you (check with --probe-tor --probe-onion)\n\
   --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n\
   --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
@@ -91,6 +93,7 @@ fn parse_args() -> Config {
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
     let mut allow_swap = false;
+    let mut cannot_host = false;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -98,6 +101,7 @@ fn parse_args() -> Config {
             "--ram" => path = None,
             "--low-mem" => profile = Profile::LowMem,
             "--allow-swap" => allow_swap = true,
+            "--cannot-host" => cannot_host = true,
             "--tor-path" => tor.tor_path = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--tor-control" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
             "--tor-socks" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
@@ -117,6 +121,7 @@ fn parse_args() -> Config {
     let mut cfg = Config::new(path, counter, keyfile, profile);
     cfg.tor = tor;
     cfg.allow_swap = allow_swap;
+    cfg.can_host = !cannot_host;
     cfg
 }
 

@@ -189,7 +189,7 @@ No Critical/High/Medium. VERIFIED against snow 0.10 / ml-kem 0.3.4 sources: psk2
 
 ## Role negotiation notes (before review 8)
 - Flip: designated host whose `add_contact(listen)` fails -> dials instead (credentials installed). Lazy hosting: dialer hosts after `host_fallback_after` (default 5) consecutive failed dials, once per contact per session; stays hosted until the contact is removed/offline.
-- **REVISIT LATER (user decision, R8-privacy, OPEN):** lazy hosting weakens presence privacy; decide default (opt-in per contact? ask user in the UI? longer threshold? only fall back when the peer is known to be unable to host?) before any real use.
+- **DECIDED (see R12): capability bit in the bundle + per-contact opt-in; the timer-based lazy hosting was REMOVED.** Old note: lazy hosting weakens presence privacy; decide default (opt-in per contact? ask user in the UI? longer threshold? only fall back when the peer is known to be unable to host?) before any real use.
 - PRIVACY TRADE-OFF (documented): a dialer whose peer is offline for a long time publishes a service for it; anyone holding that bundle (R5-M4) can then see it online. Setting `host_fallback_after = 0` disables it.
 - Verified: unit tests (flip + lazy host + reconnect, no fallback when the peer hosts fine, fallback only after the threshold, both-cannot-host notice) and a LIVE test over real Tor where one side's tor refuses to host.
 
@@ -251,3 +251,12 @@ No Critical/High; all Review-10 fixes verified (hostile-PNG worst case 2.2 s rel
 | R11-L3 | error-path copies of images not wiped | FIXED | `Zeroizing` output buffers in jpeg/png/text |
 | R11-I | misleading palette report text; `--strip` runs before the swap check; replaced-connection transfers vanish without a notice | PARTIAL | report text fixed; OPEN: swap check for `--strip`, notice on replacement |
 Round 4 not run: remaining items are minor; run one before wider use.
+
+## Role decision (R8-privacy resolved) — bundle v4 capability + host-anyway (this commit)
+| ID | Item | Status | Notes |
+|---|---|---|---|
+| R12-1 | Lazy (timer) hosting removed; roles from signed `can_host` bit in bundle v4 (`SBC4`), `--cannot-host`; `h` = per-contact "host anyway" (vault format SBS3, SBS2 still readable) | DONE | tests: capability decides roles with no speculative publishing, `host_anyway` explicit choice, flipped side never hosts, both-cannot notice, vault roundtrip + SBS2 compatibility, bundle signature covers the bit, pairing/file carry it |
+| R12-2 | Capability excluded from the fingerprint/safety number (so both sides compute the same number from keys only); authenticated only by the bundle self-signature + the pairing proof | ACCEPTED | |
+| R12-3 | A malicious contact can claim "cannot host" to make us host for them (presence visible to holders of their bundle). Inherent (no other way to connect); visible in the UI | ACCEPTED/documented | |
+| R12-4 | A wrong bit (claims can host, Tor refuses): the other side must switch on `h`; not automatic by design | ACCEPTED | |
+| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | OPEN | could run the probe at export time when a control port is configured |

@@ -77,17 +77,21 @@ The report states for every control port whether its owner check passed (`owner 
 - **One connection per pair.** For each contact the party whose Ed25519 signing key is smaller DIALS, the other LISTENS (hosts its
   onion service for that contact). Only listeners publish a service, so you are not visible online for contacts that never dial you.
   A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).
-- **Role negotiation (no extra message needed):** if you are the designated host but CANNOT host (e.g. a Tails whose control port
-  refuses `ADD_ONION`), you flip to dialing and say so in a notice. The contact, being the designated dialer, starts hosting too after
-  5 failed dials in a row (about a minute), which is exactly what a flipped peer needs. The cost is visible: a dialer whose peer is
-  simply offline for a long time ALSO publishes a service for it (so people holding that bundle can see you online); set
-  `Timing.host_fallback_after = 0` to forbid that if you never need to be reachable by a peer that cannot host. If neither side can
-  host, nothing connects and both get a clear notice. At most one side dials a host-capable peer, so no duplicate connections arise.
-> **PRIVACY IMPACT of lazy hosting (to be revisited):** with the default `host_fallback_after = 5`, a contact that stays offline makes
-> you publish an onion service for them. Anyone holding that contact's bundle (they know your onion address) can then tell when you
-> are online, which the pure dialer role did not reveal. Until the policy is decided (opt-in per contact, UI prompt, ...) treat it as
-> a known weakness. Tracked as R8-privacy in SECURITY_TRACKER.md.
-
+- **Roles come from the bundles (decided: capability bit + explicit opt-in, no timers).** Every bundle (v4, `SBC4`) carries a
+  SIGNED `can_host` bit, set by `--cannot-host` (use it when `--probe-tor --probe-onion` shows that your Tor refuses to host,
+  e.g. a Tails with a restricted control port). If exactly ONE side can host, that side hosts and the other dials; if both or
+  neither can, the smaller signing key dials. Nobody publishes a service just to find out, and nothing is published after a number
+  of failed dials any more. The bit is not part of the safety number (it is operational; both sides must compute the same number
+  from key material).
+- **Safety nets.** (1) A designated host whose hosting fails anyway (the bit was wrong, or a transient error) flips to dialing and says
+  so. (2) `h` on a contact = "host anyway": YOU choose to host for a contact you would only dial (their bundle claims it can host
+  but its Tor refuses). It is saved in the vault and costs presence privacy (below). (3) If neither side can host, both get a clear
+  notice and nothing connects.
+> **Privacy of hosting.** While you host for a contact, anyone holding THEIR copy of your bundle can see when you are online (even
+> if they are offline). Therefore: you host only where the roles require it. A contact whose bundle says "cannot host" makes you host
+> for them: that is inherent (otherwise no connection is possible), it is shown in the contact's details ("contact CANNOT host"),
+> and a malicious contact can use it to learn when you are online: do not mark someone who must not see your presence as a contact.
+> `host anyway` is OFF by default and the UI warns when you switch it on.
 - **Handshake availability (review 6):** NO per-contact refusal before authentication (a token bucket let anyone who could connect
   lock the real peer out). Per hosted service only a replay cache runs before the handshake; CPU is bounded by ONE engine-wide budget
   (50 handshakes/s, burst 100); every handshake has a TOTAL deadline (45 s) instead of per-read timeouts; at most 4 unauthenticated

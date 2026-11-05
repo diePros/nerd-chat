@@ -56,7 +56,7 @@ impl Transport for NoHostTor {
 
 #[test]
 #[ignore = "needs tor and network"]
-fn chat_works_over_real_tor_when_the_designated_host_cannot_host() {
+fn chat_works_over_real_tor_when_one_side_cannot_host() {
     let tor = find_tor().expect("`tor` not found in PATH");
     // make `host` the designated host (the LARGER signing key) and let it be the one whose tor refuses to host
     let (host, dialer) = loop {
@@ -65,17 +65,18 @@ fn chat_works_over_real_tor_when_the_designated_host_cannot_host() {
         if bx.sign_pub > by.sign_pub { break (x, y); }
         if by.sign_pub > bx.sign_pub { break (y, x); }
     };
-    let (hb, db) = (Bundle::from_identity(&host), Bundle::from_identity(&dialer));
+    // the side whose tor refuses to host says so in its (signed) bundle: the roles follow, nothing is published speculatively
+    let (hb, db) = (Bundle::from_identity(&host).with_can_host(false), Bundle::from_identity(&dialer));
     let start = |tor: std::path::PathBuf| thread::spawn(move || TorTransport::start(TorSetup::Spawn(SpawnConfig::new(tor)), |_| {}).expect("tor start"));
     let (t1, t2) = (start(tor.clone()), start(tor));
     let (t_host, t_dialer) = (t1.join().unwrap(), t2.join().unwrap());
     let id = [9u8; 8];
-    let timing = Timing { host_fallback_after: 2, min_backoff: Duration::from_secs(2), ..Timing::default() };
-    let e_host = Engine::start(Box::new(NoHostTor(t_host)), vec![ContactCfg::new(id, &host, db)], timing);
+    let timing = Timing { min_backoff: Duration::from_secs(2), ..Timing::default() };
+    let e_host = Engine::start(Box::new(NoHostTor(t_host)), vec![ContactCfg::new(id, &host, db).with_caps(false, false)], timing);
     let e_dialer = Engine::start(Box::new(t_dialer), vec![ContactCfg::new(id, &dialer, hb)], timing);
     let limit = Duration::from_secs(420);
     assert!(wait(&e_host, limit, |e| matches!(e, Event::Connected { .. })), "the side that cannot host never connected");
-    assert!(wait(&e_dialer, limit, |e| matches!(e, Event::Connected { .. })), "the hosting fallback never connected");
+    assert!(wait(&e_dialer, limit, |e| matches!(e, Event::Connected { .. })), "the side that can host never connected");
     e_host.send(id, Zeroizing::new("from the side that cannot host".into()));
     e_dialer.send(id, Zeroizing::new("from the side that hosts".into()));
     assert!(wait(&e_dialer, Duration::from_secs(90), |e| matches!(e, Event::Message { text, .. } if &***text == "from the side that cannot host")));

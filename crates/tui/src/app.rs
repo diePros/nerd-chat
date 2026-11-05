@@ -44,13 +44,16 @@ pub struct Config {
     pub tor: TorCfg,
     pub transport: Option<TransportFactory>,
     pub timing: Timing,
+    /// Our Tor cannot host onion services (e.g. a Tails with a restricted control port): said in our exported bundles, so the
+    /// contact hosts for us and nothing needs to be published speculatively. (`--cannot-host`; `--probe-tor --probe-onion` tells you.)
+    pub can_host: bool,
     /// Start even though swap is active (secrets could be written to the disk by the OS). Default: refuse.
     pub allow_swap: bool,
 }
 
 impl Config {
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), allow_swap: false }
+        Self { path, counter, keyfile, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, allow_swap: false }
     }
 }
 
@@ -458,6 +461,7 @@ impl App {
             Key::Char('a') => self.reply_offer(true),
             Key::Char('r') => self.reply_offer(false),
             Key::Char('s') => self.start_save(),
+            Key::Char('h') => self.toggle_host_anyway(),
             Key::Enter => self.open_chat(),
             Key::Char('v') => self.start_verify(),
             Key::Char('d') => if self.sel_name().is_some() { self.open_prompt(Prompt::ConfirmDelete, "") },
@@ -516,6 +520,27 @@ impl App {
         let dir = std::env::current_dir().unwrap_or_default();
         let name = format!("{}/file-{}.{}", dir.display(), b.iter().map(|x| format!("{x:02x}")).collect::<String>(), r.ext);
         self.open_prompt(Prompt::SaveFile, &name);
+    }
+
+    /// Option C: host an onion service for the selected contact although the roles would make us only dial.
+    fn toggle_host_anyway(&mut self) {
+        let i = self.sel;
+        let can = self.cfg.can_host;
+        let Some(c) = self.vf.as_mut().and_then(|v| v.store.contacts.get_mut(i)) else { return self.err("No contact selected.") };
+        if c.peer.is_none() { return self.err("Pair or import this contact first."); }
+        if !can { return self.err("Your Tor cannot host (--cannot-host): 'host anyway' is impossible."); }
+        c.host_anyway = !c.host_anyway;
+        let on = c.host_anyway;
+        if self.save() {
+            self.engine_add(i);
+            if on { self.err("HOST ANYWAY is ON for this contact: while online you publish an onion service for them, so anyone holding THEIR copy of your bundle can see when you are online. Use only if they cannot host (their bundle said so wrongly)."); }
+            else { self.ok("Host anyway is off: you only host for this contact when the roles say so."); }
+        }
+    }
+
+    pub fn contact_caps(&self) -> Option<(bool, bool)> {
+        let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
+        Some((c.peer.as_ref().is_none_or(|p| p.can_host), c.host_anyway))
     }
 
     fn sel_name(&mut self) -> Option<String> {
@@ -621,9 +646,10 @@ impl App {
                 }
             }
             Prompt::Export => {
+                let can_host = self.cfg.can_host;
                 let Some(c) = self.cur() else { return };
                 let id = &c.identity;
-                let armored = file::armor(&Bundle::from_identity(id).encode(id));
+                let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
                 let path = PathBuf::from(&text);
                 match fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(armored.as_bytes())) {
                     Ok(()) => self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())),
@@ -640,7 +666,7 @@ impl App {
                         Err(_) => self.err("Not a valid Seburity contact file."),
                         Ok(b) => {
                             let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
-                            if b == mine { self.err("That is YOUR OWN bundle, not the other person's."); return; }
+                            if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return; }
                             if self.onion_collision(self.sel, &b) { self.err("Refused: this bundle reuses an onion address that another contact (or you) already has."); return; }
                             let (peer, trust) = ImportedContact::from_file(b).into_parts();
                             let c = self.cur().expect("selected");
@@ -711,7 +737,7 @@ impl App {
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
         if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
+        let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()).map(|(o, c)| (o.with_can_host(self.cfg.can_host), c)) { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
         let (ident, id) = self.identity_clone();
@@ -753,7 +779,7 @@ impl App {
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let join = match parsed { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
+        let join = match parsed.map(|j| j.with_can_host(self.cfg.can_host)) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -796,7 +822,7 @@ impl App {
 
     fn start_online(&mut self) {
         let Some(vf) = self.vf.as_ref() else { return };
-        let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| c.peer.as_ref().map(|p| ContactCfg::new(c.id, &c.identity, p.clone()))).collect();
+        let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| c.peer.as_ref().map(|p| ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.cfg.can_host, c.host_anyway))).collect();
         self.started_ids = contacts.iter().map(|c| c.id).collect();
         let (factory, tor, timing) = (self.cfg.transport.clone(), self.cfg.tor.clone(), self.cfg.timing);
         let (tx, rx) = channel();
@@ -819,7 +845,7 @@ impl App {
     fn engine_add(&mut self, idx: usize) {
         let Some(e) = &self.engine else { return };
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)) else { return };
-        if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone())); }
+        if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.cfg.can_host, c.host_anyway)); }
     }
 
     /// A peer bundle must not reuse an onion key that another contact already uses (ours or theirs): a crafted bundle
@@ -878,7 +904,7 @@ impl App {
         for id in self.started_ids.difference(&now) { e.remove(*id); }
         if let Some(v) = self.vf.as_ref() {
             for c in v.store.contacts.iter().filter(|c| !self.started_ids.contains(&c.id)) {
-                if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone())); }
+                if let Some(p) = &c.peer { e.add(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.cfg.can_host, c.host_anyway)); }
             }
         }
         self.started_ids = now;
@@ -1301,7 +1327,7 @@ mod tests {
     // ---------- online + chat (over the in-memory network) ----------
     fn fast_timing() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(150), idle: Duration::from_secs(2),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0, host_fallback_after: 3 }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
     }
 
     fn net_app(dir: &std::path::Path, name: &str, net: &seburity_chat::MemNet) -> App {
@@ -1485,6 +1511,35 @@ mod tests {
         a.handle(Key::Char('o'));
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline && !is_linked(x[1])));
         assert!(b.offers.is_empty(), "offer must not outlive the connection");
+    }
+
+    #[test]
+    fn capability_travels_with_pairing_and_host_anyway_is_a_saved_explicit_choice() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        a.cfg.can_host = false;                                   // a's Tor cannot host: says so in the bundle it sends
+        link_apps(&mut a, &mut b, d.path());
+        assert!(!b.vf.as_ref().unwrap().store.contacts[0].peer.as_ref().unwrap().can_host, "b must learn that a cannot host");
+        assert!(a.vf.as_ref().unwrap().store.contacts[0].peer.as_ref().unwrap().can_host);
+        // host anyway: refused when WE cannot host, saved and applied when we can
+        a.handle(Key::Char('h')); assert!(a.error && !a.vf.as_ref().unwrap().store.contacts[0].host_anyway);
+        b.handle(Key::Char('h'));
+        assert!(b.error && b.status.contains("HOST ANYWAY is ON") && b.vf.as_ref().unwrap().store.contacts[0].host_anyway);
+        b.handle(Key::Char('h'));
+        assert!(!b.error && !b.vf.as_ref().unwrap().store.contacts[0].host_anyway);
+        b.handle(Key::Char('h'));
+        let path = d.path().join("b.vault");
+        drop(b);
+        let mut b2 = App::new(cfg(Some(path)));
+        type_str(&mut b2, "correct horse battery"); b2.handle(Key::Enter);
+        assert!(b2.vf.as_ref().unwrap().store.contacts[0].host_anyway, "the choice must survive the vault");
+        // the exported file carries the capability
+        let f = d.path().join("own.sbc");
+        a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
+        let txt = std::fs::read_to_string(&f).unwrap();
+        assert!(!seburity_exchange::file::dearmor(&txt).unwrap().can_host, "the exported bundle must say that this Tor cannot host");
     }
 
     #[test]

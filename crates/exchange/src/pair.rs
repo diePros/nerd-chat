@@ -108,7 +108,7 @@ fn display(d: &[u8; CODE_DIGITS]) -> Zeroizing<String> {
 
 // ---------- public API ----------
 /// Offer side. There is deliberately NO way to rebuild an offer from its digits.
-pub struct PairingOffer { code: Zeroizing<[u8; CODE_DIGITS]>, expires: Instant, lockout: Arc<Lockout>, deadline: Duration }
+pub struct PairingOffer { code: Zeroizing<[u8; CODE_DIGITS]>, expires: Instant, lockout: Arc<Lockout>, deadline: Duration, can_host: bool }
 
 impl PairingOffer {
     /// Returns the offer and the digits to show the user. Fails while locked out.
@@ -118,24 +118,26 @@ impl PairingOffer {
         lockout.guard()?;
         let code = fresh_digits();
         let shown = display(&code);
-        Ok((Self { code, expires: Instant::now() + OFFER_TTL, lockout, deadline: PAIR_DEADLINE }, shown))
+        Ok((Self { code, expires: Instant::now() + OFFER_TTL, lockout, deadline: PAIR_DEADLINE, can_host: true }, shown))
     }
 
     pub fn expires_in(&self) -> Duration { self.expires.saturating_duration_since(Instant::now()) }
     pub fn with_deadline(mut self, d: Duration) -> Self { self.deadline = d; self }
+    /// Our capability, carried in the bundle we send (false = our Tor cannot host onion services).
+    pub fn with_can_host(mut self, can_host: bool) -> Self { self.can_host = can_host; self }
 
     /// Consumes the offer: ONE attempt, success or failure. The listener must stop accepting connections afterwards.
     pub fn accept<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
         if Instant::now() >= self.expires { return Err(ExchangeError::Expired); }
         self.lockout.guard()?;
-        let r = run(Role::A, s, me, &self.code, self.deadline, None);
+        let r = run(Role::A, s, me, &self.code, self.deadline, self.can_host, None);
         if r.is_ok() { self.lockout.ok() } else { self.lockout.fail() }
         r
     }
 }
 
 /// Join side: the user types the code.
-pub struct PairingJoin { code: Zeroizing<[u8; CODE_DIGITS]>, lockout: Arc<Lockout>, deadline: Duration }
+pub struct PairingJoin { code: Zeroizing<[u8; CODE_DIGITS]>, lockout: Arc<Lockout>, deadline: Duration, can_host: bool }
 
 impl PairingJoin {
     /// Accepts `12345-67890`, spaces, or plain digits.
@@ -150,14 +152,15 @@ impl PairingJoin {
             n += 1;
         }
         if n != CODE_DIGITS { return Err(ExchangeError::BadCode); }
-        Ok(Self { code, lockout, deadline: PAIR_DEADLINE })
+        Ok(Self { code, lockout, deadline: PAIR_DEADLINE, can_host: true })
     }
 
     pub fn with_deadline(mut self, d: Duration) -> Self { self.deadline = d; self }
+    pub fn with_can_host(mut self, can_host: bool) -> Self { self.can_host = can_host; self }
 
     pub fn join<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
         self.lockout.guard()?;
-        let r = run(Role::B, s, me, &self.code, self.deadline, None);
+        let r = run(Role::B, s, me, &self.code, self.deadline, self.can_host, None);
         if r.is_ok() { self.lockout.ok() } else { self.lockout.fail() }
         r
     }
@@ -249,7 +252,7 @@ fn check_point(msg: &[u8]) -> Result<(), ExchangeError> {
 /// I/O order: B (the joiner) always speaks first, so a listener stays SILENT until a joiner
 /// writes (a port scanner gets no Seburity banner). Outcome note: the last message is A's confirmation
 /// cell, so if it is lost A may have committed while B failed; users should confirm on both sides.
-fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
+fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, can_host: bool, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
     let mut b = Bounded { s: stream, end: Instant::now() + deadline };
     let pw = Password::new(&code[..]);
     let (st, my_msg) = match role {
@@ -275,7 +278,7 @@ fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[
     if !ct_eq(&their_tag, &their_expected) { return Err(ExchangeError::PairingFailed); }
 
     // 3. Bundle exchange (encrypted under K, role+transcript in AAD)
-    let me_b = Bundle::from_identity(me);
+    let me_b = Bundle::from_identity(me).with_can_host(can_host);
     let my_enc = claimed.unwrap_or_else(|| me_b.encode(me));
     let cipher = XChaCha20Poly1305::new((&*k_enc).into());
     let seal = |role: Role, pt: &[u8]| -> Result<Vec<u8>, ExchangeError> {
@@ -294,7 +297,7 @@ fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[
     let peer_enc = open(role.other(), &peer_enc_frame)?;
     if peer_enc.len() != BUNDLE_LEN { return Err(ExchangeError::Malformed); }
     let theirs = Bundle::decode(&peer_enc).map_err(|_| ExchangeError::Malformed)?;
-    if theirs == me_b { return Err(ExchangeError::ProofFailed); }
+    if theirs.sign_pub == me_b.sign_pub { return Err(ExchangeError::ProofFailed); } // reflection (compare KEYS, the capability may differ)
 
     // 4. Proof of possession of the Ed25519 key, bound to this exact transcript and both bundles
     let (ea, eb) = if role == Role::A { (&my_enc[..], &peer_enc[..]) } else { (&peer_enc[..], &my_enc[..]) };
@@ -474,7 +477,7 @@ mod tests {
         let alice = ContactIdentity::generate();
         let ta = thread::spawn(move || o.accept(&mut sa, &alice).err());
         let mallory = ContactIdentity::generate();
-        let r = run(Role::B, &mut sm, &mallory, b"5555555555", Duration::from_secs(10), Some(carol_enc));
+        let r = run(Role::B, &mut sm, &mallory, b"5555555555", Duration::from_secs(10), true, Some(carol_enc));
         assert!(r.is_err());
         assert_eq!(ta.join().unwrap(), Some(ExchangeError::ProofFailed));
     }

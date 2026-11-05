@@ -4,7 +4,9 @@ use zeroize::Zeroizing;
 
 pub const MAX_CONTACTS: usize = 1024;
 pub const MAX_NAME: usize = 64;
-const MAGIC: &[u8; 4] = b"SBS2";
+const MAGIC: &[u8; 4] = b"SBS3";
+/// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS3.
+const MAGIC_V2: &[u8; 4] = b"SBS2";
 
 /// One contact = one fresh keypair set (unlinkable across contacts) + the peer's public bundle once known.
 pub struct Contact {
@@ -14,6 +16,9 @@ pub struct Contact {
     pub peer: Option<Bundle>,
     /// How far the peer's identity is authenticated (never a single bool).
     pub trust: Trust,
+    /// User choice: host an onion service for this contact even when the roles would make us only dial (e.g. the contact
+    /// flipped to dialing because its Tor cannot host but its bundle claims it can). Exposes our presence to holders of the bundle.
+    pub host_anyway: bool,
 }
 
 impl std::fmt::Debug for Contact {
@@ -45,14 +50,14 @@ impl Store {
         if self.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Duplicate); }
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).expect("OS RNG unavailable");
-        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified });
+        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false });
         Ok(self.contacts.len() - 1)
     }
 
     pub fn remove(&mut self, idx: usize) { if idx < self.contacts.len() { self.contacts.remove(idx); } }
 
     /// Serialize (wiped on drop). Format: magic | count:u16 | per contact:
-    /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1 verified) | [sign[32] dh[32] kem[1184]]
+    /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1/2 trust, bit3 host_anyway, bit4 peer can_host) | [sign[32] dh[32] kem[1184]]
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         let mut v = Zeroizing::new(Vec::new());
         v.extend_from_slice(MAGIC);
@@ -63,7 +68,7 @@ impl Store {
             v.extend_from_slice(c.name.as_bytes());
             v.extend_from_slice(&c.identity.secret_bytes());
             let t = match c.trust { Trust::Unverified => 0, Trust::CodeAuthenticated => 1 << 1, Trust::SafetyVerified => 1 << 2 };
-            v.push(c.peer.is_some() as u8 | t);
+            v.push(c.peer.is_some() as u8 | t | (c.host_anyway as u8) << 3 | (c.peer.as_ref().is_some_and(|p| p.can_host) as u8) << 4);
             if let Some(p) = &c.peer {
                 v.extend_from_slice(&p.sign_pub);
                 v.extend_from_slice(&p.dh_pub);
@@ -77,7 +82,9 @@ impl Store {
 
     pub fn decode(b: &[u8]) -> Result<Self, StoreError> {
         let mut r = Reader(b);
-        if r.take(4)? != MAGIC { return Err(StoreError::Corrupt); }
+        let magic = r.take(4)?;
+        let v3 = magic == MAGIC;
+        if !v3 && magic != MAGIC_V2 { return Err(StoreError::Corrupt); }
         let n = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
         if n > MAX_CONTACTS { return Err(StoreError::Corrupt); }
         let mut s = Store::new();
@@ -88,18 +95,21 @@ impl Store {
             if !valid_name(&name) || s.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Corrupt); }
             let identity = ContactIdentity::from_secret_bytes(r.take(SECRET_LEN)?).ok_or(StoreError::Corrupt)?;
             let flags = r.take(1)?[0];
-            if flags & !0b111 != 0 || (flags & 0b110) == 0b110 { return Err(StoreError::Corrupt); }
-            if flags & 1 == 0 && flags != 0 { return Err(StoreError::Corrupt); } // trust without a peer
+            let allowed = if v3 { 0b1_1111 } else { 0b111 };
+            if flags & !allowed != 0 || (flags & 0b110) == 0b110 { return Err(StoreError::Corrupt); }
+            // trust or a capability without a peer is corrupt; host_anyway may exist without one
+            if flags & 1 == 0 && flags & !0b1000 != 0 { return Err(StoreError::Corrupt); }
+            let (host_anyway, peer_can_host) = (flags & 0b1000 != 0, !v3 || flags & 0b1_0000 != 0);
             let peer = if flags & 1 != 0 {
                 let sign: [u8; 32] = r.take(32)?.try_into().unwrap();
                 let dh: [u8; 32] = r.take(32)?.try_into().unwrap();
                 let onion: [u8; 32] = r.take(32)?.try_into().unwrap();
                 let auth: [u8; 32] = r.take(32)?.try_into().unwrap();
                 let kem: [u8; KEM_PUB_LEN] = r.take(KEM_PUB_LEN)?.try_into().unwrap();
-                Some(Bundle::from_parts(sign, dh, onion, auth, kem).map_err(|_| StoreError::Corrupt)?)
+                Some(Bundle::from_parts(sign, dh, onion, auth, peer_can_host, kem).map_err(|_| StoreError::Corrupt)?)
             } else { None };
             let trust = match flags & 0b110 { 0b010 => Trust::CodeAuthenticated, 0b100 => Trust::SafetyVerified, _ => Trust::Unverified };
-            s.contacts.push(Contact { id, name, identity, peer, trust });
+            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway });
         }
         if !r.0.is_empty() { return Err(StoreError::Corrupt); }
         Ok(s)
@@ -119,6 +129,34 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_and_host_anyway_roundtrip_and_old_vaults_still_load() {
+        let mut s = Store::new();
+        let a = s.add_contact("alice").unwrap();
+        let b = s.add_contact("bob").unwrap();
+        s.contacts[a].host_anyway = true;                                              // allowed without a peer
+        s.contacts[b].peer = Some(Bundle::from_identity(&ContactIdentity::generate()).with_can_host(false));
+        let d = Store::decode(&s.encode()).unwrap();
+        assert!(d.contacts[a].host_anyway && !d.contacts[b].host_anyway);
+        assert!(!d.contacts[b].peer.as_ref().unwrap().can_host, "peer's 'cannot host' must survive the vault");
+        // an SBS2 vault (written before these bits existed) loads with can_host = true, host_anyway = false
+        let mut s2 = Store::new();
+        let i = s2.add_contact("carol").unwrap();
+        s2.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
+        let mut old = s2.encode().to_vec(); old[..4].copy_from_slice(b"SBS2");
+        // SBS2 had flags with bit4 clear; our SBS3 encode set it (can_host = true): clear it as the old writer would have
+        let flags_at = 4 + 2 + 8 + 1 + "carol".len() + SECRET_LEN;
+        old[flags_at] &= !0b1_0000;
+        let d2 = Store::decode(&old).unwrap();
+        assert!(d2.contacts[0].peer.as_ref().unwrap().can_host && !d2.contacts[0].host_anyway);
+        // new bits in an SBS2 vault are corrupt
+        let mut bad = old.clone(); bad[flags_at] |= 0b1000; assert!(Store::decode(&bad).is_err());
+        // a capability bit without a peer is corrupt
+        let mut e = Store::new(); e.add_contact("dave").unwrap();
+        let mut enc = e.encode().to_vec(); let at = 4 + 2 + 8 + 1 + "dave".len() + SECRET_LEN; enc[at] |= 0b1_0000;
+        assert!(Store::decode(&enc).is_err());
+    }
 
     #[test]
     fn roundtrip_with_and_without_peer() {

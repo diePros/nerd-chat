@@ -50,6 +50,9 @@ After the contacts have each other's keys (section 3 or 4), in BOTH terminals:
 ```bash
 # press  o   (go online): Seburity starts its own Tor in a private RAM directory; the title bar shows "starting tor NN%"
 # when it says ONLINE, the contact list shows a green dot next to a contact once the connection is up
+# HOSTING: if your Tor cannot host onion services (Tails with a restricted control port; check ./seburity --probe-tor --probe-onion),
+#   start with --cannot-host BEFORE exporting/pairing: your bundle then says so and the contact hosts for you. h on a contact = 'host anyway'
+#   (use only if their bundle claims it can host but its Tor refuses; it makes your online status visible to holders of your bundle).
 # FILES (select a connected contact): f = send a JPEG/PNG (metadata stripped, other formats refused), t = send plain text,
 #   a / r = accept / decline an offer (nothing is sent before you accept), s = save under a neutral name (never overwrites), r = discard.
 #   Files live in RAM only until saved. Offline cleaning: ./seburity --strip IN OUT   (see docs/FILE_SHARING.md for the limits)
