@@ -42,6 +42,9 @@ fn the_helper_runs_under_hard_resource_limits() {
     assert_eq!(get("Max processes"), "0 0", "{limits}");
     assert_eq!(get("Max core file size"), "0 0", "{limits}");
     assert_eq!(get("Max cpu time"), "30 30", "{limits}");
+    assert_eq!(get("Max address space"), "1073741824 1073741824", "{limits}");
+    let status = std::fs::read_to_string(format!("/proc/{}/status", c.id())).unwrap_or_default();
+    assert!(status.lines().any(|l| l.starts_with("NoNewPrivs:") && l.ends_with('1')), "no_new_privs must be set: {status}");
     drop(c.stdin.take());
     let _ = c.wait();
 }

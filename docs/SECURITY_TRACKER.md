@@ -225,7 +225,7 @@ No Critical. Opus review integrated:
 | R9-L5 | peer-driven status spam / overwriting warnings | PARTIAL | max 6 notices/min per connection, 6 bad frames then disconnect (test). FIXED (cycle 14): integrity/refusal/unexpected-data notices are `alert`s kept in a sticky red bar until acknowledged with `z` (max 5, wiped on panic) |
 | R9-L6 | offer revealed exact length; decline timing is a presence oracle | PARTIAL | offer carries only the bucket (length inside the accepted stream). OPEN: manual vs auto-decline timing (documented) |
 | R9-I | TooLarge message, stale doc claims, single-key accept without contact name | FIXED | message says 8 MiB, docs rewritten, accept/decline status names the contact |
-| R9-open | fuzz harness / standalone strip / sandboxing | PARTIAL | DONE: deterministic mutation fuzz test (`mutated_inputs_never_panic`, 16k inputs per run), `seburity --strip IN OUT`. FIXED (cycle 24, dependency-free): the parsers run in a resource-limited helper process (no fds, no file writes, no fork, CPU/memory/time caps, strict decoding of its answer; docs/FILE_SHARING.md). OPEN: seccomp/Landlock (dependency or `unsafe`; user decision), libFuzzer/cargo-fuzz target (needs nightly) |
+| R9-open | fuzz harness / standalone strip / sandboxing | PARTIAL | DONE: deterministic mutation fuzz test (`mutated_inputs_never_panic`, 16k inputs per run), `seburity --strip IN OUT`. PARTIAL (cycles 24-25, dependency-free): the parsers run in a helper process with CPU/memory/time caps, no_new_privs, own session, kill-with-parent, strict decoding of its answer (docs/FILE_SHARING.md): crash/DoS containment only. A COMPROMISED parser is NOT contained (it can free fd slots and open files/sockets, write via shared mmap, unlink, execve, signal the parent: review 17). OPEN: seccomp/Landlock (dependency or `unsafe`; user decision), libFuzzer/cargo-fuzz target (needs nightly) |
 | R10-self | while testing the new CLI I found the save error path unlinked an EXISTING file the user tried to overwrite (TUI save and `--strip`) and an arithmetic overflow in the PNG size calculation (panic = abort would kill the app) | FIXED | create_new first, only remove a file we created; u128 arithmetic; regression tests |
 
 ## Review 10 — file sharing, round 2 (commits b60636e, 8f24120)
@@ -303,3 +303,12 @@ Not re-reviewed after these fixes (small, test-covered).
 | R16-2 | tests did not prove "proposed only after the service runs" / the fallback credential handling | FIXED | the retry test asserts the new service already ran when the OFFER arrives; the fallback-end test asserts the forget call |
 | R16-3 | the retry could never recover from a broken control connection and promised "retrying" | PARTIAL | broken-connection errors stop the retry and say to go offline/online. OPEN: healing swaps the control connection and tor drops all non-detached services (pre-existing `healthy_ctl` hazard, R8-L5 area) |
 | R16-4/5 | fixed 60 s retry, no cap/jitter; fallback setup failure was silent | PARTIAL | failure now produces a notice. OPEN (minor): jitter/cap; ADD_ONION still synchronous on the engine thread (R8-L5) |
+
+## Review 17 (Opus, f4e8993 cleaning helper) — integrated in cycle 25
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R17-1 | HIGH: docs/code/tracker claimed the rlimits sandbox a compromised parser (they do not: fd slots can be freed, mmap writes, unlink, execve, signals, /dev/tty) | FIXED (claims) | all claims corrected; `no_new_privs`, `setsid`, death signal, all-limits-or-die, refuse root added; real containment = seccomp/Landlock (open, user decision) |
+| R17-2 | parent could block forever in `child.wait()` after the helper closed stdout | FIXED | `try_wait` loop under the 25 s deadline, then kill |
+| R17-3 | helper could outlive a panic wipe/exit holding plaintext | FIXED | PR_SET_PDEATHSIG(SIGKILL) in the helper (fires when the spawning thread/parent ends) |
+| R17-4 | unzeroized copies (decoded data on error paths, worker buffers skipped by `process::exit`) | FIXED | wiped on the error paths; worker drops its buffers before exit |
+| R17-I | setrlimit errors ignored; rustix `unshare` (network namespace) is `unsafe` so it was NOT added | FIXED/INFO | limit failures abort the helper; no netns without `unsafe` |

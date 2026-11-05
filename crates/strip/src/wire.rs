@@ -93,7 +93,11 @@ pub fn decode_response(b: &[u8]) -> Result<Cleaned, StripError> {
             _ => None,
         }
     })();
-    match res { Some(x) if r.0.is_empty() => x, _ => Err(garbage()) }
+    match res {
+        Some(x) if r.0.is_empty() => x,
+        Some(Ok(mut c)) => { zeroize::Zeroize::zeroize(&mut c.data); Err(garbage()) } // rejected for trailing bytes: do not leave the copy
+        _ => Err(garbage()),
+    }
 }
 
 #[cfg(test)]
