@@ -21,7 +21,7 @@ use seburity_core::{bundle::Bundle, identity::ContactIdentity};
 use seburity_net::{guard::HandshakeGuard, link};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, mpsc::{channel, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
+    sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, mpsc::{channel, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -109,18 +109,25 @@ pub(crate) enum ConnEvent {
 }
 pub(crate) enum In { Cmd(Command), Conn(ConnEvent) }
 
-pub struct Engine { tx: Sender<In>, pub events: Receiver<Event>, handle: Option<JoinHandle<()>> }
+pub struct Engine { tx: Sender<In>, pub events: Receiver<Event>, handle: Option<JoinHandle<()>>, live: Arc<AtomicUsize> }
+
+/// Counts running connection threads (they hold file buffers of up to 8 MiB): `stop` waits for them so a panic wipe really drops them.
+struct LiveGuard(Arc<AtomicUsize>);
+impl LiveGuard { fn new(c: &Arc<AtomicUsize>) -> Self { c.fetch_add(1, Ordering::SeqCst); Self(c.clone()) } }
+impl Drop for LiveGuard { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); } }
 
 impl Engine {
     pub fn start(transport: Box<dyn Transport>, contacts: Vec<ContactCfg>, timing: Timing) -> Engine {
         let (tx, rx) = channel();
         let (ev_tx, ev_rx) = channel();
         let tx2 = tx.clone();
+        let live = Arc::new(AtomicUsize::new(0));
+        let live2 = live.clone();
         let handle = thread::spawn(move || {
             let dial = transport.dial_fn();
             let mut core = Core {
                 transport, dial, rts: HashMap::new(), in_tx: tx2, ev: ev_tx, t: timing, gen: Arc::new(AtomicU64::new(0)),
-                epoch: Instant::now(), budget: Arc::new(Budget::new(timing.handshakes_per_sec)), next_epoch: 0,
+                epoch: Instant::now(), budget: Arc::new(Budget::new(timing.handshakes_per_sec)), next_epoch: 0, live: live2,
             };
             for c in contacts { core.add(c); }
             loop {
@@ -133,7 +140,7 @@ impl Engine {
             }
             core.shutdown();
         });
-        Engine { tx, events: ev_rx, handle: Some(handle) }
+        Engine { tx, events: ev_rx, handle: Some(handle), live }
     }
 
     pub fn add(&self, c: ContactCfg) { let _ = self.tx.send(In::Cmd(Command::Add(c))); }
@@ -171,6 +178,8 @@ impl Engine {
             let end = Instant::now() + wait;
             while !h.is_finished() && Instant::now() < end { thread::sleep(Duration::from_millis(10)); }
             if h.is_finished() { let _ = h.join(); }
+            // connection threads end on their own after Close; wait (bounded) so their transfer buffers are dropped (zeroized)
+            while self.live.load(Ordering::SeqCst) > 0 && Instant::now() < end { thread::sleep(Duration::from_millis(10)); }
         }
     }
 }
@@ -209,6 +218,7 @@ struct Core {
     epoch: Instant,
     budget: Arc<Budget>,
     next_epoch: u64,
+    live: Arc<AtomicUsize>,
 }
 
 fn jitter(d: Duration) -> Duration {
@@ -274,7 +284,7 @@ impl Core {
     }
 
     fn spawn_acceptor(&self, id: [u8; 8], secret: Zeroizing<Vec<u8>>, peer: Bundle, rx: Receiver<BoxStream>, guard: Arc<Mutex<HandshakeGuard>>, stop: Arc<AtomicBool>, epoch: u64) {
-        let (in_tx, gen, started, t, budget) = (self.in_tx.clone(), self.gen.clone(), self.epoch, self.t, self.budget.clone());
+        let (in_tx, gen, started, t, budget, live) = (self.in_tx.clone(), self.gen.clone(), self.epoch, self.t, self.budget.clone(), self.live.clone());
         let slots: Slots = Arc::new(Mutex::new(Vec::new()));
         let next_slot = Arc::new(AtomicU64::new(0));
         thread::spawn(move || {
@@ -289,8 +299,8 @@ impl Core {
                             if s.len() >= MAX_HANDSHAKE_SLOTS { if let Some((_, old)) = s.first() { old.store(true, Ordering::SeqCst); } }
                             s.push((slot, abort.clone()));
                         }
-                        let (secret, peer, guard, in_tx, gen, slots2, budget) = (secret.clone(), peer.clone(), guard.clone(), in_tx.clone(), gen.clone(), slots.clone(), budget.clone());
-                        thread::spawn(move || inbound(stream, secret, peer, guard, started, gen, in_tx, id, epoch, t, budget, abort, slots2, slot));
+                        let (secret, peer, guard, in_tx, gen, slots2, budget, live) = (secret.clone(), peer.clone(), guard.clone(), in_tx.clone(), gen.clone(), slots.clone(), budget.clone(), live.clone());
+                        thread::spawn(move || inbound(stream, secret, peer, guard, started, gen, in_tx, id, epoch, t, budget, abort, slots2, slot, live));
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -385,7 +395,8 @@ impl Core {
             let rt = self.rts.get_mut(&id).expect("exists");
             rt.dialing = true;
             let (dial, secret, peer, iso, in_tx, gen, epoch, t) = (self.dial.clone(), rt.secret.clone(), rt.peer.clone(), rt.iso, self.in_tx.clone(), self.gen.clone(), rt.epoch, self.t);
-            thread::spawn(move || outbound(dial, secret, peer, iso, in_tx, gen, id, epoch, t));
+            let live = self.live.clone();
+            thread::spawn(move || outbound(dial, secret, peer, iso, in_tx, gen, id, epoch, t, live));
         }
     }
 
@@ -397,7 +408,7 @@ impl Core {
 
 #[allow(clippy::too_many_arguments)]
 fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guard: Arc<Mutex<HandshakeGuard>>, started: Instant, gen: Arc<AtomicU64>,
-           in_tx: Sender<In>, id: [u8; 8], epoch: u64, t: Timing, budget: Arc<Budget>, abort: Arc<AtomicBool>, slots: Slots, slot: u64) {
+           in_tx: Sender<In>, id: [u8; 8], epoch: u64, t: Timing, budget: Arc<Budget>, abort: Arc<AtomicBool>, slots: Slots, slot: u64, live: Arc<AtomicUsize>) {
     let release = |slots: &Slots| slots.lock().unwrap().retain(|(s, _)| *s != slot);
     let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return release(&slots) };
     let r = {
@@ -406,6 +417,7 @@ fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guar
     };
     release(&slots);
     if let Ok((sess, _first)) = r {
+        let _live = LiveGuard::new(&live);
         let g = gen.fetch_add(1, Ordering::SeqCst) + 1;
         let (otx, orx) = channel();
         if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, epoch, tx: otx })).is_err() { return; }
@@ -414,7 +426,7 @@ fn inbound(mut stream: BoxStream, secret: Zeroizing<Vec<u8>>, peer: Bundle, guar
 }
 
 #[allow(clippy::too_many_arguments)]
-fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing) {
+fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16], in_tx: Sender<In>, gen: Arc<AtomicU64>, id: [u8; 8], epoch: u64, t: Timing, live: Arc<AtomicUsize>) {
     let fail = |in_tx: &Sender<In>, unreachable: bool| { let _ = in_tx.send(In::Conn(ConnEvent::DialFailed { id, epoch, unreachable })); };
     let Some(me) = ContactIdentity::from_secret_bytes(&secret) else { return fail(&in_tx, false) };
     let Ok(mut stream) = dial(&peer, &iso) else { return fail(&in_tx, true) };
@@ -423,6 +435,7 @@ fn outbound(dial: DialFn, secret: Zeroizing<Vec<u8>>, peer: Bundle, iso: [u8; 16
         link::dial(&mut ds, &me, &peer, &proto::keepalive())
     };
     let Ok(sess) = r else { return fail(&in_tx, false) };
+    let _live = LiveGuard::new(&live);
     let g = gen.fetch_add(1, Ordering::SeqCst) + 1;
     let (otx, orx) = channel();
     if in_tx.send(In::Conn(ConnEvent::Up { id, gen: g, epoch, tx: otx })).is_err() { return; }

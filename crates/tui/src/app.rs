@@ -605,9 +605,14 @@ impl App {
                 let Some(r) = self.inbox.get(&id) else { return };
                 use std::os::unix::fs::OpenOptionsExt;
                 let path = PathBuf::from(&text);
-                match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).and_then(|mut f| f.write_all(&r.data).and_then(|_| f.sync_all())) {
+                // create_new first: an EXISTING file is never touched; only a file we created is removed on a write error
+                let mut f = match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+                    Ok(f) => f,
+                    Err(e) => return self.err(format!("Cannot save (nothing was overwritten): {e}")),
+                };
+                match f.write_all(&r.data).and_then(|_| f.sync_all()) {
                     Ok(()) => { self.inbox.remove(&id); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
-                    Err(e) => { let _ = fs::remove_file(&path); self.err(format!("Cannot save: {e}")) }
+                    Err(e) => { drop(f); let _ = fs::remove_file(&path); self.err(format!("Cannot save: {e}")) }
                 }
             }
             Prompt::Export => {
@@ -1378,7 +1383,6 @@ mod tests {
         let saved = std::fs::read(&dst).unwrap();
         assert!(!saved.windows(6).any(|w| w == b"Exif\0\0") && !saved.windows(10).any(|w| w == b"GPS-SECRET"), "metadata reached the disk");
         assert!(b.file_state().is_none(), "file leaves RAM once saved");
-        // saving never overwrites
         // (second file) then panic with a file still in RAM
         a.handle(Key::Char('f'));
         type_str(&mut a, src.to_str().unwrap()); a.handle(Key::Enter);
@@ -1387,6 +1391,21 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))));
         b.panic_wipe();
         assert!(b.inbox.is_empty() && b.offers.is_empty());
+    }
+
+    /// Regression: the save error path used to unlink the path, destroying an EXISTING file the user tried to overwrite.
+    #[test]
+    fn saving_onto_an_existing_file_refuses_and_leaves_it_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        let id = a.sel_id().unwrap();
+        a.inbox.insert(id, Received { data: Zeroizing::new(b"new content".to_vec()), ext: "txt" });
+        let precious = d.path().join("precious");
+        std::fs::write(&precious, b"keep me").unwrap();
+        a.submit(Prompt::SaveFile, precious.to_str().unwrap().into());
+        assert!(a.error, "{}", a.status);
+        assert_eq!(std::fs::read(&precious).unwrap(), b"keep me", "existing file must survive");
+        assert!(a.inbox.contains_key(&id), "the received file stays in RAM so the user can pick another name");
     }
 
     #[test]

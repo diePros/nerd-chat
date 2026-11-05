@@ -155,6 +155,148 @@ fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
     Ok(Cleaned { format: Format::Jpeg, data: out, report: finish(dropped) })
 }
 
+// ---------------- zlib/deflate validator (no output kept) ----------------
+/// Validates a zlib stream EXACTLY: header, every deflate block, the Adler-32 trailer, and that nothing follows it. Output is
+/// only counted (bounded by `expect`), never stored, so a hostile stream cannot allocate. Used to prove the concatenated IDAT
+/// data is one well-formed image stream of exactly the size IHDR implies (no polyglot tail, no bytes after the stream).
+fn zlib_valid(z: &[u8], expect: usize) -> bool {
+    struct Bits<'a> { d: &'a [u8], pos: usize, bit: u32, nbits: u32 }
+    impl Bits<'_> {
+        fn need(&mut self, n: u32) -> Option<u32> {
+            while self.nbits < n { let b = *self.d.get(self.pos)?; self.pos += 1; self.bit |= (b as u32) << self.nbits; self.nbits += 8; }
+            let v = self.bit & ((1u32 << n) - 1); self.bit >>= n; self.nbits -= n; Some(v)
+        }
+    }
+    struct Huff { count: [u16; 16], symbol: Vec<u16> }
+    fn build(lengths: &[u8]) -> Option<Huff> {
+        let mut count = [0u16; 16];
+        for &l in lengths { count[l as usize] += 1; }
+        let mut left: i32 = 1;
+        for len in 1..16 { left = (left << 1) - count[len] as i32; if left < 0 { return None; } }
+        let mut offs = [0u16; 16];
+        for len in 1..15 { offs[len + 1] = offs[len] + count[len]; }
+        let mut symbol = vec![0u16; lengths.len()];
+        for (sym, &l) in lengths.iter().enumerate() { if l != 0 { symbol[offs[l as usize] as usize] = sym as u16; offs[l as usize] += 1; } }
+        Some(Huff { count, symbol })
+    }
+    fn decode(b: &mut Bits, h: &Huff) -> Option<u16> {
+        let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
+        for len in 1..16 {
+            code |= b.need(1)? as i32;
+            let c = h.count[len] as i32;
+            if code - c < first { return h.symbol.get((index + (code - first)) as usize).copied(); }
+            index += c; first += c; first <<= 1; code <<= 1;
+        }
+        None
+    }
+    const LBASE: [u16; 29] = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+    const LEXT: [u8; 29] = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+    const DBASE: [u16; 30] = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+    const DEXT: [u8; 30] = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+
+    if z.len() < 6 { return false; }
+    let (cmf, flg) = (z[0], z[1]);
+    if cmf & 0x0F != 8 || cmf >> 4 > 7 || ((cmf as u16) << 8 | flg as u16) % 31 != 0 || flg & 0x20 != 0 { return false; }
+    let mut b = Bits { d: &z[2..], pos: 0, bit: 0, nbits: 0 };
+    let mut win = vec![0u8; 32768];
+    let (mut out, mut a, mut bsum) = (0usize, 1u32, 0u32);
+    let mut emit = |byte: u8, win: &mut Vec<u8>, out: &mut usize| -> bool {
+        if *out >= expect { return false; }
+        win[*out & 32767] = byte; *out += 1;
+        a = (a + byte as u32) % 65521; bsum = (bsum + a) % 65521;
+        true
+    };
+    loop {
+        let Some(last) = b.need(1) else { return false };
+        let Some(ty) = b.need(2) else { return false };
+        match ty {
+            0 => {
+                b.bit = 0; b.nbits = 0; // drop to byte boundary
+                let Some(h) = b.d.get(b.pos..b.pos + 4) else { return false };
+                let (len, nlen) = (u16::from_le_bytes([h[0], h[1]]), u16::from_le_bytes([h[2], h[3]]));
+                if len != !nlen { return false; }
+                b.pos += 4;
+                let Some(data) = b.d.get(b.pos..b.pos + len as usize) else { return false };
+                for &byte in data { if !emit(byte, &mut win, &mut out) { return false; } }
+                b.pos += len as usize;
+            }
+            1 | 2 => {
+                let (lit, dist) = if ty == 1 {
+                    let mut l = [0u8; 288];
+                    for (i, v) in l.iter_mut().enumerate() { *v = if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 }; }
+                    let (Some(a), Some(c)) = (build(&l), build(&[5u8; 30])) else { return false };
+                    (a, c)
+                } else {
+                    let (Some(nlen), Some(ndist), Some(ncode)) = (b.need(5), b.need(5), b.need(4)) else { return false };
+                    let (nlen, ndist, ncode) = (nlen as usize + 257, ndist as usize + 1, ncode as usize + 4);
+                    if nlen > 286 || ndist > 30 { return false; }
+                    const ORDER: [usize; 19] = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+                    let mut cl = [0u8; 19];
+                    for &o in ORDER.iter().take(ncode) { let Some(v) = b.need(3) else { return false }; cl[o] = v as u8; }
+                    let Some(ch) = build(&cl) else { return false };
+                    let mut lens = vec![0u8; nlen + ndist];
+                    let mut i = 0;
+                    while i < nlen + ndist {
+                        let Some(sym) = decode(&mut b, &ch) else { return false };
+                        if sym < 16 { lens[i] = sym as u8; i += 1; continue; }
+                        let (prev, rep) = match sym {
+                            16 => { if i == 0 { return false; } let Some(r) = b.need(2) else { return false }; (lens[i - 1], 3 + r as usize) }
+                            17 => { let Some(r) = b.need(3) else { return false }; (0, 3 + r as usize) }
+                            _ => { let Some(r) = b.need(7) else { return false }; (0, 11 + r as usize) }
+                        };
+                        if i + rep > nlen + ndist { return false; }
+                        for _ in 0..rep { lens[i] = prev; i += 1; }
+                    }
+                    if lens[256] == 0 { return false; }
+                    let (Some(a), Some(c)) = (build(&lens[..nlen]), build(&lens[nlen..])) else { return false };
+                    (a, c)
+                };
+                loop {
+                    let Some(sym) = decode(&mut b, &lit) else { return false };
+                    if sym < 256 { if !emit(sym as u8, &mut win, &mut out) { return false; } continue; }
+                    if sym == 256 { break; }
+                    let sym = sym as usize - 257;
+                    if sym >= 29 { return false; }
+                    let Some(e) = b.need(LEXT[sym] as u32) else { return false };
+                    let len = LBASE[sym] as usize + e as usize;
+                    let Some(ds) = decode(&mut b, &dist) else { return false };
+                    let ds = ds as usize;
+                    if ds >= 30 { return false; }
+                    let Some(e) = b.need(DEXT[ds] as u32) else { return false };
+                    let d = DBASE[ds] as usize + e as usize;
+                    if d > out || d > 32768 { return false; }
+                    for _ in 0..len { let byte = win[(out - d) & 32767]; if !emit(byte, &mut win, &mut out) { return false; } }
+                }
+            }
+            _ => return false,
+        }
+        if last == 1 { break; }
+    }
+    if out != expect { return false; }
+    // byte-align, then exactly the Adler-32 trailer and nothing else
+    let used = b.pos - (b.nbits / 8) as usize;
+    let rest = &b.d[used.min(b.d.len())..];
+    rest.len() == 4 && u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) == (bsum << 16 | a)
+}
+
+/// Raw (decompressed) size IHDR implies, including filter bytes (Adam7 handled).
+fn raw_size(w: u64, h: u64, depth: u8, ct: u8, interlace: u8) -> Option<usize> {
+    // u128 throughout: w,h < 2^31 each, so no intermediate can overflow (a panic here would abort the whole app)
+    let ch: u128 = match ct { 0 => 1, 2 => 3, 3 => 1, 4 => 2, 6 => 4, _ => return None };
+    let bits = ch * depth as u128;
+    let row = |pw: u128| (pw * bits).div_ceil(8) + 1;
+    let (w, h) = (w as u128, h as u128);
+    let total: u128 = if interlace == 0 { row(w) * h } else {
+        let mut t = 0u128;
+        for (x0, y0, dx, dy) in [(0u128, 0u128, 8u128, 8u128), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)] {
+            if w > x0 && h > y0 { t += row((w - x0).div_ceil(dx)) * (h - y0).div_ceil(dy); }
+        }
+        t
+    };
+    if total > 256 * 1024 * 1024 { return None; } // decompression-bomb guard: bounds the CPU the validator can be made to spend
+    usize::try_from(total).ok()
+}
+
 // ---------------- PNG ----------------
 fn crc32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
@@ -176,6 +318,9 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
     let mut dropped = Dropped::new();
     let (mut ihdr, mut idat, mut iend, mut plte, mut trns) = (false, false, false, false, false);
     let mut depth = 0u8;
+    let mut dims = (0u64, 0u64, 0u8, 0u8);
+    let mut z: Vec<u8> = Vec::new();
+    let mut last_idat_end = 0usize;
     while i < d.len() && !iend {
         if i + 12 > d.len() { return Err(StripError::Malformed(M, "truncated chunk")); }
         let len = u32::from_be_bytes(d[i..i + 4].try_into().unwrap()) as usize;
@@ -191,6 +336,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
                 if ihdr || i != 8 || len != 13 { return Err(StripError::Malformed(M, "bad IHDR")); }
                 let (w, h) = (u32::from_be_bytes(body[0..4].try_into().unwrap()), u32::from_be_bytes(body[4..8].try_into().unwrap()));
                 depth = body[8];
+                dims = (w as u64, h as u64, body[9], body[12]);
                 if w == 0 || h == 0 || w > 0x7FFF_FFFF || h > 0x7FFF_FFFF || !matches!(depth, 1 | 2 | 4 | 8 | 16) || !matches!(body[9], 0 | 2 | 3 | 4 | 6) || body[10] != 0 || body[11] != 0 || body[12] > 1 {
                     return Err(StripError::Malformed(M, "invalid IHDR values"));
                 }
@@ -204,7 +350,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
                 if !ihdr || idat || trns || len == 0 || len > 256 { return Err(StripError::Malformed(M, "invalid tRNS")); }
                 trns = true; out.extend_from_slice(whole);
             }
-            b"IDAT" => { if !ihdr { return Err(StripError::Malformed(M, "IDAT before IHDR")); } idat = true; out.extend_from_slice(whole); }
+            b"IDAT" => { if !ihdr { return Err(StripError::Malformed(M, "IDAT before IHDR")); } if idat && i != last_idat_end { return Err(StripError::Malformed(M, "IDAT chunks not consecutive")); } idat = true; z.extend_from_slice(body); last_idat_end = i + 12 + len; out.extend_from_slice(whole); }
             b"IEND" => { if !idat || len != 0 { return Err(StripError::Malformed(M, "bad IEND")); } out.extend_from_slice(whole); iend = true; }
             _ => {
                 let name = match ty {
@@ -220,6 +366,8 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
         i += 12 + len;
     }
     if !iend { return Err(StripError::Malformed(M, "missing IEND")); }
+    let expect = raw_size(dims.0, dims.1, depth, dims.2, dims.3).ok_or(StripError::Malformed(M, "implausible image size"))?;
+    if !zlib_valid(&z, expect) { return Err(StripError::Malformed(M, "image data is not exactly one well-formed zlib stream of the size IHDR implies")); }
     if i < d.len() { dropped.entry("data after IEND".into()).or_default().1 += d.len() - i; }
     Ok(Cleaned { format: Format::Png, data: out, report: finish(dropped) })
 }
@@ -299,6 +447,43 @@ mod tests {
         assert!(clean(&[0xFF, 0xD8, 0xFF, 0xD9]).is_err(), "no image data");
     }
 
+    /// A valid zlib stream (stored block) of the 2 raw bytes a 1x1 8-bit image needs.
+    fn idat2() -> Vec<u8> { vec![0x78, 0x01, 0x01, 2, 0, 0xFD, 0xFF, 0, 0, 0x00, 0x02, 0x00, 0x01] }
+
+    fn unhex(s: &str) -> Vec<u8> { (0..s.trim().len() / 2).map(|i| u8::from_str_radix(&s.trim()[2 * i..2 * i + 2], 16).unwrap()).collect() }
+
+    fn png64(idat: &[u8]) -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend(chunk(b"IHDR", &[0, 0, 0, 64, 0, 0, 0, 64, 8, 0, 0, 0, 0]));
+        v.extend(chunk(b"IDAT", idat)); v.extend(chunk(b"IEND", &[])); v
+    }
+
+    #[test]
+    fn zlib_streams_are_validated_exactly_real_dynamic_and_fixed_huffman() {
+        for f in [include_str!("../testdata/zlib_dynamic_64x64_gray.hex"), include_str!("../testdata/zlib_fixed_64x64_gray.hex")] {
+            let z = unhex(f);
+            let png = png64(&z);
+            let c = clean(&png).expect("a real encoder's output must be accepted");
+            assert_eq!(c.data, png);
+            // polyglot tail after the stream inside the IDAT
+            let mut tail = z.clone(); tail.extend_from_slice(b"PK\x05\x06 hidden archive");
+            assert!(clean(&png64(&tail)).is_err(), "bytes after the zlib stream");
+            // truncated stream, flipped data bit (adler/structure), wrong header
+            assert!(clean(&png64(&z[..z.len() - 3])).is_err());
+            let mut flip = z.clone(); let m = flip.len() / 2; flip[m] ^= 0x10;
+            assert!(clean(&png64(&flip)).is_err(), "corrupted stream");
+            let mut hdr = z.clone(); hdr[0] = 0x79; assert!(clean(&png64(&hdr)).is_err());
+        }
+        // wrong decompressed size for the declared dimensions
+        let mut small = b"\x89PNG\r\n\x1a\n".to_vec();
+        small.extend(chunk(b"IHDR", &[0, 0, 0, 8, 0, 0, 0, 8, 8, 0, 0, 0, 0])); small.extend(chunk(b"IDAT", &unhex(include_str!("../testdata/zlib_fixed_64x64_gray.hex")))); small.extend(chunk(b"IEND", &[]));
+        assert!(clean(&small).is_err(), "stream produces more data than IHDR allows");
+        // decompression bomb: a tiny stream claiming a huge image is bounded by `expect`, never allocates
+        let mut big = b"\x89PNG\r\n\x1a\n".to_vec();
+        big.extend(chunk(b"IHDR", &[0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 16, 6, 0, 0, 0])); big.extend(chunk(b"IDAT", &idat2())); big.extend(chunk(b"IEND", &[]));
+        assert!(clean(&big).is_err());
+    }
+
     fn chunk(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
         let mut v = (body.len() as u32).to_be_bytes().to_vec();
         v.extend_from_slice(ty); v.extend_from_slice(body);
@@ -313,7 +498,7 @@ mod tests {
         v.extend(chunk(b"eXIf", b"GPS-DATA"));
         v.extend(chunk(b"tIME", &[7, 230, 1, 1, 0, 0, 0]));
         v.extend(chunk(b"prVt", b"private stuff"));
-        v.extend(chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0, 0, 0, 2, 0, 1]));
+        v.extend(chunk(b"IDAT", &idat2()));
         v.extend(chunk(b"IEND", &[]));
         v.extend_from_slice(b"TRAILING-SECRET");
         v
@@ -390,14 +575,33 @@ mod tests {
         let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
         v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
         for a in b'a'..=b'z' { for b in b'a'..=b'z' { v.extend(chunk(&[a, b, b'x', b'y'], b"")); } }
-        v.extend(chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0, 0, 0, 2, 0, 1])); v.extend(chunk(b"IEND", &[]));
+        v.extend(chunk(b"IDAT", &idat2())); v.extend(chunk(b"IEND", &[]));
         let c = clean(&v).unwrap();
         assert!(c.report.len() <= MAX_REPORT && c.report.iter().any(|l| l.contains("676")), "{:?}", c.report);
     }
 
+    /// Deterministic mutation fuzzing: hostile input may be refused but must NEVER panic (panic = abort kills the whole app).
+    #[test]
+    fn mutated_inputs_never_panic() {
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        let bases = [jpeg_with_metadata(), png_with_metadata(), png64(&unhex(include_str!("../testdata/zlib_dynamic_64x64_gray.hex"))), png64(&unhex(include_str!("../testdata/zlib_fixed_64x64_gray.hex")))];
+        for base in &bases {
+            for _ in 0..4000 {
+                let mut v = base.clone();
+                for _ in 0..(1 + rnd() % 4) {
+                    let i = (rnd() as usize) % v.len();
+                    match rnd() % 4 { 0 => v[i] ^= 1 << (rnd() % 8), 1 => v[i] = rnd() as u8, 2 => { v.truncate(i.max(1)); } _ => { let b = rnd() as u8; v.insert(i, b); } }
+                }
+                let _ = super::clean(&v, Mode::Auto);
+                let _ = super::clean(&v, Mode::PlainText);
+            }
+        }
+    }
+
     #[test]
     fn png_palette_and_header_values_are_validated() {
-        let mk = |plte: &[u8]| { let mut v = b"\x89PNG\r\n\x1a\n".to_vec(); v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0])); v.extend(chunk(b"PLTE", plte)); v.extend(chunk(b"IDAT", &[1, 2, 3])); v.extend(chunk(b"IEND", &[])); v };
+        let mk = |plte: &[u8]| { let mut v = b"\x89PNG\r\n\x1a\n".to_vec(); v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0])); v.extend(chunk(b"PLTE", plte)); v.extend(chunk(b"IDAT", &idat2())); v.extend(chunk(b"IEND", &[])); v };
         assert!(clean(&mk(&[1, 2, 3, 4, 5, 6])).is_ok());
         assert!(clean(&mk(&[1, 2, 3, 4])).is_err(), "PLTE length not a multiple of 3 (hidden bytes)");
         assert!(clean(&mk(&[])).is_err());

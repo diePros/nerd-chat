@@ -27,6 +27,7 @@ fn usage() -> ! {
   --tor-control ADDR   use an already running tor (127.0.0.1:9051 or unix:/run/tor/control) instead of starting one;\n\
                        with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
   --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n\
+  --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
                        add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override;\n\
                        --tor-trust-control = you vouch for whoever owns the control port (e.g. a filtered port on Tails)");
@@ -55,8 +56,35 @@ fn probe_tor(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
+/// `seburity --strip IN OUT [--text]`: clean one file offline (no network, no vault), write to a NEW file (0600), print the report.
+fn strip_cmd(args: &[String]) -> ! {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::Write;
+    let text = args.iter().any(|a| a == "--text");
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let [input, output] = files[..] else { usage() };
+    let raw = match seburity_store::read_regular_file(&PathBuf::from(input), seburity_strip::MAX_INPUT as u64) {
+        Ok(v) => Zeroizing::new(v),
+        Err(e) => { eprintln!("cannot read {input}: {e}"); std::process::exit(1) }
+    };
+    let mode = if text { seburity_strip::Mode::PlainText } else { seburity_strip::Mode::Auto };
+    let c = match seburity_strip::clean(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
+    // create_new first: an EXISTING file is never touched, and only a file WE created is removed on a write error
+    let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(output) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("cannot create {output}: {e}"); std::process::exit(1) }
+    };
+    if let Err(e) = f.write_all(&c.data).and_then(|_| f.sync_all()) { drop(f); let _ = std::fs::remove_file(output); eprintln!("cannot write {output}: {e}"); std::process::exit(1) }
+    println!("wrote {output} ({} -> {} bytes)", raw.len(), c.data.len());
+    if c.report.is_empty() { println!("nothing needed removing"); }
+    for l in &c.report { println!("removed: {l}"); }
+    println!("limits: pixel data, sensor noise and visible content are NOT cleaned (docs/FILE_SHARING.md)");
+    std::process::exit(0)
+}
+
 fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|a| a == "--strip") { strip_cmd(&raw[1..]); }
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
     let mut path = Some(PathBuf::from("seburity.vault"));
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);

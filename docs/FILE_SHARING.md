@@ -16,14 +16,17 @@
 ## What the stripper removes / validates
 - JPEG: APPn (EXIF/GPS/XMP/ICC/thumbnails), COM, DNL, trailing data. Kept DQT/DHT/SOF/SOS/DRI are validated exactly (no padding
   bytes can hide payloads); arithmetic-coded JPEG refused.
-- PNG: only IHDR (validated)/PLTE (len%3, <=768)/tRNS/IDAT/IEND kept, CRCs verified, everything else (tEXt/iTXt/zTXt/eXIf/tIME/
+- PNG: the concatenated IDAT data must be EXACTLY one well-formed zlib/deflate stream (own validator: header, all blocks, Adler-32,
+  nothing after it) producing exactly the byte count IHDR implies (Adam7 included, bomb-bounded): no ZIP-polyglot tail. Only IHDR (validated)/PLTE (len%3, <=768)/tRNS/IDAT/IEND kept, CRCs verified, everything else (tEXt/iTXt/zTXt/eXIf/tIME/
   iCCP/APNG/private) and trailing data dropped. Report lines are capped (chunk names are attacker-chosen: one aggregate line).
 - Plain text (explicit): control, bidi, invisible, format, tag, variation-selector, private-use, noncharacter characters removed,
   combining runs capped. Structured documents (RTF/PDF/PS/XML/SVG/HTML/mail/shell) refused.
 
+## Offline use
+`seburity --strip IN OUT [--text]` cleans one file with no network and no vault; OUT must not exist (never overwritten), mode 0600.
+
 ## Honest limits
-- Pixel data / zlib stream copied unchanged: steganography, a ZIP/other polyglot tail inside the last IDAT (a zlib validator is
-  planned), faces, handwriting and visible text stay. **Sensor noise (PRNU) and camera-specific quantisation tables can still
+- Pixel data / zlib stream copied unchanged: steganography, steganography inside valid pixel data, faces, handwriting and visible text stay. **Sensor noise (PRNU) and camera-specific quantisation tables can still
   identify a camera.** Re-encoding would remove tables but needs a decoder (large attack surface; sandbox first).
 - Dropping EXIF orientation/ICC can change how an image looks.
 - Cleaning does not make an image SAFE for whatever opens it: malicious image data passes through verbatim. Do not open received
