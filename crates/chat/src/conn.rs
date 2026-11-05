@@ -228,7 +228,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                             match file::parse_stream(&x.buf) {
                                 Some(content) if file::hash(content) == x.o.hash => {
                                     // quarantine: re-clean ourselves, never trust the sender's cleaning
-                                    match seburity_strip::clean(content, mode) {
+                                    match seburity_strip::clean_hooked(content, mode) {
                                         Ok(c) => {
                                             let resanitised = c.data.len() != content.len() || (mode == seburity_strip::Mode::Auto && !c.report.is_empty());
                                             let data = Zeroizing::new(c.data);

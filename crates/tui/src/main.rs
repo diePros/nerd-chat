@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod cleaner;
 mod secret;
 mod ui;
 
@@ -28,7 +29,8 @@ fn usage() -> ! {
                        with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
   --cannot-host        our Tor cannot host onion services (Tails with a restricted control port): bundles you export/pair say so,\n\
                        so the contact hosts for you (check with --probe-tor --probe-onion)\n\
-  --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n\
+  --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n  --no-sandbox         clean received/sent files in this process instead of the resource-limited helper process\n\
+\
   --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit (same swap rule, --allow-swap)\n\
   --probe-tor          report what the Tor on this machine allows (Tails/Whonix/system tor), then exit\n\
                        add --probe-onion to also test hosting an onion service; --tor-control ADDR / --tor-cookie PATH to override;\n\
@@ -62,7 +64,7 @@ fn probe_tor(args: &[String]) -> ! {
 fn strip_cmd(args: &[String]) -> ! {
     use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
-    if args.iter().any(|a| a.starts_with("--") && a != "--text" && a != "--allow-swap") { eprintln!("unknown option for --strip"); usage() }
+    if args.iter().any(|a| a.starts_with("--") && a != "--text" && a != "--allow-swap" && a != "--no-sandbox") { eprintln!("unknown option for --strip"); usage() }
     let text = args.iter().any(|a| a == "--text");
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let [input, output] = files[..] else { usage() };
@@ -74,7 +76,7 @@ fn strip_cmd(args: &[String]) -> ! {
         Err(e) => { eprintln!("cannot read {input}: {e}"); std::process::exit(1) }
     };
     let mode = if text { seburity_strip::Mode::PlainText } else { seburity_strip::Mode::Auto };
-    let c = match seburity_strip::clean(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
+    let c = match seburity_strip::clean_hooked(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
     // create_new first: an EXISTING file is never touched, and only a file WE created is removed on a write error
     let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(output) {
         Ok(f) => f,
@@ -104,6 +106,7 @@ fn parse_args() -> Config {
             "--ram" => path = None,
             "--low-mem" => profile = Profile::LowMem,
             "--allow-swap" => allow_swap = true,
+            "--no-sandbox" => {} // handled at startup: clean files in-process instead of in the limited helper
             "--cannot-host" => cannot_host = true,
             "--tor-path" => tor.tor_path = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--tor-control" => match it.next().and_then(|s| seburity_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
@@ -201,6 +204,11 @@ survive power-off and be recovered later. Turn swap off first:\n\
 }
 
 fn main() {
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if cleaner::is_worker_invocation(&args) { cleaner::worker_main(); }
+        if !args.iter().any(|a| a == "--no-sandbox") { seburity_strip::set_cleaner(cleaner::sandboxed_clean); }
+    }
     for w in harden() { eprintln!("warning: {w}"); }
     let cfg = parse_args();
     if !cfg.allow_swap { refuse_if_swap(); }

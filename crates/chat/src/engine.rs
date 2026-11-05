@@ -181,7 +181,7 @@ impl Engine {
 
     /// The CPU-heavy part (cleaning, padding, hashing) as a pure function: run it on a worker thread so the UI/panic key stay live.
     pub fn prepare_file(raw: &[u8], mode: seburity_strip::Mode) -> Result<(FileOut, Vec<String>), seburity_strip::StripError> {
-        let c = seburity_strip::clean(raw, mode)?;
+        let c = seburity_strip::clean_hooked(raw, mode)?;
         let report = c.report;
         let data = Zeroizing::new(c.data);
         let Some(stream) = file::build_stream(&data) else { return Err(seburity_strip::StripError::TooLarge) };

@@ -9,6 +9,8 @@
 //! malicious image safe for a viewer. Pure Rust, bounded allocation.
 #![forbid(unsafe_code)]
 
+pub mod wire;
+
 /// Largest input we clean (and the largest file the chat sends).
 pub const MAX_INPUT: usize = 8 * 1024 * 1024;
 /// Report lines are capped so a hostile file cannot flood the UI with them.
@@ -24,7 +26,20 @@ pub enum StripError {
     StructuredText,
     #[error("malformed {0} file: {1}")]
     Malformed(&'static str, &'static str),
+    /// Refused by the sandboxed cleaning helper (its own message, sanitised) or its answer was unusable.
+    #[error("refused: {0}")]
+    Refused(String),
 }
+
+/// The cleaner used by `clean_hooked`: the app installs one that runs `clean` in a resource-limited child process.
+pub type CleanFn = fn(&[u8], Mode) -> Result<Cleaned, StripError>;
+static CLEANER: std::sync::OnceLock<CleanFn> = std::sync::OnceLock::new();
+
+/// Install the process-wide cleaner (first call wins). Without one, `clean_hooked` cleans in-process.
+pub fn set_cleaner(f: CleanFn) { let _ = CLEANER.set(f); }
+
+/// What the chat engine calls for hostile input: the installed (sandboxed) cleaner, else `clean`.
+pub fn clean_hooked(d: &[u8], mode: Mode) -> Result<Cleaned, StripError> { match CLEANER.get() { Some(f) => f(d, mode), None => clean(d, mode) } }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format { Jpeg, Png, Text }

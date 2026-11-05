@@ -20,6 +20,7 @@ spelled `Bash` (capital B).
 | 19 | (this commit) | vendored snow with Drop-time zeroization (D-3/R2-M3/R7-L1) | yes (review 15), fixes applied | yes, reproducible (same machine) | yes, 3/3 |
 | 22 | (this commit) | retry of a failed new service during rotation; random virtual port ACCEPTED as unneeded | yes (review 16), fixes in cycle 23 | yes | yes, 3/3 |
 | 23 | (this commit) | review 16 fixes: fallback ends on DONE announcement, stronger tests, broken-control notice | not re-reviewed | yes | yes, 3/3 |
+| 24 | (this commit) | file cleaning in a resource-limited helper process (`--clean-worker`), strict wire decoding, `--no-sandbox` | yes (1.53 MB static; --strip through helper verified) | n/a (no transport change) |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.

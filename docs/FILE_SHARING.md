@@ -38,3 +38,13 @@
 - PDF/Office/audio/video/archives: refused (no parser we can audit).
 - The accepting side's presence is observable: a manual decline is immediate, an absent user's auto-decline takes 120 s.
 - The sender's typed path passes through `input: String` (same class as R4-M2).
+
+## Where the parsers run (cycle 24)
+Cleaning of hostile files (a contact's file you receive, a file you send, `--strip`) does NOT run inside the process that holds
+your keys. `seburity` starts a copy of itself as `seburity --clean-worker` (environment cleared) with hard limits: no new file
+descriptors (RLIMIT_NOFILE=3: only stdin/stdout/stderr, so no files and no sockets), no file writes (RLIMIT_FSIZE=0), no fork
+(RLIMIT_NPROC=0), 30 s CPU, 1 GiB address space, no core dump, non-dumpable, 25 s wall-clock kill in the parent. A parser crash,
+runaway memory or CPU only kills the helper (the job is refused). The helper's answer is decoded as untrusted input
+(`seburity_strip::wire`: exact lengths, caps, control characters neutralised). `--no-sandbox` cleans in-process instead.
+Not provided: seccomp/Landlock (needs a dependency or `unsafe`): a helper that is truly compromised can still use syscalls that no
+rlimit covers (e.g. `execve` of a path it can name), and its output is whatever the compromised parser produced.
