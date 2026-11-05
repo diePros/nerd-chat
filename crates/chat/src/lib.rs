@@ -8,8 +8,10 @@
 
 pub mod conn;
 pub mod engine;
+pub mod file;
 pub mod proto;
 pub mod transport;
 
+pub use conn::FileOut;
 pub use engine::{Command, ContactCfg, Engine, Event, Timing};
 pub use transport::{MemNet, Transport};

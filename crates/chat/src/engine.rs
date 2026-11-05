@@ -12,7 +12,8 @@
 //! peer out); CPU is bounded by one engine-wide budget instead, every handshake has a TOTAL deadline, and when the handshake
 //! slots are full the OLDEST unauthenticated handshake is aborted so a newcomer (possibly the real peer) always gets in.
 use crate::{
-    conn::{self, DeadlineStream, Out},
+    conn::{self, DeadlineStream, FileOut, Out},
+    file,
     proto,
     transport::{BoxStream, DialFn, Transport},
 };
@@ -77,7 +78,7 @@ impl ContactCfg {
     pub fn new(id: [u8; 8], identity: &ContactIdentity, peer: Bundle) -> Self { Self { id, secret: identity.secret_bytes(), peer } }
 }
 
-pub enum Command { Add(ContactCfg), Remove([u8; 8]), Send { id: [u8; 8], text: Zeroizing<String> }, Shutdown }
+pub enum Command { Add(ContactCfg), Remove([u8; 8]), Send { id: [u8; 8], text: Zeroizing<String> }, SendFile { id: [u8; 8], file: FileOut }, FileReply { id: [u8; 8], xid: file::Xid, accept: bool }, Shutdown }
 
 #[derive(Debug)]
 pub enum Event {
@@ -85,12 +86,21 @@ pub enum Event {
     Disconnected { id: [u8; 8] },
     Message { id: [u8; 8], text: Zeroizing<String> },
     Notice { id: Option<[u8; 8]>, text: String },
+    /// The contact offers a file (only its size bucket is meaningful). Nothing is received until `reply_file(.., true)`.
+    FileOffer { id: [u8; 8], xid: file::Xid, len: u32 },
+    /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
+    File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
+    FileSent { id: [u8; 8] },
 }
 
 pub(crate) enum ConnEvent {
     Up { id: [u8; 8], gen: u64, epoch: u64, tx: Sender<Out> },
     Down { id: [u8; 8], gen: u64 },
     Msg { id: [u8; 8], gen: u64, text: Zeroizing<String> },
+    Notice { id: [u8; 8], gen: u64, text: String },
+    FileOffer { id: [u8; 8], gen: u64, xid: file::Xid, len: u32 },
+    File { id: [u8; 8], gen: u64, data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
+    FileSent { id: [u8; 8], gen: u64 },
     /// `unreachable`: the dial itself failed (peer offline/unreachable). Handshake failures do NOT count (an attacker could cause them).
     DialFailed { id: [u8; 8], epoch: u64, unreachable: bool },
 }
@@ -126,6 +136,27 @@ impl Engine {
     pub fn add(&self, c: ContactCfg) { let _ = self.tx.send(In::Cmd(Command::Add(c))); }
     pub fn remove(&self, id: [u8; 8]) { let _ = self.tx.send(In::Cmd(Command::Remove(id))); }
     pub fn send(&self, id: [u8; 8], text: Zeroizing<String>) { let _ = self.tx.send(In::Cmd(Command::Send { id, text })); }
+
+    /// Clean (metadata stripped by allowlist, unknown formats refused), pad to a size bucket and offer a file to a CONNECTED
+    /// contact. Returns the cleaning report. Files are never queued: if the contact is offline the engine says so.
+    pub fn send_file(&self, id: [u8; 8], raw: &[u8]) -> Result<Vec<String>, seburity_strip::StripError> {
+        let c = seburity_strip::clean(raw)?;
+        let report = c.report;
+        let data = Zeroizing::new(c.data);
+        let len = data.len();
+        let Some(pl) = file::padded_len(len) else { return Err(seburity_strip::StripError::TooLarge) };
+        let mut padded = Zeroizing::new(Vec::with_capacity(pl));
+        padded.extend_from_slice(&data);
+        padded.resize(pl, 0);
+        let mut xid = [0u8; 8];
+        getrandom::fill(&mut xid).expect("OS RNG unavailable");
+        let f = FileOut { xid, len: len as u32, hash: file::hash(&data), padded };
+        let _ = self.tx.send(In::Cmd(Command::SendFile { id, file: f }));
+        Ok(report)
+    }
+
+    /// Answer a `FileOffer`.
+    pub fn reply_file(&self, id: [u8; 8], xid: file::Xid, accept: bool) { let _ = self.tx.send(In::Cmd(Command::FileReply { id, xid, accept })); }
 
     /// Stop everything (connections closed, onion services removed, secrets wiped) and wait briefly for the thread.
     pub fn shutdown(mut self) { self.stop(Duration::from_secs(3)); }
@@ -282,6 +313,11 @@ impl Core {
             In::Cmd(Command::Add(c)) => self.add(c),
             In::Cmd(Command::Remove(id)) => self.remove(id),
             In::Cmd(Command::Send { id, text }) => self.send(id, text),
+            In::Cmd(Command::SendFile { id, file }) => match self.rts.get(&id).and_then(|r| r.conn.as_ref()) {
+                Some((_, tx)) => { let _ = tx.send(Out::File(file)); }
+                None => self.notice(Some(id), "not connected: files are never queued, try again when the contact is online"),
+            },
+            In::Cmd(Command::FileReply { id, xid, accept }) => { if let Some((_, tx)) = self.rts.get(&id).and_then(|r| r.conn.as_ref()) { let _ = tx.send(Out::Reply { xid, accept }); } }
             In::Cmd(Command::Shutdown) => {}
             In::Conn(ConnEvent::Up { id, gen, epoch, tx }) => {
                 let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) else { let _ = tx.send(Out::Close); return };
@@ -305,6 +341,10 @@ impl Core {
             In::Conn(ConnEvent::Msg { id, gen, text }) => {
                 if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
             }
+            In::Conn(ConnEvent::Notice { id, gen, text }) => { if self.is_current(id, gen) { self.notice(Some(id), text); } }
+            In::Conn(ConnEvent::FileOffer { id, gen, xid, len }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileOffer { id, xid, len }); } }
+            In::Conn(ConnEvent::File { id, gen, data, format, report, resanitised }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::File { id, data, format, report, resanitised }); } }
+            In::Conn(ConnEvent::FileSent { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileSent { id }); } }
             In::Conn(ConnEvent::DialFailed { id, epoch, unreachable }) => {
                 let mut fallback = false;
                 if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) {
@@ -318,6 +358,8 @@ impl Core {
             }
         }
     }
+
+    fn is_current(&self, id: [u8; 8], gen: u64) -> bool { self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) }
 
     fn send(&mut self, id: [u8; 8], text: Zeroizing<String>) {
         if text.is_empty() || text.len() > proto::MAX_TEXT_BYTES { return self.notice(Some(id), "message empty or too long (max 32 KiB)"); }
@@ -720,6 +762,151 @@ mod tests {
         let _el = start_with(Box::new(FailOnce(net.transport(), false)), &l, &db);
         std::thread::sleep(Duration::from_millis(2500)); // far more than host_fallback_after failed dials
         assert!(!net.is_hosted(&lb.onion_pub), "flipped side started hosting");
+    }
+
+    // ---------------- file transfer ----------------
+    fn seg(m: u8, body: &[u8]) -> Vec<u8> { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v }
+
+    /// A JPEG skeleton with planted metadata and `scan` bytes of image data.
+    fn jpeg(scan: usize) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8];
+        v.extend(seg(0xE1, b"Exif\0\0GPS 52.5N 13.4E Canon EOS"));
+        v.extend(seg(0xFE, b"secret comment"));
+        v.extend(seg(0xDB, &[0; 65]));
+        v.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]));
+        v.extend(seg(0xC4, &[0; 17]));
+        v.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0]));
+        v.extend(std::iter::repeat(0x11u8).take(scan));
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        v
+    }
+    fn has(d: &[u8], n: &[u8]) -> bool { d.windows(n.len()).any(|w| w == n) }
+
+    fn pair() -> (Engine, Engine) {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let (el, ed) = (start(&net, &l, &db, ID), start(&net, &d, &lb, ID));
+        assert!(connected(&el) && connected(&ed));
+        (el, ed)
+    }
+
+    fn offer_xid(e: &Engine) -> (file::Xid, u32) {
+        let mut r = None;
+        assert!(wait(e, |ev| if let Event::FileOffer { xid, len, .. } = ev { r = Some((*xid, *len)); true } else { false }), "no offer arrived");
+        r.unwrap()
+    }
+
+    #[test]
+    fn file_is_stripped_accepted_padded_and_delivered() {
+        let (el, ed) = pair();
+        let raw = jpeg(40_000);
+        let report = ed.send_file(ID, &raw).unwrap();
+        assert!(!report.is_empty(), "report lists what was removed");
+        let (xid, len) = offer_xid(&el);
+        assert!((len as usize) < raw.len(), "offer announces the cleaned size");
+        el.reply_file(ID, xid, true);
+        let mut got_file = None;
+        assert!(wait(&el, |ev| if let Event::File { data, resanitised, .. } = ev { got_file = Some((data.to_vec(), *resanitised)); true } else { false }));
+        let (data, resan) = got_file.unwrap();
+        assert!(!resan, "sender already cleaned it");
+        assert!(!has(&data, b"Exif") && !has(&data, b"GPS") && !has(&data, b"secret comment"));
+        assert_eq!(data.len(), len as usize);
+        assert!(wait(&ed, |ev| matches!(ev, Event::FileSent { .. })));
+        // chat still works afterwards
+        say(&ed, ID, "after the file");
+        assert!(got(&el, "after the file"));
+    }
+
+    #[test]
+    fn declined_file_sends_no_content_and_unsupported_formats_are_refused() {
+        let (el, ed) = pair();
+        ed.send_file(ID, &jpeg(1000)).unwrap();
+        let (xid, _) = offer_xid(&el);
+        el.reply_file(ID, xid, false);
+        assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("declined"))));
+        assert!(!wait_for(&el, Duration::from_millis(500), |ev| matches!(ev, Event::File { .. })));
+        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01").is_err(), "unknown format must be refused");
+        assert!(ed.send_file(ID, &[]).is_err());
+    }
+
+    #[test]
+    fn files_are_never_queued_for_offline_contacts() {
+        let net = MemNet::new();
+        let ((_l, lb), (d, _db)) = ordered();
+        let ed = start(&net, &d, &lb, ID);
+        ed.send_file(ID, &jpeg(100)).unwrap();
+        assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("never queued"))));
+    }
+
+    /// A raw authenticated peer that speaks the file protocol badly.
+    fn raw_peer() -> (Engine, crate::transport::BoxStream, seburity_core::session::Session, ContactIdentity) {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = start(&net, &l, &db, ID);
+        let dial = net.transport().dial_fn();
+        let end = Instant::now() + Duration::from_secs(5);
+        let mut s = loop { match dial(&lb, &[1; 16]) { Ok(s) => break s, Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)), Err(e) => panic!("{e}") } };
+        s.set_timeout(Some(Duration::from_secs(5))).unwrap();
+        let sess = link::dial(&mut s, &d, &lb, &proto::keepalive()).unwrap();
+        assert!(wait(&el, |e| matches!(e, Event::Connected { .. })));
+        (el, s, sess, d)
+    }
+
+    fn raw_send(s: &mut crate::transport::BoxStream, sess: &mut seburity_core::session::Session, me: &ContactIdentity, body: &[u8]) {
+        use std::io::Write;
+        let w = sess.send(me, body).unwrap();
+        s.write_all(&w).unwrap();
+    }
+
+    /// Read cells until the engine's ACCEPT for `xid` arrives (a correct sender never sends content before it).
+    fn raw_wait_accept(s: &mut crate::transport::BoxStream, sess: &mut seburity_core::session::Session, me: &ContactIdentity, xid: file::Xid) {
+        use std::io::Read;
+        for _ in 0..50 {
+            let mut cell = vec![0u8; seburity_core::session::WIRE_CELL_LEN];
+            s.read_exact(&mut cell).unwrap();
+            let m = sess.recv(me, &cell).unwrap();
+            if m.body.first() == Some(&file::KIND_FILE_ACCEPT) && file::parse_ctl(&m.body) == Some(xid) { return; }
+        }
+        panic!("no ACCEPT");
+    }
+
+    #[test]
+    fn hostile_peer_cannot_push_unsolicited_or_corrupt_files() {
+        let (el, mut s, mut sess, me) = raw_peer();
+        // 1. content without an accepted offer: cancelled, engine alive
+        raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[9; 8], &[1; 100]));
+        assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("unexpected file data"))));
+        // 2. out-of-policy offers (0 bytes, > cap) are declined without bothering the user
+        for len in [0u32, (file::MAX_FILE + 1) as u32] {
+            raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [3; 8], len, hash: [0; 32] }));
+        }
+        assert!(!wait_for(&el, Duration::from_millis(400), |e| matches!(e, Event::FileOffer { .. })));
+        // 3. a lying offer (wrong hash): user accepts, content is discarded after the integrity check
+        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [4; 8], len: 100, hash: [0xAA; 32] }));
+        let (xid, _) = offer_xid(&el);
+        el.reply_file(ID, xid, true);
+        raw_wait_accept(&mut s, &mut sess, &me, xid);
+        for c in vec![0u8; file::MIN_BUCKET].chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[4; 8], c)); }
+        assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("integrity"))), "bad file must not be delivered");
+        assert!(!wait_for(&el, Duration::from_millis(300), |e| matches!(e, Event::File { .. })));
+    }
+
+    #[test]
+    fn receiver_recleans_a_file_the_sender_did_not_clean() {
+        let (el, mut s, mut sess, me) = raw_peer();
+        let dirty = jpeg(3000);
+        let pl = file::padded_len(dirty.len()).unwrap();
+        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [5; 8], len: dirty.len() as u32, hash: file::hash(&dirty) }));
+        let (xid, _) = offer_xid(&el);
+        el.reply_file(ID, xid, true);
+        raw_wait_accept(&mut s, &mut sess, &me, xid);
+        let mut padded = dirty.clone(); padded.resize(pl, 0);
+        for c in padded.chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[5; 8], c)); }
+        let mut r = None;
+        assert!(wait(&el, |e| if let Event::File { data, resanitised, .. } = e { r = Some((data.to_vec(), *resanitised)); true } else { false }));
+        let (data, resan) = r.unwrap();
+        assert!(resan, "receiver must flag that it had to clean the file itself");
+        assert!(!has(&data, b"Exif") && !has(&data, b"secret comment"));
     }
 
     #[test]

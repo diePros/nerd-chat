@@ -3,6 +3,7 @@
 //! on an idle timeout (no cell from the peer for `idle`) or when told to close.
 use crate::{
     engine::{ConnEvent, In, Timing},
+    file::{self, Offer, Xid},
     proto::{self, Assembler, Incoming},
     transport::BoxStream,
 };
@@ -14,7 +15,20 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-pub enum Out { Text(Zeroizing<String>), Close }
+/// A file ready to send: content already stripped and ZERO-PADDED to its size bucket; `hash`/`len` describe the true content.
+pub struct FileOut { pub xid: Xid, pub len: u32, pub hash: [u8; 32], pub padded: Zeroizing<Vec<u8>> }
+
+pub enum Out { Text(Zeroizing<String>), File(FileOut), Reply { xid: Xid, accept: bool }, Close }
+
+const OFFER_WAIT: Duration = Duration::from_secs(120);
+const RECV_IDLE: Duration = Duration::from_secs(60);
+const CHUNKS_PER_TURN: usize = 32;
+
+enum OutState { WaitAccept(Instant), Sending(usize) }
+struct OutXfer { f: FileOut, st: OutState }
+enum InState { Pending(Instant), Receiving(Instant) }
+struct InXfer { o: Offer, padded: usize, buf: Zeroizing<Vec<u8>>, st: InState }
+
 
 /// Wraps a stream for the HANDSHAKE: one TOTAL deadline (a per-read timeout lets a slow-drip peer hold a slot for hours,
 /// R6-M2) and an abort flag so the engine can evict the oldest unauthenticated handshake when slots run out.
@@ -82,6 +96,8 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let _ = stream.set_write_timeout_(Some(Duration::from_secs(10)));
     let (mut rd, mut asm) = (CellReader::default(), Assembler::new());
     let (mut last_rx, mut last_tx) = (Instant::now(), Instant::now());
+    let (mut outx, mut inx): (Option<OutXfer>, Option<InXfer>) = (None, None);
+    let notice = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok();
     'conn: loop {
         loop {
             match out_rx.try_recv() {
@@ -89,8 +105,57 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                     for body in proto::encode_text(&text) { if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; } }
                     last_tx = Instant::now();
                 }
+                Ok(Out::File(f)) => {
+                    if outx.is_some() { notice(&ev, "a file transfer is already running on this connection"); continue; }
+                    let o = Offer { xid: f.xid, len: f.len, hash: f.hash };
+                    if !send_body(&mut stream, &mut sess, &me, &file::encode_offer(&o)) { break 'conn; }
+                    last_tx = Instant::now();
+                    outx = Some(OutXfer { f, st: OutState::WaitAccept(Instant::now() + OFFER_WAIT) });
+                }
+                Ok(Out::Reply { xid, accept }) => {
+                    let ours = inx.as_ref().is_some_and(|x| x.o.xid == xid && matches!(x.st, InState::Pending(_)));
+                    if ours {
+                        if accept {
+                            if let Some(x) = inx.as_mut() { x.st = InState::Receiving(Instant::now() + RECV_IDLE); }
+                            if !send_body(&mut stream, &mut sess, &me, &file::encode_ctl(file::KIND_FILE_ACCEPT, &xid)) { break 'conn; }
+                        } else {
+                            inx = None;
+                            if !send_body(&mut stream, &mut sess, &me, &file::encode_ctl(file::KIND_FILE_REJECT, &xid)) { break 'conn; }
+                        }
+                        last_tx = Instant::now();
+                    }
+                }
                 Ok(Out::Close) | Err(TryRecvError::Disconnected) => break 'conn,
                 Err(TryRecvError::Empty) => break,
+            }
+        }
+        // outgoing file: a few chunks per turn so receiving, replies and keepalives are never starved
+        if let Some(x) = outx.as_mut() {
+            match &mut x.st {
+                OutState::WaitAccept(dl) => if Instant::now() > *dl { outx = None; if !notice(&ev, "file offer timed out (not accepted)") { break; } },
+                OutState::Sending(pos) => {
+                    for _ in 0..CHUNKS_PER_TURN {
+                        if *pos >= x.f.padded.len() { break; }
+                        let end = (*pos + file::CHUNK_DATA).min(x.f.padded.len());
+                        let body = Zeroizing::new(file::encode_chunk(&x.f.xid, &x.f.padded[*pos..end]));
+                        if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; }
+                        *pos = end;
+                        last_tx = Instant::now();
+                    }
+                    if *pos >= x.f.padded.len() { outx = None; if ev.send(In::Conn(ConnEvent::FileSent { id, gen })).is_err() { break; } }
+                }
+            }
+        }
+        // incoming file timeouts
+        if let Some(x) = inx.as_ref() {
+            match x.st {
+                InState::Pending(dl) if Instant::now() > dl => {
+                    let xid = x.o.xid; inx = None;
+                    if !send_body(&mut stream, &mut sess, &me, &file::encode_ctl(file::KIND_FILE_REJECT, &xid)) { break; }
+                    if !notice(&ev, "a file offer expired unanswered and was declined") { break; }
+                }
+                InState::Receiving(dl) if Instant::now() > dl => { inx = None; if !notice(&ev, "file transfer stalled and was cancelled") { break; } }
+                _ => {}
             }
         }
         if last_tx.elapsed() >= t.keepalive {
@@ -101,10 +166,66 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
             Ok(Some(cell)) => {
                 last_rx = Instant::now();
                 let Ok(m) = sess.recv(&me, &cell) else { break }; // bad signature / replay / reorder: drop the connection
-                match asm.feed(&m.body) {
-                    Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Msg { id, gen, text })).is_err() { break; } }
-                    Ok(_) => {}
-                    Err(_) => break,
+                match m.body.first().copied() {
+                    Some(file::KIND_FILE_OFFER) => {
+                        let Some(o) = file::parse_offer(&m.body) else { break };
+                        let pl = file::padded_len(o.len as usize);
+                        if inx.is_some() || pl.is_none() {
+                            // busy or out of policy: decline at once (no state kept)
+                            if !send_body(&mut stream, &mut sess, &me, &file::encode_ctl(file::KIND_FILE_REJECT, &o.xid)) { break; }
+                            last_tx = Instant::now();
+                        } else {
+                            inx = Some(InXfer { o, padded: pl.unwrap_or(0), buf: Zeroizing::new(Vec::new()), st: InState::Pending(Instant::now() + OFFER_WAIT) });
+                            if ev.send(In::Conn(ConnEvent::FileOffer { id, gen, xid: o.xid, len: o.len })).is_err() { break; }
+                        }
+                    }
+                    Some(file::KIND_FILE_ACCEPT) => {
+                        if let (Some(xid), Some(x)) = (file::parse_ctl(&m.body), outx.as_mut()) {
+                            if x.f.xid == xid && matches!(x.st, OutState::WaitAccept(_)) { x.st = OutState::Sending(0); }
+                        }
+                    }
+                    Some(file::KIND_FILE_REJECT) => {
+                        if let Some(xid) = file::parse_ctl(&m.body) {
+                            if outx.as_ref().is_some_and(|x| x.f.xid == xid) { outx = None; if !notice(&ev, "the contact declined the file") { break; } }
+                        }
+                    }
+                    Some(file::KIND_FILE_CHUNK) => {
+                        let mut done = None;
+                        let mut bad = false;
+                        match (file::parse_chunk(&m.body), inx.as_mut()) {
+                            (Some((xid, data)), Some(x)) if x.o.xid == xid && matches!(x.st, InState::Receiving(_)) && x.buf.len() + data.len() <= x.padded => {
+                                if x.buf.capacity() == 0 { x.buf = Zeroizing::new(Vec::with_capacity(x.padded)); } // exact, never reallocates
+                                x.buf.extend_from_slice(data);
+                                x.st = InState::Receiving(Instant::now() + RECV_IDLE);
+                                if x.buf.len() == x.padded { done = Some(()); }
+                            }
+                            _ => bad = true, // unsolicited, wrong id, too long, malformed: cancel whatever is running
+                        }
+                        if bad { inx = None; if !notice(&ev, "unexpected file data: transfer cancelled") { break; } }
+                        if done.is_some() {
+                            let x = inx.take().expect("set above");
+                            let len = x.o.len as usize;
+                            let padding_zero = x.buf[len..].iter().all(|&b| b == 0);
+                            if !padding_zero || file::hash(&x.buf[..len]) != x.o.hash {
+                                if !notice(&ev, "received file failed its integrity check and was discarded") { break; }
+                            } else {
+                                // quarantine: re-strip ourselves, never trust the sender's cleaning
+                                match seburity_strip::clean(&x.buf[..len]) {
+                                    Ok(c) => {
+                                        let cleaned = c.data.len() != len || !c.report.is_empty();
+                                        let data = Zeroizing::new(c.data);
+                                        if ev.send(In::Conn(ConnEvent::File { id, gen, data, format: c.format, report: c.report, resanitised: cleaned })).is_err() { break; }
+                                    }
+                                    Err(e) => { if !notice(&ev, &format!("received file refused ({e})")) { break; } }
+                                }
+                            }
+                        }
+                    }
+                    _ => match asm.feed(&m.body) {
+                        Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Msg { id, gen, text })).is_err() { break; } }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    },
                 }
             }
             Ok(None) => {}
