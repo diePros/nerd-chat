@@ -86,8 +86,10 @@ pub enum Event {
     Disconnected { id: [u8; 8] },
     Message { id: [u8; 8], text: Zeroizing<String> },
     Notice { id: Option<[u8; 8]>, text: String },
-    /// The contact offers a file (only its size bucket is meaningful). Nothing is received until `reply_file(.., true)`.
-    FileOffer { id: [u8; 8], xid: file::Xid, len: u32 },
+    /// The contact offers a file (ONLY the padded size bucket is known, never the exact length). Nothing is received until `reply_file(.., true)`.
+    FileOffer { id: [u8; 8], xid: file::Xid, bucket: u32 },
+    /// An offer or transfer ended without a file (expired, stalled, refused, failed its check): clear any "offered" state.
+    FileCancelled { id: [u8; 8] },
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
     File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
@@ -98,7 +100,8 @@ pub(crate) enum ConnEvent {
     Down { id: [u8; 8], gen: u64 },
     Msg { id: [u8; 8], gen: u64, text: Zeroizing<String> },
     Notice { id: [u8; 8], gen: u64, text: String },
-    FileOffer { id: [u8; 8], gen: u64, xid: file::Xid, len: u32 },
+    FileOffer { id: [u8; 8], gen: u64, xid: file::Xid, bucket: u32 },
+    FileCancelled { id: [u8; 8], gen: u64 },
     File { id: [u8; 8], gen: u64, data: Zeroizing<Vec<u8>>, format: seburity_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8], gen: u64 },
     /// `unreachable`: the dial itself failed (peer offline/unreachable). Handshake failures do NOT count (an attacker could cause them).
@@ -139,18 +142,16 @@ impl Engine {
 
     /// Clean (metadata stripped by allowlist, unknown formats refused), pad to a size bucket and offer a file to a CONNECTED
     /// contact. Returns the cleaning report. Files are never queued: if the contact is offline the engine says so.
-    pub fn send_file(&self, id: [u8; 8], raw: &[u8]) -> Result<Vec<String>, seburity_strip::StripError> {
-        let c = seburity_strip::clean(raw)?;
+    pub fn send_file(&self, id: [u8; 8], raw: &[u8], mode: seburity_strip::Mode) -> Result<Vec<String>, seburity_strip::StripError> {
+        let c = seburity_strip::clean(raw, mode)?;
         let report = c.report;
         let data = Zeroizing::new(c.data);
-        let len = data.len();
-        let Some(pl) = file::padded_len(len) else { return Err(seburity_strip::StripError::TooLarge) };
-        let mut padded = Zeroizing::new(Vec::with_capacity(pl));
-        padded.extend_from_slice(&data);
-        padded.resize(pl, 0);
+        let Some(stream) = file::build_stream(&data) else { return Err(seburity_strip::StripError::TooLarge) };
+        let bucket = stream.len() as u32;
         let mut xid = [0u8; 8];
         getrandom::fill(&mut xid).expect("OS RNG unavailable");
-        let f = FileOut { xid, len: len as u32, hash: file::hash(&data), padded };
+        let mode = if mode == seburity_strip::Mode::PlainText { file::MODE_TEXT } else { file::MODE_AUTO };
+        let f = FileOut { xid, bucket, mode, hash: file::hash(&data), padded: Zeroizing::new(stream) };
         let _ = self.tx.send(In::Cmd(Command::SendFile { id, file: f }));
         Ok(report)
     }
@@ -342,7 +343,8 @@ impl Core {
                 if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
             }
             In::Conn(ConnEvent::Notice { id, gen, text }) => { if self.is_current(id, gen) { self.notice(Some(id), text); } }
-            In::Conn(ConnEvent::FileOffer { id, gen, xid, len }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileOffer { id, xid, len }); } }
+            In::Conn(ConnEvent::FileOffer { id, gen, xid, bucket }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileOffer { id, xid, bucket }); } }
+            In::Conn(ConnEvent::FileCancelled { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileCancelled { id }); } }
             In::Conn(ConnEvent::File { id, gen, data, format, report, resanitised }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::File { id, data, format, report, resanitised }); } }
             In::Conn(ConnEvent::FileSent { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileSent { id }); } }
             In::Conn(ConnEvent::DialFailed { id, epoch, unreachable }) => {
@@ -792,7 +794,7 @@ mod tests {
 
     fn offer_xid(e: &Engine) -> (file::Xid, u32) {
         let mut r = None;
-        assert!(wait(e, |ev| if let Event::FileOffer { xid, len, .. } = ev { r = Some((*xid, *len)); true } else { false }), "no offer arrived");
+        assert!(wait(e, |ev| if let Event::FileOffer { xid, bucket, .. } = ev { r = Some((*xid, *bucket)); true } else { false }), "no offer arrived");
         r.unwrap()
     }
 
@@ -800,17 +802,17 @@ mod tests {
     fn file_is_stripped_accepted_padded_and_delivered() {
         let (el, ed) = pair();
         let raw = jpeg(40_000);
-        let report = ed.send_file(ID, &raw).unwrap();
+        let report = ed.send_file(ID, &raw, seburity_strip::Mode::Auto).unwrap();
         assert!(!report.is_empty(), "report lists what was removed");
-        let (xid, len) = offer_xid(&el);
-        assert!((len as usize) < raw.len(), "offer announces the cleaned size");
+        let (xid, bucket) = offer_xid(&el);
+        assert_eq!(bucket as usize, 65_536, "offer announces only the padded bucket, not the size");
         el.reply_file(ID, xid, true);
         let mut got_file = None;
         assert!(wait(&el, |ev| if let Event::File { data, resanitised, .. } = ev { got_file = Some((data.to_vec(), *resanitised)); true } else { false }));
         let (data, resan) = got_file.unwrap();
         assert!(!resan, "sender already cleaned it");
         assert!(!has(&data, b"Exif") && !has(&data, b"GPS") && !has(&data, b"secret comment"));
-        assert_eq!(data.len(), len as usize);
+        assert!(data.len() < raw.len() && data.len() > 40_000);
         assert!(wait(&ed, |ev| matches!(ev, Event::FileSent { .. })));
         // chat still works afterwards
         say(&ed, ID, "after the file");
@@ -820,13 +822,13 @@ mod tests {
     #[test]
     fn declined_file_sends_no_content_and_unsupported_formats_are_refused() {
         let (el, ed) = pair();
-        ed.send_file(ID, &jpeg(1000)).unwrap();
+        ed.send_file(ID, &jpeg(1000), seburity_strip::Mode::Auto).unwrap();
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, false);
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("declined"))));
         assert!(!wait_for(&el, Duration::from_millis(500), |ev| matches!(ev, Event::File { .. })));
-        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01").is_err(), "unknown format must be refused");
-        assert!(ed.send_file(ID, &[]).is_err());
+        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01", seburity_strip::Mode::Auto).is_err(), "unknown format must be refused");
+        assert!(ed.send_file(ID, &[], seburity_strip::Mode::Auto).is_err());
     }
 
     #[test]
@@ -834,7 +836,7 @@ mod tests {
         let net = MemNet::new();
         let ((_l, lb), (d, _db)) = ordered();
         let ed = start(&net, &d, &lb, ID);
-        ed.send_file(ID, &jpeg(100)).unwrap();
+        ed.send_file(ID, &jpeg(100), seburity_strip::Mode::Auto).unwrap();
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("never queued"))));
     }
 
@@ -877,16 +879,16 @@ mod tests {
         raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[9; 8], &[1; 100]));
         assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("unexpected file data"))));
         // 2. out-of-policy offers (0 bytes, > cap) are declined without bothering the user
-        for len in [0u32, (file::MAX_FILE + 1) as u32] {
-            raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [3; 8], len, hash: [0; 32] }));
+        for bucket in [0u32, 100, 20_000, (file::MAX_FILE * 2) as u32] {
+            raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [3; 8], bucket, mode: 0, hash: [0; 32] }));
         }
         assert!(!wait_for(&el, Duration::from_millis(400), |e| matches!(e, Event::FileOffer { .. })));
         // 3. a lying offer (wrong hash): user accepts, content is discarded after the integrity check
-        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [4; 8], len: 100, hash: [0xAA; 32] }));
+        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [4; 8], bucket: file::MIN_BUCKET as u32, mode: 0, hash: [0xAA; 32] }));
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, true);
         raw_wait_accept(&mut s, &mut sess, &me, xid);
-        for c in vec![0u8; file::MIN_BUCKET].chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[4; 8], c)); }
+        for c in file::build_stream(b"x").unwrap().chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[4; 8], c)); }
         assert!(wait(&el, |e| matches!(e, Event::Notice { text, .. } if text.contains("integrity"))), "bad file must not be delivered");
         assert!(!wait_for(&el, Duration::from_millis(300), |e| matches!(e, Event::File { .. })));
     }
@@ -895,18 +897,54 @@ mod tests {
     fn receiver_recleans_a_file_the_sender_did_not_clean() {
         let (el, mut s, mut sess, me) = raw_peer();
         let dirty = jpeg(3000);
-        let pl = file::padded_len(dirty.len()).unwrap();
-        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [5; 8], len: dirty.len() as u32, hash: file::hash(&dirty) }));
+        let stream = file::build_stream(&dirty).unwrap();
+        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [5; 8], bucket: stream.len() as u32, mode: 0, hash: file::hash(&dirty) }));
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, true);
         raw_wait_accept(&mut s, &mut sess, &me, xid);
-        let mut padded = dirty.clone(); padded.resize(pl, 0);
-        for c in padded.chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[5; 8], c)); }
+        for c in stream.chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[5; 8], c)); }
         let mut r = None;
         assert!(wait(&el, |e| if let Event::File { data, resanitised, .. } = e { r = Some((data.to_vec(), *resanitised)); true } else { false }));
         let (data, resan) = r.unwrap();
         assert!(resan, "receiver must flag that it had to clean the file itself");
         assert!(!has(&data, b"Exif") && !has(&data, b"secret comment"));
+    }
+
+    #[test]
+    fn plain_text_is_an_explicit_mode_and_structured_documents_are_refused() {
+        let (el, ed) = pair();
+        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", seburity_strip::Mode::Auto).is_err());
+        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", seburity_strip::Mode::PlainText).is_err());
+        let report = ed.send_file(ID, "note\u{202E}\u{E0041} plain".as_bytes(), seburity_strip::Mode::PlainText).unwrap();
+        assert!(report.iter().any(|l| l.contains("NOT understood")));
+        let (xid, _) = offer_xid(&el);
+        el.reply_file(ID, xid, true);
+        let mut r = None;
+        assert!(wait(&el, |ev| if let Event::File { data, format, .. } = ev { r = Some((data.to_vec(), *format)); true } else { false }));
+        let (data, f) = r.unwrap();
+        assert_eq!(f, seburity_strip::Format::Text);
+        assert_eq!(data, b"note plain");
+    }
+
+    #[test]
+    fn expired_or_failed_transfers_tell_the_ui_to_clear_the_offer() {
+        let (el, mut s, mut sess, me) = raw_peer();
+        raw_send(&mut s, &mut sess, &me, &file::encode_offer(&file::Offer { xid: [6; 8], bucket: file::MIN_BUCKET as u32, mode: 0, hash: [1; 32] }));
+        let (xid, _) = offer_xid(&el);
+        el.reply_file(ID, xid, true);
+        raw_wait_accept(&mut s, &mut sess, &me, xid);
+        for c in file::build_stream(b"x").unwrap().chunks(file::CHUNK_DATA) { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[6; 8], c)); }
+        assert!(wait(&el, |e| matches!(e, Event::FileCancelled { .. })), "integrity failure must cancel the UI state");
+    }
+
+    #[test]
+    fn a_peer_that_keeps_sending_garbage_is_disconnected_and_cannot_flood_notices() {
+        let (el, mut s, mut sess, me) = raw_peer();
+        for _ in 0..12 { raw_send(&mut s, &mut sess, &me, &file::encode_chunk(&[9; 8], &[1; 10])); }
+        assert!(wait(&el, |e| matches!(e, Event::Disconnected { .. })), "abusive peer must be cut off");
+        let mut notices = 0;
+        while let Ok(ev) = el.events.try_recv() { if matches!(ev, Event::Notice { .. }) { notices += 1; } }
+        assert!(notices <= 6, "notice flood: {notices}");
     }
 
     #[test]

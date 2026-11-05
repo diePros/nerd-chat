@@ -41,9 +41,12 @@ pub fn read_regular_file(path: &Path, max: u64) -> Result<Vec<u8>, StoreError> {
     let md = f.metadata().map_err(io)?;
     if !md.is_file() { return Err(StoreError::Io("not a regular file".into())); }
     if md.len() > max { return Err(StoreError::Io(format!("file larger than {max} bytes"))); }
-    let mut v = Vec::new();
-    f.take(max + 1).read_to_end(&mut v).map_err(io)?;
-    if v.len() as u64 > max { return Err(StoreError::Io(format!("file larger than {max} bytes"))); }
+    // Pre-sized from fstat: read_to_end into a growing Vec would leave copies of the plaintext in freed heap.
+    let mut v = vec![0u8; md.len() as usize];
+    let mut f = f;
+    f.read_exact(&mut v).map_err(io)?;
+    let mut extra = [0u8; 1];
+    if f.read(&mut extra).map_err(io)? != 0 { return Err(StoreError::Io("file changed while reading".into())); }
     Ok(v)
 }
 

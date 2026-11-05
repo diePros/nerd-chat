@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2"
+seburity-core = { path = "../core" }

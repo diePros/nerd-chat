@@ -95,7 +95,7 @@ pub enum Action { None, Quit, Panic }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
-    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson, SendFile, SaveFile,
+    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson, SendFile, SendText, SaveFile,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -167,6 +167,8 @@ pub struct App {
     compose: ComposeBuf,
     /// pending incoming file offers (contact id -> (transfer id, size))
     offers: HashMap<[u8; 8], (seburity_chat::file::Xid, u32)>,
+    /// accepted, still arriving: contact id -> bucket (counts toward the RAM budget)
+    accepted: HashMap<[u8; 8], u32>,
     inbox: HashMap<[u8; 8], Received>,
     kdf_rx: Option<Receiver<KdfMsg>>,
     /// screen to return to if the derivation fails
@@ -185,7 +187,7 @@ impl App {
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), chat_with: None, compose: ComposeBuf::new(),
-            offers: HashMap::new(), inbox: HashMap::new(),
+            offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             kdf_rx: None, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
@@ -259,6 +261,7 @@ impl App {
         self.compose.clear();
         self.code_buf.clear();
         self.offers.clear();
+        self.accepted.clear();
         self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
         self.kdf_rx = None; // a running derivation finishes on its own; its result is dropped (zeroized)
@@ -447,6 +450,7 @@ impl App {
             Key::Char('x') => self.cancel_pairing(),
             Key::Char('o') => self.toggle_online(),
             Key::Char('f') => if self.sel_linked() { self.open_prompt(Prompt::SendFile, "") },
+            Key::Char('t') => if self.sel_linked() { self.open_prompt(Prompt::SendText, "") },
             Key::Char('a') => self.reply_offer(true),
             Key::Char('r') => self.reply_offer(false),
             Key::Char('s') => self.start_save(),
@@ -468,18 +472,35 @@ impl App {
         }
     }
 
-    /// Pending offer of the selected contact: (size bucket text) for the UI.
+    /// Pending offer / received file of the selected contact, for the UI. (Offer sizes are only the padded bucket.)
     pub fn file_state(&self) -> Option<String> {
         let id = self.sel_id()?;
-        if let Some((_, len)) = self.offers.get(&id) { return Some(format!("File offered ({} KiB, cleaned): a = accept, r = decline", (*len as usize).div_ceil(1024))); }
-        self.inbox.get(&id).map(|r| format!("File received ({} KiB, in RAM only, cleaned): s = save to a neutral name", r.data.len().div_ceil(1024)))
+        if let Some((_, bucket)) = self.offers.get(&id) { return Some(format!("File offered (up to {} KiB; the sender's cleaning is NOT trusted, we re-clean): a = accept, r = decline", (*bucket as usize) / 1024)); }
+        if self.accepted.contains_key(&id) { return Some("File arriving...".into()); }
+        self.inbox.get(&id).map(|r| format!("File received ({} KiB, RAM only, re-cleaned here): s = save to a neutral name, r = discard", r.data.len().div_ceil(1024)))
     }
+
+    /// RAM we are willing to hold for received files in total.
+    const FILE_RAM_BUDGET: usize = 24 * 1024 * 1024;
 
     fn reply_offer(&mut self, accept: bool) {
         let Some(id) = self.sel_id() else { return };
-        let Some((xid, _)) = self.offers.remove(&id) else { return self.err("No file offer from this contact.") };
+        if !self.offers.contains_key(&id) {
+            // `r` with no pending offer discards a received file that is still in RAM
+            if !accept && self.inbox.remove(&id).is_some() { return self.ok("Received file discarded (wiped from RAM)."); }
+            return self.err("No file offer from this contact.");
+        }
+        let name = self.vf.as_ref().and_then(|v| v.store.contacts.iter().find(|c| c.id == id)).map(|c| c.name.clone()).unwrap_or_default();
+        let (xid, bucket) = self.offers[&id];
+        if accept {
+            let held: usize = self.inbox.values().map(|r| r.data.len()).sum::<usize>() + self.accepted.values().map(|b| *b as usize).sum::<usize>();
+            if self.inbox.contains_key(&id) { return self.err("You still hold an unsaved file from this contact: save (s) or discard (r) it first."); }
+            if held + bucket as usize > Self::FILE_RAM_BUDGET { return self.err("Too many files in RAM: save or discard some first."); }
+        }
+        self.offers.remove(&id);
         if let Some(e) = &self.engine { e.reply_file(id, xid, accept); }
-        if accept { self.ok("Accepted: receiving into RAM. It is re-cleaned here before you can save it."); } else { self.ok("Declined: nothing is transferred."); }
+        if accept { self.accepted.insert(id, bucket); self.ok(format!("Accepted the file from {name}: receiving into RAM; it is re-cleaned here before you can save it.")); }
+        else { self.ok(format!("Declined the file from {name}: nothing is transferred.")); }
     }
 
     fn start_save(&mut self) {
@@ -487,7 +508,8 @@ impl App {
         let Some(r) = self.inbox.get(&id) else { return self.err("No received file for this contact.") };
         let mut b = [0u8; 4];
         getrandom::fill(&mut b).expect("OS RNG unavailable");
-        let name = format!("file-{}.{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>(), r.ext);
+        let dir = std::env::current_dir().unwrap_or_default();
+        let name = format!("{}/file-{}.{}", dir.display(), b.iter().map(|x| format!("{x:02x}")).collect::<String>(), r.ext);
         self.open_prompt(Prompt::SaveFile, &name);
     }
 
@@ -563,7 +585,8 @@ impl App {
                 }
                 Err(e) => self.err(format!("{e}")),
             },
-            Prompt::SendFile => {
+            Prompt::SendFile | Prompt::SendText => {
+                let mode = if p == Prompt::SendText { seburity_strip::Mode::PlainText } else { seburity_strip::Mode::Auto };
                 let Some(id) = self.sel_id() else { return };
                 if !self.linked.contains(&id) { return self.err("Contact is no longer connected."); }
                 let raw = match read_regular_file(&PathBuf::from(&text), seburity_chat::file::MAX_FILE as u64 * 2) {
@@ -571,9 +594,9 @@ impl App {
                     Err(e) => return self.err(format!("Cannot read file: {e}")),
                 };
                 let Some(eng) = &self.engine else { return };
-                match eng.send_file(id, &raw) {
+                match eng.send_file(id, &raw, mode) {
                     Ok(report) if report.is_empty() => self.ok("Offered (nothing needed removing). Waiting for the contact to accept."),
-                    Ok(report) => self.ok(format!("Offered after cleaning: {}. Waiting for the contact to accept.", report.join("; "))),
+                    Ok(report) => { let r = report.join("; "); self.ok(format!("Offered after cleaning: {}. Waiting for the contact to accept.", r.chars().take(300).collect::<String>())) }
                     Err(e) => self.err(format!("NOT sent: {e}")),
                 }
             }
@@ -584,7 +607,7 @@ impl App {
                 let path = PathBuf::from(&text);
                 match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).and_then(|mut f| f.write_all(&r.data).and_then(|_| f.sync_all())) {
                     Ok(()) => { self.inbox.remove(&id); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
-                    Err(e) => self.err(format!("Cannot save: {e}")),
+                    Err(e) => { let _ = fs::remove_file(&path); self.err(format!("Cannot save: {e}")) }
                 }
             }
             Prompt::Export => {
@@ -874,24 +897,31 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::File { id, .. } | Event::FileSent { id } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
-                Event::Disconnected { id } => { self.linked.remove(&id); }
+                Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); }
+                Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::Message { id, text } => {
                     self.push_line(id, ChatLine { mine: false, text, queued: false });
                     if !(self.screen == Screen::Chat && self.chat_with == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
-                Event::Notice { text, .. } => self.status = text,
-                Event::FileOffer { id, xid, len } => {
-                    self.offers.insert(id, (xid, len));
+                Event::Notice { text, .. } => self.status = text.chars().take(300).collect(),
+                Event::FileOffer { id, xid, bucket } => {
+                    if self.offers.contains_key(&id) || self.accepted.contains_key(&id) || self.inbox.contains_key(&id) {
+                        // never silently replace a pending offer or an unsaved file
+                        if let Some(e) = &self.engine { e.reply_file(id, xid, false); }
+                        continue;
+                    }
+                    self.offers.insert(id, (xid, bucket));
                     self.status = "A contact offers a file: select them, then a = accept / r = decline.".into();
                 }
                 Event::File { id, data, format, report, resanitised } => {
                     let ext = match format { seburity_strip::Format::Jpeg => "jpg", seburity_strip::Format::Png => "png", seburity_strip::Format::Text => "txt" };
+                    self.accepted.remove(&id);
                     self.inbox.insert(id, Received { data, ext });
-                    self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ")) }
+                    self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ").chars().take(200).collect::<String>()) }
                         else { "File received (RAM only). Select the contact, s = save under a neutral name.".into() };
                 }
                 Event::FileSent { .. } => self.status = "File delivered.".into(),
@@ -1341,8 +1371,8 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))), "file never arrived");
         b.handle(Key::Char('s'));
         let Screen::Prompt(Prompt::SaveFile) = &b.screen else { panic!("no save prompt") };
-        assert!(b.input.starts_with("file-") && b.input.ends_with(".jpg") && !b.input.contains("protest"), "neutral name expected, got {}", b.input);
-        let dst = d.path().join(&b.input);
+        assert!(b.input.starts_with('/') && b.input.rsplit('/').next().unwrap().starts_with("file-") && b.input.ends_with(".jpg") && !b.input.contains("protest"), "absolute neutral name expected, got {}", b.input);
+        let dst = d.path().join(b.input.rsplit('/').next().unwrap());
         b.input = dst.to_str().unwrap().into();
         b.handle(Key::Enter);
         let saved = std::fs::read(&dst).unwrap();
@@ -1357,6 +1387,40 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))));
         b.panic_wipe();
         assert!(b.inbox.is_empty() && b.offers.is_empty());
+    }
+
+    #[test]
+    fn unsaved_files_are_never_silently_replaced_and_can_be_discarded() {
+        let d = tempfile::tempdir().unwrap();
+        let net = seburity_chat::MemNet::new();
+        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        let seg = |m: u8, body: &[u8]| { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v };
+        let mut jpg = vec![0xFF, 0xD8];
+        jpg.extend(seg(0xDB, &[0; 65])); jpg.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); jpg.extend(seg(0xC4, &[0; 17])); jpg.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0]));
+        jpg.extend(vec![0x11u8; 100]); jpg.extend_from_slice(&[0xFF, 0xD9]);
+        let src = d.path().join("x.jpg");
+        std::fs::write(&src, &jpg).unwrap();
+        let send = |a: &mut App| { a.handle(Key::Char('f')); type_str(a, src.to_str().unwrap()); a.handle(Key::Enter); };
+        send(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("offered"))));
+        b.handle(Key::Char('a'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("received"))));
+        // a second file while the first is unsaved: auto-declined, the first stays
+        send(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].status.contains("declined")), "{}", a.status);
+        assert!(b.offers.is_empty() && b.inbox.len() == 1);
+        b.handle(Key::Char('r'));
+        assert!(b.inbox.is_empty() && b.file_state().is_none(), "discard wipes it");
+        // a stale offer disappears when the contact disconnects
+        send(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].file_state().is_some_and(|s| s.contains("offered"))));
+        a.handle(Key::Char('o'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline && !is_linked(x[1])));
+        assert!(b.offers.is_empty(), "offer must not outlive the connection");
     }
 
     #[test]

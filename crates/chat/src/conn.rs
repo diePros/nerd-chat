@@ -15,8 +15,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// A file ready to send: content already stripped and ZERO-PADDED to its size bucket; `hash`/`len` describe the true content.
-pub struct FileOut { pub xid: Xid, pub len: u32, pub hash: [u8; 32], pub padded: Zeroizing<Vec<u8>> }
+/// A file ready to send: `padded` is the full stream (`len | content | zeros`); `hash` covers the true content only.
+pub struct FileOut { pub xid: Xid, pub bucket: u32, pub mode: u8, pub hash: [u8; 32], pub padded: Zeroizing<Vec<u8>> }
 
 pub enum Out { Text(Zeroizing<String>), File(FileOut), Reply { xid: Xid, accept: bool }, Close }
 
@@ -97,7 +97,16 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let (mut rd, mut asm) = (CellReader::default(), Assembler::new());
     let (mut last_rx, mut last_tx) = (Instant::now(), Instant::now());
     let (mut outx, mut inx): (Option<OutXfer>, Option<InXfer>) = (None, None);
-    let notice = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok();
+    // A contact must not be able to flood the status line (C6-flood): at most 6 notices per minute per connection.
+    let (n_count, n_window) = (std::cell::Cell::new(0u32), std::cell::Cell::new(Instant::now()));
+    let notice = |ev: &Sender<In>, text: &str| {
+        if n_window.get().elapsed() > Duration::from_secs(60) { n_window.set(Instant::now()); n_count.set(0); }
+        n_count.set(n_count.get() + 1);
+        if n_count.get() > 6 { return true; }
+        ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into() })).is_ok()
+    };
+    let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::FileCancelled { id, gen })).is_ok();
+    let mut bad_frames = 0u32;
     'conn: loop {
         loop {
             match out_rx.try_recv() {
@@ -107,7 +116,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                 }
                 Ok(Out::File(f)) => {
                     if outx.is_some() { notice(&ev, "a file transfer is already running on this connection"); continue; }
-                    let o = Offer { xid: f.xid, len: f.len, hash: f.hash };
+                    let o = Offer { xid: f.xid, bucket: f.bucket, mode: f.mode, hash: f.hash };
                     if !send_body(&mut stream, &mut sess, &me, &file::encode_offer(&o)) { break 'conn; }
                     last_tx = Instant::now();
                     outx = Some(OutXfer { f, st: OutState::WaitAccept(Instant::now() + OFFER_WAIT) });
@@ -152,9 +161,9 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                 InState::Pending(dl) if Instant::now() > dl => {
                     let xid = x.o.xid; inx = None;
                     if !send_body(&mut stream, &mut sess, &me, &file::encode_ctl(file::KIND_FILE_REJECT, &xid)) { break; }
-                    if !notice(&ev, "a file offer expired unanswered and was declined") { break; }
+                    if !notice(&ev, "a file offer expired unanswered and was declined") || !cancelled(&ev) { break; }
                 }
-                InState::Receiving(dl) if Instant::now() > dl => { inx = None; if !notice(&ev, "file transfer stalled and was cancelled") { break; } }
+                InState::Receiving(dl) if Instant::now() > dl => { inx = None; if !notice(&ev, "file transfer stalled and was cancelled") || !cancelled(&ev) { break; } }
                 _ => {}
             }
         }
@@ -169,14 +178,14 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                 match m.body.first().copied() {
                     Some(file::KIND_FILE_OFFER) => {
                         let Some(o) = file::parse_offer(&m.body) else { break };
-                        let pl = file::padded_len(o.len as usize);
-                        if inx.is_some() || pl.is_none() {
+                        let pl = file::valid_bucket(o.bucket as usize);
+                        if inx.is_some() || !pl {
                             // busy or out of policy: decline at once (no state kept)
                             if !send_body(&mut stream, &mut sess, &me, &file::encode_ctl(file::KIND_FILE_REJECT, &o.xid)) { break; }
                             last_tx = Instant::now();
                         } else {
-                            inx = Some(InXfer { o, padded: pl.unwrap_or(0), buf: Zeroizing::new(Vec::new()), st: InState::Pending(Instant::now() + OFFER_WAIT) });
-                            if ev.send(In::Conn(ConnEvent::FileOffer { id, gen, xid: o.xid, len: o.len })).is_err() { break; }
+                            inx = Some(InXfer { o, padded: o.bucket as usize, buf: Zeroizing::new(Vec::new()), st: InState::Pending(Instant::now() + OFFER_WAIT) });
+                            if ev.send(In::Conn(ConnEvent::FileOffer { id, gen, xid: o.xid, bucket: o.bucket })).is_err() { break; }
                         }
                     }
                     Some(file::KIND_FILE_ACCEPT) => {
@@ -201,23 +210,27 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                             }
                             _ => bad = true, // unsolicited, wrong id, too long, malformed: cancel whatever is running
                         }
-                        if bad { inx = None; if !notice(&ev, "unexpected file data: transfer cancelled") { break; } }
+                        if bad {
+                            inx = None; bad_frames += 1;
+                            if bad_frames > 5 { break; } // an authenticated peer that keeps sending garbage is cut off
+                            if !notice(&ev, "unexpected file data: transfer cancelled") || !cancelled(&ev) { break; }
+                        }
                         if done.is_some() {
                             let x = inx.take().expect("set above");
-                            let len = x.o.len as usize;
-                            let padding_zero = x.buf[len..].iter().all(|&b| b == 0);
-                            if !padding_zero || file::hash(&x.buf[..len]) != x.o.hash {
-                                if !notice(&ev, "received file failed its integrity check and was discarded") { break; }
-                            } else {
-                                // quarantine: re-strip ourselves, never trust the sender's cleaning
-                                match seburity_strip::clean(&x.buf[..len]) {
-                                    Ok(c) => {
-                                        let cleaned = c.data.len() != len || !c.report.is_empty();
-                                        let data = Zeroizing::new(c.data);
-                                        if ev.send(In::Conn(ConnEvent::File { id, gen, data, format: c.format, report: c.report, resanitised: cleaned })).is_err() { break; }
+                            let mode = if x.o.mode == file::MODE_TEXT { seburity_strip::Mode::PlainText } else { seburity_strip::Mode::Auto };
+                            match file::parse_stream(&x.buf) {
+                                Some(content) if file::hash(content) == x.o.hash => {
+                                    // quarantine: re-clean ourselves, never trust the sender's cleaning
+                                    match seburity_strip::clean(content, mode) {
+                                        Ok(c) => {
+                                            let resanitised = c.data.len() != content.len() || (mode == seburity_strip::Mode::Auto && !c.report.is_empty());
+                                            let data = Zeroizing::new(c.data);
+                                            if ev.send(In::Conn(ConnEvent::File { id, gen, data, format: c.format, report: c.report, resanitised })).is_err() { break; }
+                                        }
+                                        Err(e) => { if !notice(&ev, &format!("received file refused ({e})")) || !cancelled(&ev) { break; } }
                                     }
-                                    Err(e) => { if !notice(&ev, &format!("received file refused ({e})")) { break; } }
                                 }
+                                _ => { if !notice(&ev, "received file failed its integrity check and was discarded") || !cancelled(&ev) { break; } }
                             }
                         }
                     }

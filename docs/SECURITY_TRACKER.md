@@ -210,5 +210,19 @@ No Critical/High. Opus review integrated:
 | R8-I10 | `add_onion` error after a 250 reply leaves an untracked live service until control closes | OPEN | |
 | R8-tests | missing tests: lazily hosted service removal on remove/offline/shutdown, `fails` reset on connection, create-path KDF + panic, TorTransport cleanup after flip | OPEN | |
 
-## File sharing (started)
-- `crates/strip` (allowlist stripper) written with planted-metadata tests; NOT yet reviewed by Opus. Open: protocol/engine/TUI integration, receiver quotas, opaque-blob mode, more formats, sandboxing, parser fuzzing. See docs/FILE_SHARING.md.
+## Review 9 — file sharing (commits 90355cf..42afdf1)
+No Critical. Opus review integrated:
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R9-H1 | "text" sniff accepted any UTF-8 document (RTF/SVG/EPS/GPX/ASCII PDF) with metadata untouched while UI said nothing to remove | FIXED | `Mode::Auto` (JPEG/PNG only) vs explicit `Mode::PlainText` (key `t`); structured documents refused even then; mode travels in the offer; receiver never auto-accepts text as binary; tests |
+| R9-M1 | PNG with ~457k unique chunk types froze the UI/panic key via a giant report in the status line | FIXED | aggregate "other ancillary chunks" line, report capped at 16, status truncated to 300 chars |
+| R9-M2 | text cleaner far weaker than `core::text` (tag chars, variation selectors, soft hyphen, ...) | FIXED | uses `is_unsafe_char` + combining cap; lone CR -> LF; test with tag-character payload |
+| R9-M3 | allowlisted JPEG/PNG segments copied unvalidated (payload in DQT/DHT/SOS/DAC/DNL, PLTE) | PARTIAL | exact structural validation of DQT/DHT/SOF/SOS/DRI, DAC/arithmetic refused, DNL dropped, IHDR/PLTE/tRNS validated. OPEN: data inside the zlib stream / after its end in the last IDAT (ZIP polyglot), PRNU and DQT camera fingerprints, no protection of viewers from malicious image data (documented) |
+| R9-L1 | wipe gaps: read buffers, reallocating outputs, conn threads not awaited on panic | PARTIAL | FIXED: `read_regular_file` pre-sized (no realloc copies), PNG/JPEG outputs pre-sized. OPEN: conn threads (up to 8 MiB buffers) are not awaited before `process::exit`; text cleaner temporaries; typed path in `input: String` |
+| R9-L2 | no RAM cap across contacts | FIXED | 24 MiB budget for received files (accepted + in RAM), one file per contact |
+| R9-L3 | stale offers, silent replacement of unsaved files, "cleaned" overclaim | FIXED | `FileCancelled` event, offers cleared on disconnect, auto-decline while an offer/unsaved file exists, `r` discards, wording fixed; test |
+| R9-L4 | failed save left partial file; relative default name | FIXED | unlink on error; absolute neutral path shown |
+| R9-L5 | peer-driven status spam / overwriting warnings | PARTIAL | max 6 notices/min per connection, 6 bad frames then disconnect (test). OPEN: security warnings are not sticky |
+| R9-L6 | offer revealed exact length; decline timing is a presence oracle | PARTIAL | offer carries only the bucket (length inside the accepted stream). OPEN: manual vs auto-decline timing (documented) |
+| R9-I | TooLarge message, stale doc claims, single-key accept without contact name | FIXED | message says 8 MiB, docs rewritten, accept/decline status names the contact |
+| R9-open | no fuzz harness in repo (reviewer's 400k-input fuzz found 0 panics, script not committed); no standalone `seburity strip FILE`; sandboxing (seccomp/Landlock) of the parsers | OPEN | |

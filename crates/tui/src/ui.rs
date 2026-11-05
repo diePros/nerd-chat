@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         f.render_widget(Paragraph::new(app.status.as_str()).style(style).wrap(Wrap { trim: true }), rows[2]);
     }
-    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  a/r accept/decline  s save  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
+    f.render_widget(Paragraph::new(" Enter chat  o online/offline  f send file  t send text  a/r accept/decline  s save  n new  e export  i import  l listen  c connect  x cancel  v verify  d delete  ? help  q quit   F12 / Ctrl+\\ = PANIC WIPE")
         .style(Style::default().fg(Color::DarkGray)), rows[3]);
 
     match &app.screen {
@@ -170,7 +170,8 @@ fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str) {
         Prompt::JoinAddr => ("Pair: connect", "Their address ip:port:".into()),
         Prompt::JoinCode(a) => ("Pair: connect", format!("One-time code shown on their screen (hidden as you type; connecting to {a}):")),
         Prompt::ConfirmDelete => ("Delete contact", "Type yes to delete this contact AND its keys:".into()),
-        Prompt::SendFile => ("Send a file", "Path of the file (JPEG/PNG/text; metadata is stripped, others refused):".into()),
+        Prompt::SendFile => ("Send a file", "Path of a JPEG or PNG (metadata is stripped; every other format is refused):".into()),
+        Prompt::SendText => ("Send plain text", "Path of a text file (ONLY invisible/control characters removed; document metadata is NOT understood; RTF/PDF/XML/HTML refused):".into()),
         Prompt::SaveFile => ("Save received file", "Write to (never overwrites; neutral name suggested):".into()),
         Prompt::InPerson => ("Pairing succeeded", "Was the code exchanged IN PERSON (same room)? y/n  (n = stays UNVERIFIED):".into()),
     };
@@ -193,7 +194,7 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "              i (import theirs)  ->  v (compare safety number)",
         "   or in person on one network:  l (listen) here, c (connect) there.",
         "",
-        "Files: f send (metadata stripped, unknown types refused), a/r accept/decline an offer, s save.",
+        "Files: f send JPEG/PNG (metadata stripped), t send plain text, a/r accept/decline, s save, r discard.",
         "       Files live in RAM only until you save them; names are neutral.",
         "",
         "PANIC: F12 or Ctrl+\\  locks, wipes the screen+scrollback and exits at once.",

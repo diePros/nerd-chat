@@ -1,20 +1,27 @@
-//! Metadata stripping by ALLOWLIST: we re-emit only the structural parts of a file that are needed to display it and
-//! drop everything else (unknown segments, comments, EXIF/XMP/ICC, thumbnails, trailing data). Formats are recognised
-//! by content (magic bytes), never by file name. Unknown formats are refused.
+//! Metadata stripping by ALLOWLIST: we re-emit only the structural parts of a JPEG/PNG that are needed to display it and
+//! drop everything else (APPn/EXIF/XMP/ICC/comments/thumbnails, unknown chunks, trailing data). Kept segments are validated
+//! EXACTLY (no extra bytes). Formats are recognised by content, never by name; everything else is REFUSED. Plain text is an
+//! explicit `Mode::PlainText` choice and structured text documents (RTF/PDF/SVG/XML/HTML...) are refused even then.
 //!
-//! Honest limits: pixel/compressed image data is copied unchanged (information hidden inside the entropy-coded data
-//! or visible in the picture itself is NOT removed); removing EXIF orientation / colour profiles can change how an
-//! image is displayed. Parsers here are small, pure Rust and allocation-bounded (`MAX_INPUT`).
+//! Honest limits (see docs/FILE_SHARING.md): entropy-coded pixel data / zlib streams are copied unchanged (steganography, a
+//! polyglot tail inside the last IDAT, camera sensor noise, quantisation tables that fingerprint a camera model, faces,
+//! visible text are NOT removed); dropping EXIF orientation/ICC can change how an image looks; cleaning does NOT make a
+//! malicious image safe for a viewer. Pure Rust, bounded allocation.
 #![forbid(unsafe_code)]
 
-pub const MAX_INPUT: usize = 16 * 1024 * 1024;
+/// Largest input we clean (and the largest file the chat sends).
+pub const MAX_INPUT: usize = 8 * 1024 * 1024;
+/// Report lines are capped so a hostile file cannot flood the UI with them.
+const MAX_REPORT: usize = 16;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum StripError {
-    #[error("file too large (max {MAX_INPUT} bytes)")]
+    #[error("file too large (max 8 MiB)")]
     TooLarge,
     #[error("unsupported or unrecognised format (refused: it cannot be cleaned)")]
     Unsupported,
+    #[error("looks like a structured document format (RTF/PDF/SVG/XML/HTML/script...) whose metadata cannot be removed here: refused")]
+    StructuredText,
     #[error("malformed {0} file: {1}")]
     Malformed(&'static str, &'static str),
 }
@@ -22,72 +29,114 @@ pub enum StripError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format { Jpeg, Png, Text }
 
+/// `Auto` accepts ONLY formats we can clean structurally (JPEG, PNG). `PlainText` is an explicit user choice: only
+/// invisible/control characters are removed; document metadata inside text-based formats is NOT understood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode { Auto, PlainText }
+
 #[derive(Debug)]
 pub struct Cleaned {
     pub format: Format,
     pub data: Vec<u8>,
-    /// Human-readable before/after report, one line per removed item kind.
+    /// Human-readable before/after report (at most 16 lines).
     pub report: Vec<String>,
 }
 
-pub fn sniff(d: &[u8]) -> Option<Format> {
-    if d.starts_with(&[0xFF, 0xD8, 0xFF]) { Some(Format::Jpeg) }
-    else if d.starts_with(b"\x89PNG\r\n\x1a\n") { Some(Format::Png) }
-    else if std::str::from_utf8(d).is_ok() && !d.is_empty() && !d.contains(&0) { Some(Format::Text) }
-    else { None }
-}
-
-pub fn clean(d: &[u8]) -> Result<Cleaned, StripError> {
+pub fn clean(d: &[u8], mode: Mode) -> Result<Cleaned, StripError> {
     if d.len() > MAX_INPUT { return Err(StripError::TooLarge); }
-    match sniff(d).ok_or(StripError::Unsupported)? {
-        Format::Jpeg => jpeg(d),
-        Format::Png => png(d),
-        Format::Text => text(d),
+    match mode {
+        Mode::PlainText => text(d),
+        Mode::Auto => {
+            if d.starts_with(&[0xFF, 0xD8, 0xFF]) { jpeg(d) }
+            else if d.starts_with(b"\x89PNG\r\n\x1a\n") { png(d) }
+            else { Err(StripError::Unsupported) }
+        }
     }
 }
 
-fn note(report: &mut Vec<String>, what: String, n: usize, bytes: usize) {
-    report.push(format!("{what}: {n} item(s), {bytes} bytes removed"));
+fn finish(dropped: std::collections::BTreeMap<String, (usize, usize)>) -> Vec<String> {
+    let mut report: Vec<String> = dropped.into_iter().take(MAX_REPORT).map(|(k, (n, b))| format!("{k}: {} item(s), {b} bytes removed", n.max(1))).collect();
+    report.truncate(MAX_REPORT);
+    report
 }
 
+type Dropped = std::collections::BTreeMap<String, (usize, usize)>;
+
 // ---------------- JPEG ----------------
+/// Exact structural validation of the segments we keep (nothing may hide in extra bytes).
+fn jpeg_segment_ok(m: u8, body: &[u8]) -> bool {
+    match m {
+        0xDB => { // DQT: (Pq|Tq, 64*(Pq+1) bytes)*
+            let mut i = 0;
+            if body.is_empty() { return false; }
+            while i < body.len() {
+                let (pq, tq) = (body[i] >> 4, body[i] & 15);
+                if pq > 1 || tq > 3 { return false; }
+                i += 1 + 64 * (pq as usize + 1);
+            }
+            i == body.len()
+        }
+        0xC4 => { // DHT: (Tc|Th, 16 counts, symbols)*
+            let mut i = 0;
+            if body.is_empty() { return false; }
+            while i < body.len() {
+                if body.len() < i + 17 { return false; }
+                let (tc, th) = (body[i] >> 4, body[i] & 15);
+                if tc > 1 || th > 3 { return false; }
+                let n: usize = body[i + 1..i + 17].iter().map(|&c| c as usize).sum();
+                if n > 256 { return false; }
+                i += 17 + n;
+            }
+            i == body.len()
+        }
+        0xC0..=0xC3 | 0xC5..=0xC7 => { // SOF (Huffman): P, Y, X, Nf, 3*Nf
+            body.len() >= 6 && matches!(body[0], 8 | 12 | 16) && (1..=4).contains(&body[5]) && body.len() == 6 + 3 * body[5] as usize
+                && u16::from_be_bytes([body[1], body[2]]) != 0 && u16::from_be_bytes([body[3], body[4]]) != 0
+                // Y may be 0 only with a DNL (which we drop): refuse that case above via the height check
+        }
+        0xDA => !body.is_empty() && (1..=4).contains(&body[0]) && body.len() == 1 + 2 * body[0] as usize + 3, // SOS
+        0xDD => body.len() == 2, // DRI
+        _ => false,
+    }
+}
+
 fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
     const M: &str = "JPEG";
     let mut out = Vec::with_capacity(d.len());
-    let mut dropped: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    let mut dropped = Dropped::new();
     out.extend_from_slice(&[0xFF, 0xD8]);
     let mut i = 2;
-    let mut seen_sof = false;
-    let mut seen_scan = false;
+    let (mut seen_sof, mut seen_scan) = (false, false);
     loop {
-        // find the next marker (tolerate fill bytes 0xFF)
         if i >= d.len() { return Err(StripError::Malformed(M, "missing EOI")); }
         if d[i] != 0xFF { return Err(StripError::Malformed(M, "expected marker")); }
         while i < d.len() && d[i] == 0xFF { i += 1; }
         if i >= d.len() { return Err(StripError::Malformed(M, "truncated")); }
         let m = d[i]; i += 1;
         match m {
-            0xD9 => { // EOI
+            0xD9 => {
                 if !seen_scan { return Err(StripError::Malformed(M, "no image data")); }
                 out.extend_from_slice(&[0xFF, 0xD9]);
                 if i < d.len() { dropped.entry("data after end of image".into()).or_default().1 += d.len() - i; }
                 break;
             }
             0x00 | 0x01 | 0xD0..=0xD8 => return Err(StripError::Malformed(M, "unexpected standalone marker")),
+            0xC8 | 0xC9..=0xCB | 0xCD..=0xCF | 0xCC => return Err(StripError::Unsupported), // arithmetic coding / reserved: not supported
             _ => {}
         }
         if i + 2 > d.len() { return Err(StripError::Malformed(M, "truncated segment")); }
         let len = u16::from_be_bytes([d[i], d[i + 1]]) as usize;
         if len < 2 || i + len > d.len() { return Err(StripError::Malformed(M, "bad segment length")); }
+        let body = &d[i + 2..i + len];
+        let keep = matches!(m, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC4 | 0xDB | 0xDD | 0xDA);
         let seg = &d[i..i + len];
-        let is_sof = matches!(m, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF);
-        let keep = is_sof || matches!(m, 0xC4 | 0xCC | 0xDB | 0xDD | 0xDA | 0xDC);
         i += len;
         if keep {
-            if is_sof { seen_sof = true; }
+            if !jpeg_segment_ok(m, body) { return Err(StripError::Malformed(M, "invalid or padded structural segment")); }
+            if matches!(m, 0xC0..=0xC3 | 0xC5..=0xC7) { if seen_sof { return Err(StripError::Malformed(M, "second frame header")); } seen_sof = true; }
             out.extend_from_slice(&[0xFF, m]);
             out.extend_from_slice(seg);
-            if m == 0xDA { // entropy-coded data up to the next real marker
+            if m == 0xDA {
                 if !seen_sof { return Err(StripError::Malformed(M, "scan before frame header")); }
                 seen_scan = true;
                 let start = i;
@@ -99,13 +148,11 @@ fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
                 out.extend_from_slice(&d[start..i]);
             }
         } else {
-            let name = match m { 0xE0..=0xEF => format!("application segment APP{} (EXIF/XMP/ICC/thumbnail/...)", m - 0xE0), 0xFE => "comment".into(), _ => format!("segment 0xFF{m:02X}") };
+            let name = match m { 0xE0..=0xEF => format!("application segment APP{} (EXIF/XMP/ICC/thumbnail/...)", m - 0xE0), 0xFE => "comment".into(), 0xDC => "line-count (DNL) segment".into(), _ => "other segment".into() };
             let e = dropped.entry(name).or_default(); e.0 += 1; e.1 += len + 2;
         }
     }
-    let mut report = vec![];
-    for (k, (n, b)) in dropped { note(&mut report, k, n.max(1), b); }
-    Ok(Cleaned { format: Format::Jpeg, data: out, report })
+    Ok(Cleaned { format: Format::Jpeg, data: out, report: finish(dropped) })
 }
 
 // ---------------- PNG ----------------
@@ -123,61 +170,92 @@ fn crc32(data: &[u8]) -> u32 {
 
 fn png(d: &[u8]) -> Result<Cleaned, StripError> {
     const M: &str = "PNG";
-    let mut out = d[..8].to_vec();
+    let mut out = Vec::with_capacity(d.len());
+    out.extend_from_slice(&d[..8]);
     let mut i = 8;
-    let mut dropped: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
-    let (mut ihdr, mut idat, mut iend) = (false, false, false);
+    let mut dropped = Dropped::new();
+    let (mut ihdr, mut idat, mut iend, mut plte, mut trns) = (false, false, false, false, false);
+    let mut depth = 0u8;
     while i < d.len() && !iend {
         if i + 12 > d.len() { return Err(StripError::Malformed(M, "truncated chunk")); }
         let len = u32::from_be_bytes(d[i..i + 4].try_into().unwrap()) as usize;
         if len > 0x7FFF_FFFF || i + 12 + len > d.len() { return Err(StripError::Malformed(M, "bad chunk length")); }
         let ty = &d[i + 4..i + 8];
+        let body = &d[i + 8..i + 8 + len];
         let crc = u32::from_be_bytes(d[i + 8 + len..i + 12 + len].try_into().unwrap());
         if crc32(&d[i + 4..i + 8 + len]) != crc { return Err(StripError::Malformed(M, "chunk CRC mismatch")); }
         if !ty.iter().all(u8::is_ascii_alphabetic) { return Err(StripError::Malformed(M, "bad chunk type")); }
         let whole = &d[i..i + 12 + len];
         match ty {
-            b"IHDR" => { if ihdr || i != 8 || len != 13 { return Err(StripError::Malformed(M, "bad IHDR")); } ihdr = true; out.extend_from_slice(whole); }
-            b"PLTE" | b"tRNS" => { if !ihdr || idat { return Err(StripError::Malformed(M, "chunk out of order")); } out.extend_from_slice(whole); }
+            b"IHDR" => {
+                if ihdr || i != 8 || len != 13 { return Err(StripError::Malformed(M, "bad IHDR")); }
+                let (w, h) = (u32::from_be_bytes(body[0..4].try_into().unwrap()), u32::from_be_bytes(body[4..8].try_into().unwrap()));
+                depth = body[8];
+                if w == 0 || h == 0 || w > 0x7FFF_FFFF || h > 0x7FFF_FFFF || !matches!(depth, 1 | 2 | 4 | 8 | 16) || !matches!(body[9], 0 | 2 | 3 | 4 | 6) || body[10] != 0 || body[11] != 0 || body[12] > 1 {
+                    return Err(StripError::Malformed(M, "invalid IHDR values"));
+                }
+                ihdr = true; out.extend_from_slice(whole);
+            }
+            b"PLTE" => {
+                if !ihdr || idat || plte || trns || len == 0 || len % 3 != 0 || len > 768 || len / 3 > (1usize << depth.min(8)) { return Err(StripError::Malformed(M, "invalid PLTE")); }
+                plte = true; out.extend_from_slice(whole);
+            }
+            b"tRNS" => {
+                if !ihdr || idat || trns || len == 0 || len > 256 { return Err(StripError::Malformed(M, "invalid tRNS")); }
+                trns = true; out.extend_from_slice(whole);
+            }
             b"IDAT" => { if !ihdr { return Err(StripError::Malformed(M, "IDAT before IHDR")); } idat = true; out.extend_from_slice(whole); }
             b"IEND" => { if !idat || len != 0 { return Err(StripError::Malformed(M, "bad IEND")); } out.extend_from_slice(whole); iend = true; }
             _ => {
                 let name = match ty {
-                    b"tEXt" | b"zTXt" | b"iTXt" => "text chunk (author/comment/software/XMP)".to_string(),
-                    b"eXIf" => "EXIF block".into(),
-                    b"tIME" => "modification time".into(),
-                    b"iCCP" => "ICC colour profile".into(),
-                    _ => format!("chunk {}", String::from_utf8_lossy(ty)),
+                    b"tEXt" | b"zTXt" | b"iTXt" => "text chunks (author/comment/software/XMP)",
+                    b"eXIf" => "EXIF block",
+                    b"tIME" => "modification time",
+                    b"iCCP" => "ICC colour profile",
+                    _ => "other ancillary chunks", // ONE aggregate entry: chunk types are attacker-chosen
                 };
-                let e = dropped.entry(name).or_default(); e.0 += 1; e.1 += whole.len();
+                let e = dropped.entry(name.to_string()).or_default(); e.0 += 1; e.1 += whole.len();
             }
         }
         i += 12 + len;
     }
     if !iend { return Err(StripError::Malformed(M, "missing IEND")); }
     if i < d.len() { dropped.entry("data after IEND".into()).or_default().1 += d.len() - i; }
-    let mut report = vec![];
-    for (k, (n, b)) in dropped { note(&mut report, k, n.max(1), b); }
-    Ok(Cleaned { format: Format::Png, data: out, report })
+    Ok(Cleaned { format: Format::Png, data: out, report: finish(dropped) })
 }
 
-// ---------------- plain text ----------------
+// ---------------- plain text (explicit choice) ----------------
+/// Content that is really a structured document: refused even in plain-text mode (its metadata would pass untouched).
+fn looks_structured(s: &str) -> bool {
+    let t = s.trim_start_matches(['\u{FEFF}', ' ', '\t', '\r', '\n']);
+    let lower: String = t.chars().take(64).flat_map(char::to_lowercase).collect();
+    ["{\\rtf", "%pdf", "%!", "<?xml", "<svg", "<!doctype", "<html", "<", "begin:v", "#!", "from ", "mime-version", "return-path:", "received:"].iter().any(|p| lower.starts_with(p))
+}
+
 fn text(d: &[u8]) -> Result<Cleaned, StripError> {
+    if d.is_empty() { return Err(StripError::Unsupported); }
     let s = std::str::from_utf8(d).map_err(|_| StripError::Malformed("text", "not UTF-8"))?;
+    if d.contains(&0) || looks_structured(s) { return Err(StripError::StructuredText); }
     let mut out = String::with_capacity(s.len());
-    let mut removed = 0usize;
-    for c in s.replace("\r\n", "\n").chars() {
-        let bad = (c.is_control() && c != '\n' && c != '\t') || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{E000}'..='\u{F8FF}');
-        if bad { removed += 1 } else { out.push(c) }
+    let (mut removed, mut run) = (0usize, 0usize);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        let c = if c == '\r' { if chars.peek() == Some(&'\n') { continue } else { '\n' } } else { c };
+        let combining = matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F);
+        if combining { run += 1; } else { run = 0; }
+        if (seburity_core::text::is_unsafe_char(c) && c != '\n' && c != '\t') || (combining && run > seburity_core::text::MAX_COMBINING_RUN) { removed += 1; } else { out.push(c); }
     }
-    let mut report = vec![];
-    if removed > 0 { report.push(format!("control/invisible/bidi characters: {removed} removed")); }
+    let mut report = vec!["plain text: ONLY invisible/control characters are removed; any document metadata inside the text is NOT understood".to_string()];
+    if removed > 0 { report.push(format!("control/invisible/bidi/format characters: {removed} removed")); }
     Ok(Cleaned { format: Format::Text, data: out.into_bytes(), report })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clean(d: &[u8]) -> Result<Cleaned, StripError> { super::clean(d, Mode::Auto) }
+    fn text_clean(d: &[u8]) -> Result<Cleaned, StripError> { super::clean(d, Mode::PlainText) }
 
     fn seg(m: u8, body: &[u8]) -> Vec<u8> { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v }
 
@@ -262,12 +340,68 @@ mod tests {
     }
 
     #[test]
-    fn unknown_formats_are_refused_and_text_is_sanitised() {
+    fn auto_mode_refuses_everything_that_is_not_jpeg_or_png() {
         assert_eq!(clean(b"%PDF-1.7\x00\x01\x02").unwrap_err(), StripError::Unsupported);
         assert_eq!(clean(b"PK\x03\x04\xff\xfe").unwrap_err(), StripError::Unsupported);
         assert_eq!(clean(&[]).unwrap_err(), StripError::Unsupported);
-        let c = clean("hi\u{202E}there\r\nline\u{0007}\u{200B}".as_bytes()).unwrap();
-        assert_eq!(std::str::from_utf8(&c.data).unwrap(), "hithere\nline");
+        // UTF-8 documents are NOT silently treated as text any more (review 9 H1)
+        for doc in [&b"{\\rtf1{\\info{\\author Jane Doe}}}"[..], b"<svg xmlns='x'><metadata>jdoe</metadata></svg>", b"%!PS-Adobe-3.0\n%%For: jdoe", b"<?xml version='1.0'?><gpx/>", b"%PDF-1.4 /Author (jdoe)"] {
+            assert_eq!(clean(doc).unwrap_err(), StripError::Unsupported);
+            assert!(matches!(text_clean(doc), Err(StripError::StructuredText)), "{:?}", String::from_utf8_lossy(doc));
+        }
         assert_eq!(clean(&vec![b'a'; MAX_INPUT + 1]).unwrap_err(), StripError::TooLarge);
+    }
+
+    #[test]
+    fn plain_text_mode_removes_every_invisible_channel() {
+        let c = text_clean("hi\u{202E}there\r\nline\u{0007}\u{200B}\rend".as_bytes()).unwrap();
+        assert_eq!(std::str::from_utf8(&c.data).unwrap(), "hithere\nline\nend");
+        assert!(c.report[0].contains("NOT understood"), "the UI must be told what plain text mode does not do");
+        // tag characters (invisible payload), variation selectors, soft hyphen, fillers, noncharacters, private use
+        let hidden: String = "Public statement.".chars().chain("SOURCE=alice".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()))
+            .chain(['\u{00AD}', '\u{FE0F}', '\u{E0100}', '\u{2028}', '\u{180E}', '\u{3164}', '\u{115F}', '\u{F0000}', '\u{061C}', '\u{FFF9}', '\u{034F}', '\u{FFFF}']).collect();
+        let c = text_clean(hidden.as_bytes()).unwrap();
+        assert_eq!(std::str::from_utf8(&c.data).unwrap(), "Public statement.");
+        // stacked combining marks are capped
+        let zalgo = format!("a{}", "\u{0301}".repeat(50));
+        assert!(text_clean(zalgo.as_bytes()).unwrap().data.len() < 20);
+    }
+
+    #[test]
+    fn jpeg_structural_segments_cannot_carry_extra_bytes() {
+        let base = |dqt: &[u8], dht: &[u8], sos: &[u8]| {
+            let mut v = vec![0xFF, 0xD8];
+            v.extend(seg(0xDB, dqt)); v.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); v.extend(seg(0xC4, dht)); v.extend(seg(0xDA, sos));
+            v.extend_from_slice(&[0x11, 0xFF, 0xD9]); v
+        };
+        assert!(clean(&base(&[0; 65], &[0; 17], &[1, 1, 0, 0, 0x3F, 0])).is_ok());
+        let mut fat_dqt = vec![0u8; 65]; fat_dqt.extend_from_slice(b"GPS 52.5200N owner=jdoe");
+        assert!(clean(&base(&fat_dqt, &[0; 17], &[1, 1, 0, 0, 0x3F, 0])).is_err(), "padded DQT");
+        let mut fat_dht = vec![0u8; 17]; fat_dht.extend_from_slice(b"hidden");
+        assert!(clean(&base(&[0; 65], &fat_dht, &[1, 1, 0, 0, 0x3F, 0])).is_err(), "padded DHT");
+        assert!(clean(&base(&[0; 65], &[0; 17], &[1, 1, 0, 0, 0x3F, 0, 9, 9])).is_err(), "padded SOS header");
+        // arithmetic coding and DAC are refused rather than copied blindly
+        let mut v = vec![0xFF, 0xD8]; v.extend(seg(0xCC, b"anything"));
+        assert_eq!(clean(&v).unwrap_err(), StripError::Unsupported);
+    }
+
+    #[test]
+    fn png_report_is_bounded_even_with_hostile_chunk_names() {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        for a in b'a'..=b'z' { for b in b'a'..=b'z' { v.extend(chunk(&[a, b, b'x', b'y'], b"")); } }
+        v.extend(chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0, 0, 0, 2, 0, 1])); v.extend(chunk(b"IEND", &[]));
+        let c = clean(&v).unwrap();
+        assert!(c.report.len() <= MAX_REPORT && c.report.iter().any(|l| l.contains("676")), "{:?}", c.report);
+    }
+
+    #[test]
+    fn png_palette_and_header_values_are_validated() {
+        let mk = |plte: &[u8]| { let mut v = b"\x89PNG\r\n\x1a\n".to_vec(); v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0])); v.extend(chunk(b"PLTE", plte)); v.extend(chunk(b"IDAT", &[1, 2, 3])); v.extend(chunk(b"IEND", &[])); v };
+        assert!(clean(&mk(&[1, 2, 3, 4, 5, 6])).is_ok());
+        assert!(clean(&mk(&[1, 2, 3, 4])).is_err(), "PLTE length not a multiple of 3 (hidden bytes)");
+        assert!(clean(&mk(&[])).is_err());
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec(); v.extend(chunk(b"IHDR", &[0, 0, 0, 0, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        assert!(clean(&v).is_err(), "zero width");
     }
 }
