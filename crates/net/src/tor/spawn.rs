@@ -73,7 +73,7 @@ pub struct SpawnedTor {
     pub socks: Addr,
 }
 
-/// Remove leftover `seburity-*` directories of OUR user whose owning process is gone (e.g. after SIGKILL/abort,
+/// Remove leftover `ramtor-*` directories of OUR user whose owning process is gone (e.g. after SIGKILL/abort,
 /// where Drop never ran). A directory without a pid file only counts as stale after a minute (it may be mid-creation).
 fn sweep_stale(base: &Path) {
     use std::os::unix::fs::MetadataExt;
@@ -81,7 +81,7 @@ fn sweep_stale(base: &Path) {
     let Ok(rd) = fs::read_dir(base) else { return };
     for e in rd.flatten() {
         let name = e.file_name();
-        if !name.to_str().is_some_and(|n| n.starts_with("seburity-")) { continue; }
+        if !name.to_str().is_some_and(|n| n.starts_with("ramtor-")) { continue; }
         let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
         if !md.is_dir() || md.uid() != me { continue; }
         let alive = fs::read_to_string(e.path().join("owner.pid")).ok().and_then(|t| t.trim().parse::<u32>().ok())
@@ -101,7 +101,7 @@ fn private_dir(cfg: &SpawnConfig) -> Result<PathBuf, TorError> {
     sweep_stale(&base);
     let mut r = [0u8; 8];
     getrandom::fill(&mut r).map_err(|_| TorError::Other("no OS randomness".into()))?;
-    let dir = base.join(format!("seburity-{}", r.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    let dir = base.join(format!("ramtor-{}", r.iter().map(|b| format!("{b:02x}")).collect::<String>()));
     if dir.join("socks").to_str().is_none_or(|p| p.len() > MAX_SOCKET_PATH) {
         return Err(TorError::Other(format!("runtime directory path is too long for unix sockets (max {MAX_SOCKET_PATH} bytes): {}", dir.display())));
     }
@@ -155,9 +155,9 @@ mod tests {
 
     #[test]
     fn torrc_is_private_and_fail_closed() {
-        let t = torrc(Path::new("/dev/shm/seburity-ab12"), 4242, &["UseBridges 1".into()]).unwrap();
-        assert!(t.contains("ControlPort unix:/dev/shm/seburity-ab12/ctl"));
-        assert!(t.contains("SocksPort unix:/dev/shm/seburity-ab12/socks ExtendedErrors OnionTrafficOnly"), "tor's onion error codes + no clearnet dials");
+        let t = torrc(Path::new("/dev/shm/ramtor-ab12"), 4242, &["UseBridges 1".into()]).unwrap();
+        assert!(t.contains("ControlPort unix:/dev/shm/ramtor-ab12/ctl"));
+        assert!(t.contains("SocksPort unix:/dev/shm/ramtor-ab12/socks ExtendedErrors OnionTrafficOnly"), "tor's onion error codes + no clearnet dials");
         assert!(t.contains("__OwningControllerProcess 4242"));
         assert!(t.contains("AvoidDiskWrites 1") && t.contains("ClientOnly 1") && t.contains("CookieAuthentication 1"));
         assert!(!t.contains("ControlPort 9051") && !t.contains("SocksPort 9050"), "no TCP listeners");
@@ -220,8 +220,8 @@ mod tests {
     #[test]
     fn stale_directories_of_dead_owners_are_swept_but_live_ones_are_kept() {
         let d = tempfile::tempdir().unwrap();
-        let dead = d.path().join("seburity-dead");
-        let live = d.path().join("seburity-live");
+        let dead = d.path().join("ramtor-dead");
+        let live = d.path().join("ramtor-live");
         let other = d.path().join("unrelated");
         for p in [&dead, &live, &other] { fs::create_dir(p).unwrap(); }
         fs::write(dead.join("owner.pid"), "4294967290").unwrap(); // no such process

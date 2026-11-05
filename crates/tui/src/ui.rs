@@ -105,7 +105,7 @@ fn lock_view(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Line> = (0..area.height as usize).map(|y| Line::from(Span::styled("░▒".repeat(w / 2 + 1).chars().skip(y % 2).take(w).collect::<String>(), Style::default().fg(Color::DarkGray)))).collect();
     f.render_widget(Paragraph::new(rows), area);
     let mut lines = vec![Line::from(Span::styled("LOCKED", Style::default().add_modifier(Modifier::BOLD))), Line::from("Enter = unlock    q = quit")];
-    lines.push(Line::from(if app.alerts.is_empty() { "" } else { "! a security alert is waiting: unlock to read it" }));
+    lines.push(Line::from(if app.quit_pending() { "quitting may lose something: press q again to quit" } else if app.alerts.is_empty() { "" } else { "! a security alert is waiting: unlock to read it" }));
     lines.push(Line::from(Span::styled("privacy screen only: the vault stays open, F12 = panic wipe", Style::default().fg(Color::DarkGray))));
     let r = centered(area, 56, 6);
     f.render_widget(Clear, r);
@@ -115,7 +115,13 @@ fn lock_view(f: &mut Frame, area: Rect, app: &App) {
 /// Sidebar (always) + right pane (details or conversation). Narrow terminals show one pane at a time.
 fn body(f: &mut Frame, area: Rect, app: &App) {
     if area.width < 70 {
-        if app.pane == Pane::Chat { chat_view(f, area, app) } else { sidebar(f, area, app) }
+        if app.pane == Pane::Chat { chat_view(f, area, app) }
+        else {
+            // one column: the list on top, the selected contact's details below (nothing is hidden on a narrow terminal)
+            let r = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
+            sidebar(f, r[0], app);
+            details_view(f, r[1], app);
+        }
         return;
     }
     let side_w = (area.width / 4).clamp(24, 34);
@@ -128,7 +134,7 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app.contact_rows().iter().map(|(n, t, p, linked, unread)| {
         let (g, c) = trust_glyph(*t, *p);
         let dot = if *linked { Span::styled("● ", Style::default().fg(Color::Green)) } else { Span::raw("  ") };
-        let mut v = vec![dot, Span::raw(format!("{n} ")), Span::styled(g, Style::default().fg(c))];
+        let mut v = vec![dot, Span::raw(*n), Span::raw(" "), Span::styled(g, Style::default().fg(c))];
         if *unread > 0 { v.push(Span::styled(format!(" [{unread}]"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))); }
         ListItem::new(Line::from(v))
     }).collect();
@@ -189,19 +195,20 @@ fn tail(t: &str, cols: usize) -> &str {
 }
 
 fn chat_view(f: &mut Frame, area: Rect, app: &App) {
+    let file_line = app.file_state();
     let rows = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(2), Constraint::Length(4)]).split(area);
+        .constraints([Constraint::Length(if file_line.is_some() { 3 } else { 2 }), Constraint::Min(2), Constraint::Length(4)]).split(area);
     let Some((name, trust, linked)) = app.chat_header() else { return };
     let (tl, tc) = trust_label(trust, true);
     let conn = if linked { Span::styled("● connected", Style::default().fg(Color::Green)) } else { Span::styled("○ not connected (messages queue in RAM)", Style::default().fg(Color::Yellow)) };
     let mut head = vec![Line::from(vec![Span::styled(name, Style::default().add_modifier(Modifier::BOLD)), Span::raw("   "), Span::styled(tl, Style::default().fg(tc)), Span::raw("   "), conn])];
     head.push(Line::from(if trust == Trust::SafetyVerified { "" } else { "WARNING: NOT verified: compare the safety number (v)" }));
+    if let Some(fl) = file_line { head.push(Line::from(Span::styled(fl, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }
     f.render_widget(Paragraph::new(head).style(Style::default()), rows[0]);
 
     // messages: newest at the bottom (shifted up by `scroll`), wrapped by hand (no per-frame String copies of message text)
     let w = rows[1].width.saturating_sub(4).max(8) as usize;
     let h = rows[1].height.saturating_sub(2) as usize;
-    let want = h + app.scroll;
     let mut lines: Vec<Line> = Vec::new();
     for l in app.chat_lines().iter().rev() {
         let (tag, style) = if l.mine { (if l.queued { "me (queued)> " } else { "me> " }, Style::default().fg(Color::Cyan)) } else { ("them> ", Style::default().fg(Color::Green)) };
@@ -219,10 +226,10 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
         for (i, c) in chunks.iter().enumerate().rev() {
             lines.push(Line::from(vec![Span::styled(if i == 0 { tag.to_string() } else { " ".repeat(tag.len()) }, style), Span::raw(*c)]));
         }
-        if lines.len() >= want { break; }
     }
     lines.reverse();
     let total = lines.len();
+    app.max_scroll.set(Some(total.saturating_sub(h)));        // tell the app how far up it can go
     let eff = app.scroll.min(total.saturating_sub(h)); // never scroll past the oldest line we have
     let end = total - eff;
     let begin = end.saturating_sub(h);
@@ -281,7 +288,7 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "  Enter / i  open the chat, or start typing      Esc  leave typing, then the chat",
         "  j k PgUp PgDn  scroll   g / G  oldest / newest   Tab / Shift+Tab  next / previous contact",
         "  f send JPEG/PNG   t send plain text   a / r accept / decline   s save   r also discards a file",
-        "  v verify   d delete   o online/offline   K rotate keys   h host-anyway   z acknowledge alert",
+        "  v verify   d delete   o online/offline   K rotate keys   h host-anyway   z acknowledge alert   P answer a finished pairing",
         "",
         "Esc, Esc, Esc: typing -> normal -> details -> PRIVACY SCREEN (Enter unlocks, q quits).",
         "  The privacy screen only hides the screen: the vault stays open, anyone can press Enter.",

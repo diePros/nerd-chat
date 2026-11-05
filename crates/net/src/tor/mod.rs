@@ -350,7 +350,7 @@ mod tests {
             let mut g = [0u8; 3]; c.read_exact(&mut g).unwrap(); assert_eq!(g, [5, 1, 2]); c.write_all(&[5, 2]).unwrap();
             let mut a = [0u8; 2]; c.read_exact(&mut a).unwrap(); assert_eq!(a, [1, 16]);
             let mut u = [0u8; 16]; c.read_exact(&mut u).unwrap();
-            assert!(u.iter().all(u8::is_ascii_hexdigit) && &u != b"seburity\0\0\0\0\0\0\0\0", "neutral random username");
+            assert!(u.iter().all(u8::is_ascii_hexdigit) && !u.starts_with(b"seburity"), "neutral random username");
             let mut pl = [0u8; 1]; c.read_exact(&mut pl).unwrap(); assert_eq!(pl[0], 32);
             let mut p = [0u8; 32]; c.read_exact(&mut p).unwrap(); assert_eq!(&p[..], "ab".repeat(16).as_bytes());
             c.write_all(&[1, 0]).unwrap();

@@ -25,7 +25,7 @@ spelled `Bash` (capital B).
 | 26 | 5929fac | seccomp allowlist for the cleaning helper: crates/sandbox (one unsafe prctl), interpreter+mutation+kernel tests | yes (review 18), fixes in cycle 27 | yes | n/a |
 | 27 | (this commit) | review 18 fixes: anonymous-only mmap, clock id limit, test gaps (grid, kernel markers/timeouts, helper seccomp status), exit-code message, hygiene test, scripts/sandbox-check.sh | yes (review 19), fixes in cycle 28 | yes (sandbox-check passes) | yes, 3/3 |
 | 28 | (this commit) | review 19 fixes: forged exit-4 probe, parent-pid orphan check, token-based hygiene test, kernel-test fixes, memlock 0 | not re-reviewed (small) | yes (sandbox-check passes) | n/a (no transport change) |
-| 29 | (this commit) | TUI overhaul: permanent sidebar, vim-style Normal/Insert modes, Esc ladder to a privacy screen, history scrolling, context hints, stale Tor text removed, `I` = import | review pending | yes (static, sandbox-check passes; UI driven in real tmux sessions at 120x30) | n/a (no transport change) |
+| 29 | (this commit) | TUI overhaul: permanent sidebar, vim-style Normal/Insert modes, Esc ladder to a privacy screen, history scrolling, context hints, stale Tor text removed, `I` = import | yes (review 20: 1 HIGH, fixed in cycle 30) | yes | n/a |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.

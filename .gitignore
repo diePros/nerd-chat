@@ -1,2 +1,4 @@
 /target
 *.vault
+.claude/
+*.sbc

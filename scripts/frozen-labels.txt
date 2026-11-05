@@ -1,0 +1,22 @@
+# Strings that are part of the DISK and WIRE formats / cryptographic domain separation. They contain the ORIGINAL project codename
+# and must NEVER change when the project is renamed: changing one would make existing vaults, contact bundles, safety numbers and
+# handshakes incompatible (and silently change the cryptography). scripts/rename-project.py protects every line of this file;
+# crates/core/tests/frozen_labels.rs fails if source and this list disagree. One exact string per line, comments start with '#'.
+seburity-v2
+seburity-psk0-v1
+seburity-psk2-v2
+seburity-bundle-v1
+seburity-msg-v1
+seburity-fingerprint-v2
+seburity-safety-number-v1
+seburity-vault-v1
+seburity-keyfile-v1
+seburity-pair-v1-offer
+seburity-pair-v1-join
+seburity-pair-kdf-v2
+seburity-pair-confirm-v2
+seburity-pair-transcript-v2
+seburity-pair-frame
+seburity-pair-pop-v1
+-----BEGIN SEBURITY CONTACT-----
+-----END SEBURITY CONTACT-----

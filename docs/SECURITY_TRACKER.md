@@ -339,5 +339,17 @@ Verdict of the reviewer: the filter is exactly the intended allowlist (proved by
 | ID | Item | Status | Notes |
 |---|---|---|---|
 | UI-1 | the 3rd Esc shows a privacy screen (Enter unlocks without a password, q quits); the app keeps running underneath | ACCEPTED (by design) | it is NOT authentication: the vault stays unlocked in RAM and anyone at the keyboard can press Enter; documented in the help popup, GETTING_STARTED and ROADMAP. While locked only the lock view is drawn (no names/messages/counts; tests assert no leak), every key except Enter/q/F12 is swallowed (also for prompts raised underneath). OPEN (optional): idle auto-lock, password-protected unlock |
-| UI-2 | typing mode: nothing typed in Insert mode can act as a command; panic key works in every mode/pane/lock | FIXED | tests `typed_text_in_insert_mode_never_acts_as_a_command`, `panic_key_works_in_every_mode_pane_and_in_the_lock` |
+| UI-2 | typing mode: nothing typed in Insert mode can act as a command; panic key works in every mode/pane/lock | FIXED (REOPENED by review 20 H1, fixed again in cycle 30: a finishing pairing no longer opens a prompt by itself) | tests `typed_text_in_insert_mode_never_acts_as_a_command`, `panic_key_works_in_every_mode_pane_and_in_the_lock` |
 | UI-3 | one source of truth for the open contact (`sel`): commands always act on the contact shown (the old `sel`/`chat_with` drift is gone) | FIXED | test `contact_commands_work_in_normal_mode_while_a_chat_is_open_and_act_on_the_shown_contact` |
+
+## Review 20 (Opus, fdae33b TUI overhaul) — integrated in cycle 30
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R20-H1 | HIGH: a pairing that finished while the user typed opened the "in person?" prompt, switched them to Normal mode and stole the next keys: a `y` upgraded trust (CodeAuthenticated), then blind typing ran commands (`o`, `h`, `K`, `d`+yes, `e`, `n`...); chat text also landed in the plain `input` String | FIXED | `poll()` never opens a prompt: the finished pairing waits in `pending_pair` and raises a sticky alert; the user answers with `P` (Normal mode only); a second pairing cannot start meanwhile; test with a REAL TCP pairing finishing mid-typing |
+| R20-L1 | `q` on the privacy screen skipped the quit guard | FIXED | routed through the guard; the lock screen shows a generic "press q again" line (no counts/names) |
+| R20-L2 | quit guard was wrong both ways (`queued` is never cleared, missed files being cleaned, pairing, drafts) | FIXED | counts queued lines only of contacts that are NOT connected, files in RAM or being cleaned, a pairing in progress/unanswered, a draft; wording says "may lose" |
+| R20-L3 | scroll offset not clamped in the app (`g` then `j` looked dead) | FIXED | the frame reports the real limit, `poll()` clamps; tests |
+| R20-L4 | narrow terminals never showed details; the chat never showed file offers | FIXED | narrow: list over details; chat header shows the file offer/received-file line |
+| R20-L5 | Esc used to quit: muscle memory now leaves the vault open behind a screen without a password | ACCEPTED | stated in help/docs and on the lock screen itself ("the vault stays open"); optional idle auto-lock / password unlock remain in ROADMAP |
+| R20-I | dead code, per-frame name copy in the sidebar, unread not counted under popups | FIXED | removed; sidebar renders borrowed names; unread counts unless the chat is really shown |
+Mutants that survived the review's mutation run (lock view drawing status/pairing code, scroll reset on send, panic keeping quit_armed, guard ignoring files) now have tests.
