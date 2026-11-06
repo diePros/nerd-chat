@@ -39,7 +39,7 @@ Use a fresh Tails session with Persistent Storage ON for the vault only, network
 ## C. Normal Linux machine, full behaviour (30 minutes, the dev laptop is fine)
 1. `sudo apt install tor && sudo systemctl disable --now tor`, `cat /proc/swaps` empty (`sudo swapoff -a`).
 2. Two terminals, two vaults (`--vault ./a.vault`, `./b.vault`), the steps of `docs/GETTING_STARTED.md` sections 3 and 4b (file pairing, verify, online, chat, file).
-3. Message while the peer is offline: peer `o` off; type a message -> shows `(queued)`; peer `o` on -> delivered and the `(queued)` tag disappears.
+3. Message while the peer is offline: peer `o` off; type a message -> shows `(queued)`; peer `o` on -> delivered and the `(queued)` tag disappears (it goes away when the peer's app confirms, also while connected). Extra: kill the peer's terminal (close the window) and type 2 messages at once; restart the peer: both arrive, once each.
 4. Save a message: in the chat `m`, `j`/`k`, `y` -> star; `H` shows it; `d` `d` deletes it. Quit and reopen: only the starred message is still there.
 5. Key rotation: `K` on one side, wait for both sides to say done (about 1-3 minutes), chat still connects.
 6. Lost terminal: start the app, then `kill -HUP <pid of the terminal emulator>` or just close the window; `top` shows no process at 100% CPU.

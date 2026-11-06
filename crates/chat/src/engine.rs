@@ -28,7 +28,11 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const MAX_PENDING: usize = 50;
+/// Texts that are not yet confirmed by the contact (queued or in flight): the sender keeps them in RAM and resends them on every new
+/// connection. When full, a NEW text is refused (never silently dropping an older one).
+pub const MAX_UNCONFIRMED: usize = 50;
+/// Ids of the last texts received per contact, to drop a resent text that was already shown.
+const MAX_SEEN: usize = 256;
 const MAX_HANDSHAKE_SLOTS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
@@ -113,9 +117,11 @@ pub enum Event {
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
     File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
-    /// Messages that were queued while the contact was away have just been handed to the new connection (`count` of them).
-    /// (Hand-over to the live connection, not a read receipt: there are none, by design.)
-    Flushed { id: [u8; 8], count: usize },
+    /// The contact's app confirmed the OLDEST text we still had unconfirmed (they arrive in sending order). This means "their
+    /// client has it", not "they read it": there are no read receipts, by design.
+    Delivered { id: [u8; 8] },
+    /// A text was refused because `MAX_UNCONFIRMED` texts are still unconfirmed: it was NOT sent (the newest unconfirmed line).
+    Unsent { id: [u8; 8] },
     /// The contact sent a key-rotation frame (`kind` = proto::KIND_ROTATE_*) carrying its new (onion, auth) public keys.
     Rotate { id: [u8; 8], kind: u8, onion: [u8; 32], auth: [u8; 32] },
 }
@@ -125,6 +131,10 @@ pub(crate) enum ConnEvent {
     Down { id: [u8; 8], gen: u64 },
     /// An event for the UI, delivered only if `gen` is still the current connection of `id` (messages, notices, file events).
     Ev { id: [u8; 8], gen: u64, ev: Event },
+    /// A complete text; `mid` is the id the sender announced (None from a peer that does not send ids).
+    Text { id: [u8; 8], gen: u64, mid: Option<proto::MsgId>, text: Zeroizing<String> },
+    /// The contact confirmed the text with this id (valid from any connection of the session: it is authenticated).
+    Acked { id: [u8; 8], mid: proto::MsgId },
     Rotate { id: [u8; 8], kind: u8, keys: [u8; 64] },
     DialFailed { id: [u8; 8], epoch: u64 },
     /// The outbound thread has really ended (always sent last): only now may another dial start (R8-I6).
@@ -242,7 +252,10 @@ struct Rt {
     /// Distinguishes this registration from an earlier one with the same id (remove + add): stale Up/DialFailed are ignored.
     epoch: u64,
     conn: Option<(u64, Sender<Out>)>,
-    pending: VecDeque<Zeroizing<String>>,
+    /// Texts not yet confirmed, oldest first (queued while offline AND already written to a connection that may have died).
+    unacked: VecDeque<(proto::MsgId, Zeroizing<String>)>,
+    /// Ids of texts already shown (see `MAX_SEEN`).
+    seen: VecDeque<proto::MsgId>,
     dialing: bool,
     backoff: Duration,
     next_dial: Instant,
@@ -282,7 +295,7 @@ impl Core {
 
     fn add(&mut self, cfg: ContactCfg) {
         // a re-add (settings changed) must not silently drop messages queued for the contact
-        let carried = self.rts.get_mut(&cfg.id).map(|r| std::mem::take(&mut r.pending)).unwrap_or_default();
+        let (carried, carried_seen) = self.rts.get_mut(&cfg.id).map(|r| (std::mem::take(&mut r.unacked), std::mem::take(&mut r.seen))).unwrap_or_default();
         self.remove(cfg.id);
         let Some(me) = ContactIdentity::from_secret_bytes(&cfg.secret) else { return self.notice(Some(cfg.id), "invalid contact key material") };
         // Roles from the signed capabilities; the smaller signing key dials only when both (or neither) can host.
@@ -352,7 +365,7 @@ impl Core {
             }
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, pending: carried, dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: carried, seen: carried_seen, dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -426,9 +439,9 @@ impl Core {
                 let had = rt.conn.is_some();
                 if let Some((_, old)) = rt.conn.replace((gen, tx.clone())) { let _ = old.send(Out::Close); }
                 rt.backoff = self.t.min_backoff;
-                let count = rt.pending.len();
-                while let Some(m) = rt.pending.pop_front() { let _ = tx.send(Out::Text(m)); }
-                if count > 0 { let _ = self.ev.send(Event::Flushed { id, count }); }
+                // every text the contact has not confirmed yet is (re)sent, oldest first: the previous connection may have died
+                // with some of them unread (the contact drops a text it already showed, by id, and confirms it again)
+                for (mid, text) in &rt.unacked { let _ = tx.send(Out::Text { mid: *mid, text: text.clone() }); }
                 // announce our current keys on every connection: a peer holding the NEW keys as pending learns the rotation is done
                 // even if the explicit DONE died with a replaced connection (it reveals nothing the peer does not already know)
                 let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_DONE, keys: rt.my_keys });
@@ -446,6 +459,26 @@ impl Core {
                     rt.conn = None;
                     rt.next_dial = Instant::now() + jitter(self.t.min_backoff);
                     let _ = self.ev.send(Event::Disconnected { id });
+                }
+            }
+            In::Conn(ConnEvent::Text { id, gen, mid, text }) => {
+                // a text from a replaced connection is dropped WITHOUT confirmation: the sender resends it on the new one
+                if !self.is_current(id, gen) { return; }
+                let Some(rt) = self.rts.get_mut(&id) else { return };
+                let fresh = mid.is_none_or(|m| !rt.seen.contains(&m));
+                if let Some(m) = mid.filter(|_| fresh) {
+                    if rt.seen.len() >= MAX_SEEN { rt.seen.pop_front(); }
+                    rt.seen.push_back(m);
+                }
+                if fresh { let _ = self.ev.send(Event::Message { id, text }); }
+                // confirm only AFTER the text was handed to the UI; a repeat is confirmed again (the first ack may have been lost)
+                if let (Some(m), Some((_, tx))) = (mid, rt.conn.as_ref()) { let _ = tx.send(Out::Ack(m)); }
+            }
+            In::Conn(ConnEvent::Acked { id, mid }) => {
+                let Some(rt) = self.rts.get_mut(&id) else { return };
+                if let Some(pos) = rt.unacked.iter().position(|(m, _)| *m == mid) {
+                    rt.unacked.remove(pos); // dropping the Zeroizing text wipes it
+                    let _ = self.ev.send(Event::Delivered { id });
                 }
             }
             In::Conn(ConnEvent::Ev { id, gen, ev }) => { if self.is_current(id, gen) { let _ = self.ev.send(ev); } }
@@ -475,15 +508,15 @@ impl Core {
     fn send(&mut self, id: [u8; 8], text: Zeroizing<String>) {
         if text.is_empty() || text.len() > proto::MAX_TEXT_BYTES { return self.notice(Some(id), "message empty or too long (max 32 KiB)"); }
         let Some(rt) = self.rts.get_mut(&id) else { return self.notice(Some(id), "unknown contact") };
+        if rt.unacked.len() >= MAX_UNCONFIRMED {
+            let _ = self.ev.send(Event::Unsent { id });
+            return self.notice(Some(id), "outbox full: this message was NOT sent, wait until the contact has confirmed the earlier ones");
+        }
+        let mid = proto::new_msg_id();
+        rt.unacked.push_back((mid, text.clone()));
         match &rt.conn {
-            Some((_, tx)) => { let _ = tx.send(Out::Text(text)); }
-            None => {
-                let dropped = rt.pending.len() >= MAX_PENDING;
-                if dropped { rt.pending.pop_front(); }
-                rt.pending.push_back(text);
-                if rt.we_dial && !rt.dialing { rt.backoff = self.t.min_backoff; rt.next_dial = Instant::now(); }
-                if dropped { self.notice(Some(id), "outbox full: oldest queued message dropped"); }
-            }
+            Some((_, tx)) => { let _ = tx.send(Out::Text { mid, text }); }
+            None => { if rt.we_dial && !rt.dialing { rt.backoff = self.t.min_backoff; rt.next_dial = Instant::now(); } }
         }
     }
 
@@ -648,7 +681,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let el = start(&net, &l, &db, ID);              // listener comes online later
         for t in ["one", "two", "three"] { assert!(got(&el, t), "{t}"); }
-        assert!(wait(&ed, |e| matches!(e, Event::Flushed { count: 3, .. })), "the sender must be told that its queue was handed over");
+        for n in 1..=3 { assert!(wait(&ed, |e| matches!(e, Event::Delivered { .. })), "the sender must be told that text {n} was confirmed"); }
         // and the other way round: listener-only queue
         drop(el);
         let el = start(&net, &l, &db, ID);
@@ -761,7 +794,7 @@ mod tests {
         let net = MemNet::new();
         let ((_, lb), (d, _)) = ordered();
         let ed = start(&net, &d, &lb, ID);
-        for i in 0..(MAX_PENDING + 5) { say(&ed, ID, &format!("q{i}")); }
+        for i in 0..(MAX_UNCONFIRMED + 5) { say(&ed, ID, &format!("q{i}")); }
         assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("outbox full"))));
         say(&ed, ID, "");
         assert!(wait(&ed, |e| matches!(e, Event::Notice { text, .. } if text.contains("empty or too long"))));
@@ -1123,6 +1156,137 @@ mod tests {
         let ed = start(&net, &d, &lb, ID);
         ed.send_file(ID, &jpeg(100), nerd_chat_strip::Mode::Auto).unwrap();
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("never queued"))));
+    }
+
+    /// The next application frame from the engine, skipping keepalives and the key announcements sent on every connection.
+    fn raw_next(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity) -> Vec<u8> {
+        use std::io::Read;
+        for _ in 0..100 {
+            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+            s.read_exact(&mut cell).unwrap();
+            let body = sess.recv(me, &cell).unwrap().body;
+            let k = body[0];
+            if k == proto::KIND_KEEPALIVE || (proto::KIND_ROTATE_OFFER..=proto::KIND_ROTATE_DONE).contains(&k) { continue; }
+            return body.to_vec();
+        }
+        panic!("no application frame");
+    }
+
+    fn raw_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) {
+        let dial = net.transport().dial_fn();
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            match dial(lb, &[1; 16]) {
+                Ok(mut s) => { s.set_timeout(Some(Duration::from_secs(5))).unwrap(); let sess = link::dial(&mut s, d, lb, &proto::keepalive()).unwrap(); return (s, sess); }
+                Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unconfirmed_text_is_resent_with_the_same_id_until_the_contact_confirms_it() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = start(&net, &l, &db, ID);
+        let (mut s1, mut sess1) = raw_connect(&net, &lb, &d);
+        assert!(connected(&el));
+        say(&el, ID, "precious");
+        let f = raw_next(&mut s1, &mut sess1, &d);
+        assert_eq!(f[0], proto::KIND_MSG_ID);
+        let mid = proto::parse_mid(&f).unwrap();
+        assert_eq!(raw_next(&mut s1, &mut sess1, &d), [&[proto::KIND_TEXT_FINAL][..], b"precious"].concat());
+        drop((s1, sess1)); // the connection dies without a confirmation
+        let (mut s2, mut sess2) = raw_connect(&net, &lb, &d);
+        let f = raw_next(&mut s2, &mut sess2, &d);
+        assert_eq!((f[0], proto::parse_mid(&f)), (proto::KIND_MSG_ID, Some(mid)), "the SAME id again");
+        assert_eq!(raw_next(&mut s2, &mut sess2, &d), [&[proto::KIND_TEXT_FINAL][..], b"precious"].concat());
+        assert!(!wait_for(&el, Duration::from_millis(300), |e| matches!(e, Event::Delivered { .. })), "no confirmation yet");
+        // an ack for an id we never sent changes nothing
+        raw_send(&mut s2, &mut sess2, &d, &proto::encode_msg_ack(&[0xEE; 8]));
+        assert!(!wait_for(&el, Duration::from_millis(300), |e| matches!(e, Event::Delivered { .. })));
+        raw_send(&mut s2, &mut sess2, &d, &proto::encode_msg_ack(&mid));
+        assert!(wait(&el, |e| matches!(e, Event::Delivered { .. })));
+        // once confirmed it is never sent again
+        drop((s2, sess2));
+        let (mut s3, mut sess3) = raw_connect(&net, &lb, &d);
+        assert!(connected(&el));
+        say(&el, ID, "next");
+        let f = raw_next(&mut s3, &mut sess3, &d);
+        assert_eq!(f[0], proto::KIND_MSG_ID);
+        assert_ne!(proto::parse_mid(&f), Some(mid));
+        assert_eq!(raw_next(&mut s3, &mut sess3, &d), [&[proto::KIND_TEXT_FINAL][..], b"next"].concat());
+    }
+
+    #[test]
+    fn a_resent_text_is_shown_once_but_confirmed_every_time() {
+        let (el, mut s, mut sess, me) = raw_peer();
+        let mid = [9u8; 8];
+        for _ in 0..2 {
+            raw_send(&mut s, &mut sess, &me, &proto::encode_msg_id(&mid));
+            raw_send(&mut s, &mut sess, &me, &[&[proto::KIND_TEXT_FINAL][..], b"hello"].concat());
+        }
+        assert!(got(&el, "hello"));
+        assert!(!wait_for(&el, Duration::from_millis(300), |e| matches!(e, Event::Message { .. })), "a resent text must not appear twice");
+        for _ in 0..2 { assert_eq!(proto::parse_mid(&raw_next(&mut s, &mut sess, &me)), Some(mid)); }
+        // a different id is a different text
+        raw_send(&mut s, &mut sess, &me, &proto::encode_msg_id(&[8; 8]));
+        raw_send(&mut s, &mut sess, &me, &[&[proto::KIND_TEXT_FINAL][..], b"hello"].concat());
+        assert!(got(&el, "hello"));
+    }
+
+    #[test]
+    fn a_peer_without_ids_still_delivers_and_a_malformed_confirmation_cuts_the_connection() {
+        let (el, mut s, mut sess, me) = raw_peer();
+        raw_send(&mut s, &mut sess, &me, &[&[proto::KIND_TEXT_FINAL][..], b"old style"].concat());
+        raw_send(&mut s, &mut sess, &me, &[&[proto::KIND_TEXT_FINAL][..], b"old style"].concat());
+        assert!(got(&el, "old style") && got(&el, "old style"), "no id: nothing to deduplicate by, nothing to confirm");
+        raw_send(&mut s, &mut sess, &me, &[proto::KIND_MSG_ACK, 1, 2, 3]);
+        assert!(wait(&el, |e| matches!(e, Event::Disconnected { .. })), "a malformed ack is a protocol violation");
+    }
+
+    /// The case that motivated all this: the sender writes into a connection whose peer is already gone.
+    #[test]
+    fn a_text_written_to_a_dead_connection_arrives_after_the_reconnect() {
+        for round in 0..5 {
+            let net = MemNet::new();
+            let ((l, lb), (d, db)) = ordered();
+            let (el, ed) = (start(&net, &l, &db, ID), start(&net, &d, &lb, ID));
+            assert!(connected(&el) && connected(&ed));
+            drop(el); // the contact quits; the sender may not have noticed yet
+            for t in ["lost-1", "lost-2"] { say(&ed, ID, t); }
+            std::thread::sleep(Duration::from_millis(150 * (round % 3)));
+            say(&ed, ID, "lost-3");
+            let el = start(&net, &l, &db, ID);
+            for t in ["lost-1", "lost-2", "lost-3"] { assert!(got(&el, t), "round {round}: {t}"); }
+            for _ in 0..3 { assert!(wait(&ed, |e| matches!(e, Event::Delivered { .. })), "round {round}: confirmations"); }
+        }
+    }
+
+    #[test]
+    fn a_full_outbox_refuses_the_new_text_and_keeps_the_old_ones() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let ed = start(&net, &d, &lb, ID);
+        for i in 0..MAX_UNCONFIRMED { say(&ed, ID, &format!("q{i}")); }
+        say(&ed, ID, "one too many");
+        assert!(wait(&ed, |e| matches!(e, Event::Unsent { .. })));
+        let el = start(&net, &l, &db, ID);
+        for i in 0..MAX_UNCONFIRMED { assert!(got(&el, &format!("q{i}")), "q{i}"); }
+        assert!(!wait_for(&el, Duration::from_millis(400), |e| matches!(e, Event::Message { text, .. } if text.contains("too many"))));
+    }
+
+    #[test]
+    fn unconfirmed_texts_survive_a_settings_change_of_the_contact() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let ed = start(&net, &d, &lb, ID);
+        say(&ed, ID, "kept");
+        std::thread::sleep(Duration::from_millis(100));
+        ed.add(ContactCfg::new(ID, &d, lb.clone())); // e.g. key rotation re-registers the contact
+        std::thread::sleep(Duration::from_millis(100));
+        let el = start(&net, &l, &db, ID);
+        assert!(got(&el, "kept"));
     }
 
     /// A raw authenticated peer that speaks the file protocol badly.

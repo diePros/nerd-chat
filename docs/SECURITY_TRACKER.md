@@ -167,7 +167,7 @@ No Critical. Verified OK: only the pinned peer gets a session; no contact can im
 | R6-L7 | A crafted bundle can reuse another contact's onion address and overwrite our client-auth entry for it | FIXED | contacts whose onion key collides with any other contact's (peer or own) are refused |
 | R6-I1 | Stale Up/DialFailed after remove+re-add of the same id attaches an old connection to the new entry | FIXED | per-contact epoch checked on Up/DialFailed |
 | R6-I2 | Spawn-mode unix socket files never unlinked (re-add fails with EADDRINUSE) | FIXED | |
-| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | ACCEPTED | RAM-only by design, documented in the UI status text |
+| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | FIXED (branch `next`, docs/DELIVERY.md) | per-text id + confirmation frame, unconfirmed texts kept in RAM and resent on every new connection, receiver drops repeats by id; still RAM-only (lost on quit/offline, counted by the quit guard). NOT part of the audited v0.1.0 tag; needs an Opus review before it is merged |
 
 ## PQ-auth stage notes (before review 7)
 - Wire change: msg2 = ct_e || ct_i || noise2 (2224 bytes); psk2 label v2. Old binaries cannot talk to new ones: restart both sides.
@@ -420,3 +420,10 @@ Verdict of the reviewer: nothing CRITICAL/HIGH; four MEDIUM issues, all reproduc
 | R23-L5 | Enter in the message cursor saved the newest message | FIXED | only `y` saves |
 | R23-L6 | imported bundle files are not purged | ACCEPTED | documented |
 | R23-I | OsStr compared lossily; duplicate targets; tracker had LT-1 twice | FIXED (raw bytes, dedup); LT-1 duplicate left as history |
+
+## Delivery confirmation (branch `next`, after the v0.1.0 audit snapshot) — self-notes, review PENDING
+Adds `KIND_MSG_ID`/`KIND_MSG_ACK` and resend (docs/DELIVERY.md). For the reviewer: (1) can a peer make us show a text twice or never
+confirm one (dedup window 256, replaced connections, re-add carrying `seen`)? (2) can ack/id frames be abused for resource use or as a
+side channel (ack for unknown ids is a no-op; malformed ones cut the connection; one extra fixed-size cell each)? (3) is anything now
+kept longer in RAM than before (up to 50 x 32 KiB per contact until confirmed, wiped on drop/shutdown)? (4) does the quit guard
+and going offline still account for every unconfirmed line? Status: OPEN until reviewed.

@@ -30,7 +30,7 @@ Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode
 - **Keeping messages (by hand, never automatic):** in a chat press `m` (message cursor), `j`/`k` choose a message, `y` saves THAT message into the
   vault (encrypted with it; no timestamp; at most 500 per contact and 4 MiB in total; not possible in `--ram` mode). Saved messages are marked ★ in the chat.
   `H` opens the saved messages of the selected contact (`d` twice deletes one). Whoever gets your vault AND password can read what you saved.
-- `q` quits and wipes RAM; if queued messages or unsaved files would be lost it asks you to press `q` a second time.
+- `q` quits and wipes RAM; if unconfirmed messages or unsaved files would be lost it asks you to press `q` a second time.
 **Panic-lock: F12 or Ctrl+\\** wipes memory, clears screen + scrollback and exits immediately; the vault file stays, the password opens it again.
 **PURGE: Ctrl+] (or Shift+F12)** does the same AND overwrites and deletes the vault, its rollback counter, the keyfile and every file this
 session exported or saved: contacts, keys and saved messages are gone for good. No confirmation, no undo. Works from any screen, also at the
@@ -83,11 +83,12 @@ Using a Tor that is already running (Tails/Whonix/system):
 ./nerd-chat --vault ./alice.vault --tor-control unix:/run/tor/control      # add --tor-trust-control only if you vouch for its owner
 ```
 Good to know:
-- Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. Messages typed while the other person is
-  offline are queued in RAM (max 50) and sent when they connect; they are lost if you quit first.
+- Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. A message says `(queued)` until the other
+  person's app has confirmed it. Until then it is kept in RAM (max 50) and sent again on every new connection, so a message written into a dying
+  connection or typed while they are away is not lost; it IS lost if you quit or go offline first (see docs/DELIVERY.md).
 - Who dials: the contact whose signing key is smaller dials, the other one hosts, so normally only one of you publishes an onion service. If the hosting side cannot host (e.g. Tails refusing it) it switches to dialing and the other side starts hosting after about a minute of failed dials; you will see a notice.
 - An unverified contact shows a red warning in the chat header. Verify the safety number first (v).
-- There are no read receipts, typing indicators or timestamps (metadata). A small keepalive cell is sent every 30 s while idle.
+- There are no read receipts, typing indicators or timestamps (metadata); the only confirmation is "their app has it" (the `(queued)` mark goes away). A small keepalive cell is sent every 30 s while idle.
 
 ## 5. RAM-only mode (nothing ever written)
 ```bash

@@ -677,14 +677,13 @@ impl App {
 
     fn scroll_limit(&self) -> usize { self.max_scroll.get().unwrap_or(SCROLL_CAP) }
 
-    /// What quitting would throw away, as a short list for the warning (queued lines of contacts that are NOT connected, files in RAM
+    /// What quitting would throw away, as a short list for the warning (unconfirmed lines, files in RAM
     /// or being cleaned, a pairing in progress/unanswered, a half-written draft). Conservative: it says "may".
     fn at_risk(&self) -> Vec<String> {
-        let queued = self.vf.as_ref().map_or(0, |v| v.store.contacts.iter().filter(|c| !self.linked.contains(&c.id))
-            .map(|c| self.chats.get(&c.id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count())).sum());
+        let queued: usize = self.chats.values().map(|l| l.iter().filter(|x| x.mine && x.queued).count()).sum();
         let files = self.inbox.len() + self.offers.len() + self.accepted.len() + usize::from(self.prep_rx.is_some());
         let mut v = Vec::new();
-        if queued > 0 { v.push(format!("{queued} undelivered message(s)")); }
+        if queued > 0 { v.push(format!("{queued} unconfirmed message(s)")); }
         if files > 0 { v.push(format!("{files} file(s) in RAM or being cleaned")); }
         if self.pair_ctl.is_some() || self.pending_pair.is_some() { v.push("a pairing in progress".into()); }
         if !self.compose.is_empty() { v.push("a draft".into()); }
@@ -1350,14 +1349,18 @@ impl App {
         let Some(id) = self.chat_id() else { return };
         if self.compose.is_empty() { return; }
         if self.engine.is_none() { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
+        // refuse BEFORE taking the draft, so nothing is lost: the engine keeps at most MAX_UNCONFIRMED unconfirmed texts per contact
+        let open = self.chats.get(&id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count());
+        if open >= nerd_chat_chat::engine::MAX_UNCONFIRMED { return self.err("Outbox full: the contact has not confirmed your earlier messages yet. Your draft is kept; try again when they come online."); }
         let text = self.compose.take_string();
-        let queued = !self.linked.contains(&id);
+        let linked = self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
         if let Some(e) = &self.engine { e.send(id, text); }
-        self.push_line(id, ChatLine { mine: true, text: shown, queued, saved: false, unsent: false });
+        // "(queued)" = not yet CONFIRMED by the contact's app (connected or not): the engine resends it on every new connection
+        self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false });
         self.scroll = 0; // sending jumps to the newest line
-        if queued { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
+        if !linked { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
     }
 
     fn push_line(&mut self, id: [u8; 8], l: ChatLine) {
@@ -1425,7 +1428,7 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Flushed { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Delivered { id } | Event::Unsent { id } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
@@ -1435,11 +1438,10 @@ impl App {
                     self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false, unsent: false });
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
-                // the queue was handed to the live connection: those lines are no longer "(queued)" (older ones were dropped with a notice)
-                Event::Flushed { id, count } => if let Some(l) = self.chats.get_mut(&id) {
-                    let mut left = count;
-                    for x in l.iter_mut().rev().filter(|x| x.queued) { x.queued = false; if left > 0 { left -= 1; } else { x.unsent = true; } } // older ones were dropped by the engine's queue cap
-                },
+                // the contact's app confirmed our OLDEST unconfirmed text (confirmations come in sending order)
+                Event::Delivered { id } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued)) { x.queued = false; },
+                // the engine refused a text (its outbox was full): it was NOT sent
+                Event::Unsent { id } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().rev().find(|x| x.mine && x.queued)) { x.queued = false; x.unsent = true; },
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
                     let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
@@ -2061,7 +2063,8 @@ mod tests {
         a.handle(Key::Char('i'));
         assert_eq!((a.pane, a.mode), (Pane::Chat, Mode::Insert));
         type_str(&mut a, "hello bob, this is private"); a.handle(Key::Enter);
-        assert!(a.compose_text().is_empty() && a.chat_lines().len() == 1 && a.chat_lines()[0].mine && !a.chat_lines()[0].queued);
+        assert!(a.compose_text().is_empty() && a.chat_lines().len() == 1 && a.chat_lines()[0].mine);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "bob's app confirms it: the mark goes");
         // bob sees an unread marker, opens the chat, sees the line
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].contact_rows()[0].4 == 1), "no unread marker");
         b.handle(Key::Char('i'));
@@ -2922,22 +2925,36 @@ mod tests {
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), 3, "saving it again works after the delete");
     }
 
+    /// Confirmation, not hand-over: a line says "(queued)" until the contact's app has confirmed it, connected or not.
     #[test]
-    fn flush_marks_only_the_newest_queued_lines_delivered_and_going_offline_marks_the_rest_not_sent() {
+    fn a_line_stays_queued_until_the_contact_confirms_it() {
         let d = tempfile::tempdir().unwrap();
-        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
-        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for t in ["old-dropped", "kept-1", "kept-2"] { a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(t.into()), queued: true, saved: false, unsent: false }); }
-        // the engine says only 2 were handed over (its queue overflowed and dropped the oldest)
-        a.engine = None;
-        let ev = Event::Flushed { id, count: 2 };
-        // feed it through the same path poll() uses
-        if let Some(l) = a.chats.get_mut(&id) { let mut left = 2; for x in l.iter_mut().rev().filter(|x| x.queued) { x.queued = false; if left > 0 { left -= 1; } else { x.unsent = true; } } }
-        let _ = ev;
-        let l = &a.chats[&id];
-        assert_eq!([(l[0].queued, l[0].unsent), (l[1].queued, l[1].unsent), (l[2].queued, l[2].unsent)], [(false, true), (false, false), (false, false)]);
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].linked.is_empty() && !x[1].linked.is_empty()), "connected");
+        a.handle(Key::Char('i')); type_str(&mut a, "confirm me"); a.handle(Key::Enter);
+        assert!(a.chat_lines()[0].queued, "just sent: not confirmed yet");
+        assert!(!a.at_risk().is_empty(), "quitting this very moment could lose it");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "the confirmation clears the mark");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "confirm me"))));
+        assert!(a.at_risk().is_empty());
+    }
+
+    /// A full outbox refuses BEFORE the draft is taken: nothing typed is lost.
+    #[test]
+    fn a_full_outbox_keeps_the_draft_and_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Char('i'));
+        for i in 0..nerd_chat_chat::engine::MAX_UNCONFIRMED { type_str(&mut a, &format!("m{i}")); a.handle(Key::Enter); }
+        type_str(&mut a, "the draft");
         a.handle(Key::Enter);
-        assert!(screen_text(&a, 110, 24).contains("(NOT SENT)"), "a message that will never be sent says so");
+        assert!(a.error && a.status.contains("Outbox full"), "{}", a.status);
+        assert_eq!(a.chat_lines().len(), nerd_chat_chat::engine::MAX_UNCONFIRMED, "no line was added");
+        assert!(!a.compose.is_empty(), "the draft is still there");
     }
 
     #[test]
@@ -3001,19 +3018,19 @@ mod tests {
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "nothing pending: quits at once");
         a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false, unsent: false });
         assert_eq!(a.handle(Key::Char('q')), Action::None);
-        assert!(a.error && a.status.contains("q again") && a.status.contains("1 undelivered"), "{}", a.status);
+        assert!(a.error && a.status.contains("q again") && a.status.contains("1 unconfirmed"), "{}", a.status);
         a.handle(Key::Char('j'));                                    // any other key disarms
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "second q quits");
-        // a queued line of a CONNECTED contact was delivered by the engine: nothing is at risk
+        // an unconfirmed line is at risk even while the contact is connected (the ack may not have arrived yet)
         a.quit_armed = false; a.linked.insert(id);
-        assert_eq!(a.handle(Key::Char('q')), Action::Quit, "queued lines of a connected contact are not at risk");
-        a.linked.remove(&id);
+        assert_eq!(a.handle(Key::Char('q')), Action::None, "an unconfirmed line of a connected contact is still at risk");
+        a.linked.remove(&id); a.quit_armed = false;
         // the same guard on the privacy screen (review 20, L1), with a generic hint and no counts or names
         a.quit_armed = false; a.handle(Key::Esc); assert!(a.locked);
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         let lock = screen_text(&a, 90, 20);
-        assert!(lock.contains("press q again") && !lock.contains("undelivered") && !lock.contains("bob"), "{lock}");
+        assert!(lock.contains("press q again") && !lock.contains("unconfirmed") && !lock.contains("bob"), "{lock}");
         a.handle(Key::Enter); assert!(!a.quit_armed, "unlocking disarms");
         a.locked = false; a.chats.clear();
         // other things that would be lost: a file in RAM, a pairing waiting for its answer, a half-written draft

@@ -10,6 +10,19 @@ pub const KIND_TEXT_CONT: u8 = 4;
 pub const KIND_ROTATE_OFFER: u8 = 0x20;
 pub const KIND_ROTATE_ACK: u8 = 0x21;
 pub const KIND_ROTATE_DONE: u8 = 0x22;
+/// Delivery confirmation (docs/DELIVERY.md): `MSG_ID | id` goes right before the chunks of one text; the receiver answers
+/// `MSG_ACK | id` once its engine has accepted the text. A peer without these frames still works (no ids, no acks).
+pub const KIND_MSG_ID: u8 = 0x30;
+pub const KIND_MSG_ACK: u8 = 0x31;
+
+/// Random per-message id (inside the encrypted session only; it never appears on the network).
+pub type MsgId = [u8; 8];
+pub fn new_msg_id() -> MsgId { let mut id = [0u8; 8]; getrandom::fill(&mut id).expect("OS RNG unavailable"); id }
+fn encode_mid(kind: u8, id: &MsgId) -> Vec<u8> { let mut v = Vec::with_capacity(9); v.push(kind); v.extend_from_slice(id); v }
+pub fn encode_msg_id(id: &MsgId) -> Vec<u8> { encode_mid(KIND_MSG_ID, id) }
+pub fn encode_msg_ack(id: &MsgId) -> Vec<u8> { encode_mid(KIND_MSG_ACK, id) }
+/// `Some(id)` only for an exact-length frame (`kind | 8 bytes`).
+pub fn parse_mid(body: &[u8]) -> Option<MsgId> { body.get(1..).and_then(|p| <MsgId>::try_from(p).ok()) }
 
 /// Body of a rotation frame.
 pub fn encode_rotate(kind: u8, keys: &[u8; 64]) -> Vec<u8> { let mut v = Vec::with_capacity(65); v.push(kind); v.extend_from_slice(keys); v }
@@ -81,6 +94,23 @@ mod tests {
         let mut got = None;
         for c in encode_text(t) { if let Incoming::Text(s) = a.feed(&c).unwrap() { got = Some(s.to_string()); } }
         got.unwrap()
+    }
+
+    #[test]
+    fn message_id_and_ack_frames_are_exact_length_only() {
+        let id = [7, 1, 2, 3, 4, 5, 6, 8];
+        assert_eq!(parse_mid(&encode_msg_id(&id)), Some(id));
+        assert_eq!(parse_mid(&encode_msg_ack(&id)), Some(id));
+        assert_eq!(encode_msg_id(&id)[0], KIND_MSG_ID);
+        assert_eq!(encode_msg_ack(&id)[0], KIND_MSG_ACK);
+        let f = encode_msg_ack(&id);
+        for n in 0..f.len() { assert_eq!(parse_mid(&f[..n]), None, "truncated to {n}"); }
+        assert_eq!(parse_mid(&[f.as_slice(), &[0]].concat()), None, "too long");
+        assert_ne!(new_msg_id(), new_msg_id());
+        // an old peer's assembler skips the new frames (unknown kinds are never fatal)
+        let mut a = Assembler::new();
+        assert!(matches!(a.feed(&encode_msg_id(&id)).unwrap(), Incoming::Ignored));
+        assert!(matches!(a.feed(&encode_msg_ack(&id)).unwrap(), Incoming::Ignored));
     }
 
     #[test]

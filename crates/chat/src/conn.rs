@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 /// A file ready to send: `padded` is the full stream (`len | content | zeros`); `hash` covers the true content only.
 pub struct FileOut { pub xid: Xid, pub bucket: u32, pub mode: u8, pub hash: [u8; 32], pub padded: Zeroizing<Vec<u8>> }
 
-pub enum Out { Text(Zeroizing<String>), File(FileOut), Reply { xid: Xid, accept: bool }, Rotate { kind: u8, keys: [u8; 64] }, Close }
+pub enum Out { Text { mid: proto::MsgId, text: Zeroizing<String> }, Ack(proto::MsgId), File(FileOut), Reply { xid: Xid, accept: bool }, Rotate { kind: u8, keys: [u8; 64] }, Close }
 
 const OFFER_WAIT: Duration = Duration::from_secs(120);
 const RECV_IDLE: Duration = Duration::from_secs(60);
@@ -110,11 +110,18 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileCancelled { id } })).is_ok();
     let mut bad_frames = 0u32;
     let mut rot_frames = 0u32;
+    let mut cur_id: Option<proto::MsgId> = None; // id announced for the text that is being received
     'conn: loop {
         loop {
             match out_rx.try_recv() {
-                Ok(Out::Text(text)) => {
+                Ok(Out::Text { mid, text }) => {
+                    // the id frame goes right before the chunks of its text (the receiver confirms it with an ack)
+                    if !send_body(&mut stream, &mut sess, &me, &proto::encode_msg_id(&mid)) { break 'conn; }
                     for body in proto::encode_text(&text) { if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; } }
+                    last_tx = Instant::now();
+                }
+                Ok(Out::Ack(mid)) => {
+                    if !send_body(&mut stream, &mut sess, &me, &proto::encode_msg_ack(&mid)) { break 'conn; }
                     last_tx = Instant::now();
                 }
                 Ok(Out::File(f)) => {
@@ -248,8 +255,13 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         if rot_frames > 6 { break; }
                         if ev.send(In::Conn(ConnEvent::Rotate { id, kind: k, keys })).is_err() { break; }
                     }
+                    Some(proto::KIND_MSG_ID) => { let Some(mid) = proto::parse_mid(&m.body) else { break }; cur_id = Some(mid); }
+                    Some(proto::KIND_MSG_ACK) => {
+                        let Some(mid) = proto::parse_mid(&m.body) else { break };
+                        if ev.send(In::Conn(ConnEvent::Acked { id, mid })).is_err() { break; }
+                    }
                     _ => match asm.feed(&m.body) {
-                        Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::Message { id, text } })).is_err() { break; } }
+                        Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Text { id, gen, mid: cur_id.take(), text })).is_err() { break; } }
                         Ok(_) => {}
                         Err(_) => break,
                     },
