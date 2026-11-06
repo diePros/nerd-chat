@@ -47,8 +47,8 @@ fn two_engines_chat_over_the_real_tor_network() {
 /// A real Tor that refuses to host onion services (what a Tails with a restricted control port would look like).
 struct NoHostTor(TorTransport);
 impl Transport for NoHostTor {
-    fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<std::sync::mpsc::Receiver<BoxStream>>, String> {
-        if listen { Err("this tor refuses ADD_ONION".into()) } else { self.0.add_contact(me, peer, false) }
+    fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, extra: &[[u8; 32]], listen: bool) -> Result<Option<std::sync::mpsc::Receiver<BoxStream>>, String> {
+        if listen { Err("this tor refuses ADD_ONION".into()) } else { self.0.add_contact(me, peer, extra, false) }
     }
     fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.0.remove_contact(a, b) }
     fn dial_fn(&self) -> DialFn { self.0.dial_fn() }

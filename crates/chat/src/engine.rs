@@ -120,12 +120,8 @@ pub enum Event {
 pub(crate) enum ConnEvent {
     Up { id: [u8; 8], gen: u64, epoch: u64, tx: Sender<Out> },
     Down { id: [u8; 8], gen: u64 },
-    Msg { id: [u8; 8], gen: u64, text: Zeroizing<String> },
-    Notice { id: [u8; 8], gen: u64, text: String, alert: bool },
-    FileOffer { id: [u8; 8], gen: u64, xid: file::Xid, bucket: u32 },
-    FileCancelled { id: [u8; 8], gen: u64 },
-    File { id: [u8; 8], gen: u64, data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
-    FileSent { id: [u8; 8], gen: u64 },
+    /// An event for the UI, delivered only if `gen` is still the current connection of `id` (messages, notices, file events).
+    Ev { id: [u8; 8], gen: u64, ev: Event },
     Rotate { id: [u8; 8], kind: u8, keys: [u8; 64] },
     DialFailed { id: [u8; 8], epoch: u64 },
     /// The outbound thread has really ended (always sent last): only now may another dial start (R8-I6).
@@ -198,7 +194,7 @@ impl Engine {
     pub fn offer_rotation(&self, id: [u8; 8]) { let _ = self.tx.send(In::Cmd(Command::Rotate { id, kind: proto::KIND_ROTATE_OFFER, keys: None })); }
     /// Acknowledge (`KIND_ROTATE_ACK`) or finish (`KIND_ROTATE_DONE`) a rotation by echoing the keys.
     pub fn answer_rotation(&self, id: [u8; 8], kind: u8, onion: [u8; 32], auth: [u8; 32]) {
-        let mut keys = [0u8; 64]; keys[..32].copy_from_slice(&onion); keys[32..].copy_from_slice(&auth);
+        let keys = pack(&onion, &auth);
         let _ = self.tx.send(In::Cmd(Command::Rotate { id, kind, keys: Some(keys) }));
     }
 
@@ -267,6 +263,9 @@ struct Core {
     live: Arc<AtomicUsize>,
 }
 
+/// (onion pub | auth pub) as the 64-byte payload of a rotation frame.
+fn pack(onion: &[u8; 32], auth: &[u8; 32]) -> [u8; 64] { let mut k = [0u8; 64]; k[..32].copy_from_slice(onion); k[32..].copy_from_slice(auth); k }
+
 fn jitter(d: Duration) -> Duration {
     let mut b = [0u8; 1];
     getrandom::fill(&mut b).expect("OS RNG unavailable");
@@ -277,7 +276,6 @@ type Slots = Arc<Mutex<Vec<(u64, Arc<AtomicBool>)>>>;
 
 impl Core {
     fn notice(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into(), alert: false }); }
-    fn alert(&self, id: Option<[u8; 8]>, text: impl Into<String>) { let _ = self.ev.send(Event::Notice { id, text: text.into(), alert: true }); }
 
     fn add(&mut self, cfg: ContactCfg) {
         // a re-add (settings changed) must not silently drop messages queued for the contact
@@ -301,12 +299,12 @@ impl Core {
         let epoch = self.next_epoch;
         let mut hosting = false;
         let extra: Vec<[u8; 32]> = cfg.peer_old.map(|(_, a)| vec![a]).unwrap_or_default();
-        match self.transport.add_contact_ex(&me, &cfg.peer, &extra, !we_dial) {
+        match self.transport.add_contact(&me, &cfg.peer, &extra, !we_dial) {
             Err(e) if !we_dial => {
                 // designated host but hosting failed anyway (the capability bit was wrong or this is transient): FLIP to dialing
                 self.notice(Some(cfg.id), format!("cannot host for this contact ({e}): dialing it instead. The contact must host for us: set 'host anyway' (h) on its side, and export a new bundle with --cannot-host if this Tor never hosts"));
                 we_dial = true;
-                if let Err(e2) = self.transport.add_contact_ex(&me, &cfg.peer, &extra, false) { self.notice(Some(cfg.id), format!("cannot prepare dialing either: {e2}")); }
+                if let Err(e2) = self.transport.add_contact(&me, &cfg.peer, &extra, false) { self.notice(Some(cfg.id), format!("cannot prepare dialing either: {e2}")); }
             }
             Err(e) => self.notice(Some(cfg.id), format!("cannot prepare dialing for this contact: {e}")),
             Ok(Some(rx)) => { hosting = true; self.spawn_acceptor(cfg.id, cfg.secret.clone(), cfg.peer.clone(), rx, guard.clone(), stop.clone(), epoch); }
@@ -314,7 +312,7 @@ impl Core {
         }
         // The user's explicit choice (never a timer): also host for a contact we would only dial.
         if we_dial && !hosting && cfg.host_anyway && cfg.our_can_host {
-            match self.transport.add_contact_ex(&me, &cfg.peer, &extra, true) {
+            match self.transport.add_contact(&me, &cfg.peer, &extra, true) {
                 Ok(Some(rx)) => { hosting = true; self.spawn_acceptor(cfg.id, cfg.secret.clone(), cfg.peer.clone(), rx, guard.clone(), stop.clone(), epoch); self.notice(Some(cfg.id), "hosting for this contact too (your 'host anyway' setting): holders of its bundle can see when you are online"); }
                 Ok(None) => {}
                 Err(e) => self.notice(Some(cfg.id), format!("'host anyway' failed: {e}")),
@@ -328,7 +326,7 @@ impl Core {
             let (no, na) = (ns.onion_public(), ns.auth_public().to_bytes());
             let mut up = !hosting; // a side that does not host needs no second service
             if hosting {
-                match self.transport.add_contact_ex(&ns, &cfg.peer, &extra, true) {
+                match self.transport.add_contact(&ns, &cfg.peer, &extra, true) {
                     Ok(Some(rx)) => { up = true; self.spawn_acceptor(cfg.id, cfg.secret.clone(), cfg.peer.clone(), rx, guard.clone(), stop.clone(), epoch); }
                     Ok(None) => {}
                     Err(e) => {
@@ -344,7 +342,7 @@ impl Core {
         if we_dial {
             if let Some((o, a)) = cfg.peer_old {
                 let fb = cfg.peer.clone().with_transport(o, a);
-                match self.transport.add_contact_ex(&me, &fb, &[], false) {
+                match self.transport.add_contact(&me, &fb, &[], false) {
                     Ok(_) => fallback = Some(fb),
                     Err(e) => self.notice(Some(cfg.id), format!("no fallback to the contact's old address ({e}); only its new address is tried")),
                 }
@@ -407,7 +405,7 @@ impl Core {
             In::Cmd(Command::Rotate { id, kind, keys }) => {
                 let Some(rt) = self.rts.get(&id) else { return };
                 let payload = match (kind, keys, rt.next) {
-                    (proto::KIND_ROTATE_OFFER, _, Some((no, na, true))) => { let mut k = [0u8; 64]; k[..32].copy_from_slice(&no); k[32..].copy_from_slice(&na); Some(k) }
+                    (proto::KIND_ROTATE_OFFER, _, Some((no, na, true))) => Some(pack(&no, &na)),
                     (proto::KIND_ROTATE_OFFER, _, _) => { self.notice(Some(id), "key rotation: the new service is not running, nothing proposed"); None }
                     (_, Some(k), _) => Some(k),
                     _ => None,
@@ -432,8 +430,7 @@ impl Core {
                 // an unfinished rotation is (re)proposed on EVERY new connection: the ack of the last one may have been lost
                 // together with the connection it travelled on (the peer acks again, idempotently)
                 if let Some((no, na, true)) = rt.next {
-                    let mut k = [0u8; 64]; k[..32].copy_from_slice(&no); k[32..].copy_from_slice(&na);
-                    let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_OFFER, keys: k });
+                    let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_OFFER, keys: pack(&no, &na) });
                 }
                 if !had { let _ = self.ev.send(Event::Connected { id }); }
                 else { let _ = self.ev.send(Event::FileCancelled { id }); } // the replaced connection's transfer state is gone
@@ -446,29 +443,18 @@ impl Core {
                     let _ = self.ev.send(Event::Disconnected { id });
                 }
             }
-            In::Conn(ConnEvent::Msg { id, gen, text }) => {
-                if self.rts.get(&id).and_then(|r| r.conn.as_ref()).is_some_and(|(g, _)| *g == gen) { let _ = self.ev.send(Event::Message { id, text }); }
-            }
-            In::Conn(ConnEvent::Notice { id, gen, text, alert }) => { if self.is_current(id, gen) { if alert { self.alert(Some(id), text) } else { self.notice(Some(id), text) } } }
-            In::Conn(ConnEvent::FileOffer { id, gen, xid, bucket }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileOffer { id, xid, bucket }); } }
-            In::Conn(ConnEvent::FileCancelled { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileCancelled { id }); } }
-            In::Conn(ConnEvent::File { id, gen, data, format, report, resanitised }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::File { id, data, format, report, resanitised }); } }
+            In::Conn(ConnEvent::Ev { id, gen, ev }) => { if self.is_current(id, gen) { let _ = self.ev.send(ev); } }
             In::Conn(ConnEvent::Rotate { id, kind, keys }) => {
                 // Authentic (it came through the authenticated, signed session) even if that connection was replaced a moment
                 // ago: the ack of a rotation commonly races with the peer's reconnect over the new service.
-                if self.rts.contains_key(&id) {
-                    let (onion, auth): ([u8; 32], [u8; 32]) = (keys[..32].try_into().unwrap(), keys[32..].try_into().unwrap());
-                    // The peer announces the keys it runs now: when they are the ones we already dial, its rotation is over, so the
-                    // fallback to its old address (and our client-auth credential for it) goes away without re-publishing anything.
-                    let fb = match self.rts.get_mut(&id) {
-                        Some(rt) if kind == proto::KIND_ROTATE_DONE && (rt.peer.onion_pub, rt.peer.auth_pub) == (onion, auth) => rt.fallback.take(),
-                        _ => None,
-                    };
-                    if let Some(fb) = fb { self.transport.remove_contact(&[0u8; 32], &fb.onion_pub); }
-                    let _ = self.ev.send(Event::Rotate { id, kind, onion, auth });
-                }
+                let Some(rt) = self.rts.get_mut(&id) else { return };
+                let (onion, auth): ([u8; 32], [u8; 32]) = (keys[..32].try_into().unwrap(), keys[32..].try_into().unwrap());
+                // The peer announces the keys it runs now: when they are the ones we already dial, its rotation is over, so the
+                // fallback to its old address (and our client-auth credential for it) goes away without re-publishing anything.
+                let fb = if kind == proto::KIND_ROTATE_DONE && (rt.peer.onion_pub, rt.peer.auth_pub) == (onion, auth) { rt.fallback.take() } else { None };
+                if let Some(fb) = fb { self.transport.remove_contact(&[0u8; 32], &fb.onion_pub); }
+                let _ = self.ev.send(Event::Rotate { id, kind, onion, auth });
             }
-            In::Conn(ConnEvent::FileSent { id, gen }) => { if self.is_current(id, gen) { let _ = self.ev.send(Event::FileSent { id }); } }
             In::Conn(ConnEvent::DialEnded { id, epoch }) => { if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) { rt.dialing = false; } }
             In::Conn(ConnEvent::DialFailed { id, epoch }) => {
                 if let Some(rt) = self.rts.get_mut(&id).filter(|r| r.epoch == epoch) {
@@ -506,7 +492,7 @@ impl Core {
                 (r.secret.clone(), r.extra.clone(), r.guard.clone(), rt.peer.clone(), rt.stop.clone(), rt.epoch, rt.secret.clone())
             };
             let Some(ns) = ContactIdentity::from_secret_bytes(&secret) else { if let Some(rt) = self.rts.get_mut(&id) { rt.retry = None; } continue };
-            match self.transport.add_contact_ex(&ns, &peer, &extra, true) {
+            match self.transport.add_contact(&ns, &peer, &extra, true) {
                 Ok(Some(rx)) => {
                     self.spawn_acceptor(id, rsecret, peer, rx, guard, stop, epoch);
                     let rt = self.rts.get_mut(&id).expect("exists");
@@ -514,8 +500,7 @@ impl Core {
                     if let Some(n) = rt.next.as_mut() { n.2 = true; }
                     // propose it right away if the contact is connected (otherwise it is proposed on the next connection)
                     if let (Some((no, na, true)), Some((_, tx))) = (rt.next, rt.conn.as_ref()) {
-                        let mut k = [0u8; 64]; k[..32].copy_from_slice(&no); k[32..].copy_from_slice(&na);
-                        let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_OFFER, keys: k });
+                        let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_OFFER, keys: pack(&no, &na) });
                     }
                     self.notice(Some(id), "key rotation: the new onion service is running now");
                 }
@@ -851,8 +836,8 @@ mod tests {
     /// Transport that refuses to host (a Tails whose control port refuses ADD_ONION) but can dial.
     struct NoHost(crate::transport::MemTransport);
     impl Transport for NoHost {
-        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
-            if listen { Err("hosting refused by this tor".into()) } else { self.0.add_contact(me, peer, false) }
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, extra: &[[u8; 32]], listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+            if listen { Err("hosting refused by this tor".into()) } else { self.0.add_contact(me, peer, extra, false) }
         }
         fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.0.remove_contact(a, b) }
         fn dial_fn(&self) -> DialFn { self.0.dial_fn() }
@@ -923,9 +908,9 @@ mod tests {
     /// Refuses the first attempt to host one particular onion key (a transient ADD_ONION failure), then works.
     struct FailNewOnion { inner: crate::transport::MemTransport, onion: [u8; 32], failed: bool, hosted_now: Arc<AtomicBool> }
     impl Transport for FailNewOnion {
-        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, extra: &[[u8; 32]], listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
             if listen && me.onion_public() == self.onion && !self.failed { self.failed = true; return Err("transient ADD_ONION failure".into()); }
-            let r = self.inner.add_contact(me, peer, listen);
+            let r = self.inner.add_contact(me, peer, extra, listen);
             if listen && me.onion_public() == self.onion && r.is_ok() { self.hosted_now.store(true, Ordering::SeqCst); }
             r
         }
@@ -962,7 +947,7 @@ mod tests {
     /// Records which (peer) onion keys the engine forgot client-auth for.
     struct Recorder { inner: crate::transport::MemTransport, forgotten: Arc<Mutex<Vec<[u8; 32]>>> }
     impl Transport for Recorder {
-        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> { self.inner.add_contact(me, peer, listen) }
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, extra: &[[u8; 32]], listen: bool) -> Result<Option<Receiver<BoxStream>>, String> { self.inner.add_contact(me, peer, extra, listen) }
         fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.forgotten.lock().unwrap().push(*b); self.inner.remove_contact(a, b) }
         fn dial_fn(&self) -> DialFn { self.inner.dial_fn() }
     }
@@ -1042,9 +1027,9 @@ mod tests {
     /// Refuses the FIRST hosting attempt only (e.g. a transient onion-address collision).
     struct FailOnce(crate::transport::MemTransport, bool);
     impl Transport for FailOnce {
-        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
+        fn add_contact(&mut self, me: &ContactIdentity, peer: &Bundle, extra: &[[u8; 32]], listen: bool) -> Result<Option<Receiver<BoxStream>>, String> {
             if listen && !self.1 { self.1 = true; return Err("transient failure".into()); }
-            self.0.add_contact(me, peer, listen)
+            self.0.add_contact(me, peer, extra, listen)
         }
         fn remove_contact(&mut self, a: &[u8; 32], b: &[u8; 32]) { self.0.remove_contact(a, b) }
         fn dial_fn(&self) -> DialFn { self.0.dial_fn() }

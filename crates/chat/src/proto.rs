@@ -44,9 +44,6 @@ pub fn encode_text(text: &str) -> Vec<Zeroizing<Vec<u8>>> {
     out
 }
 
-/// Peer-supplied text can never steer a terminal or spoof direction (see `nerd_chat_core::text`).
-pub fn clean(text: &str) -> Zeroizing<String> { nerd_chat_core::text::sanitize(text) }
-
 /// Reassembles chunked texts. The buffer has its FINAL capacity from the start and never reallocates, so no
 /// partial plaintext is ever left behind in freed heap (R6-L3).
 pub struct Assembler { buf: Zeroizing<Vec<u8>> }
@@ -64,7 +61,8 @@ impl Assembler {
                 if self.buf.len() + payload.len() > MAX_TEXT_BYTES { self.buf.zeroize(); self.buf.clear(); return Err(ProtoError::TooLong); }
                 self.buf.extend_from_slice(payload);
                 if kind == KIND_TEXT_CONT { return Ok(Incoming::Ignored); }
-                let r = std::str::from_utf8(&self.buf).map(clean).map_err(|_| ProtoError::BadUtf8);
+                // peer text can never steer a terminal or spoof direction (see `nerd_chat_core::text`)
+                let r = std::str::from_utf8(&self.buf).map(nerd_chat_core::text::sanitize).map_err(|_| ProtoError::BadUtf8);
                 self.buf.zeroize();
                 self.buf.clear();
                 r.map(Incoming::Text)

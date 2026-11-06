@@ -2,7 +2,7 @@
 //! (200 ms ticks, partial cells are buffered, never lost), sends queued messages and keepalives, and ends on any error,
 //! on an idle timeout (no cell from the peer for `idle`) or when told to close.
 use crate::{
-    engine::{ConnEvent, In, Timing},
+    engine::{ConnEvent, Event, In, Timing},
     file::{self, Offer, Xid},
     proto::{self, Assembler, Incoming},
     transport::BoxStream,
@@ -103,11 +103,11 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
         if n_window.get().elapsed() > Duration::from_secs(60) { n_window.set(Instant::now()); n_count.set(0); }
         n_count.set(n_count.get() + 1);
         if n_count.get() > 6 { return true; }
-        ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into(), alert: false })).is_ok()
+        ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::Notice { id: Some(id), text: text.into(), alert: false } })).is_ok()
     };
     // security-relevant notices (integrity failure, refused content) are never rate-limited away
-    let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Notice { id, gen, text: text.into(), alert: true })).is_ok();
-    let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::FileCancelled { id, gen })).is_ok();
+    let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::Notice { id: Some(id), text: text.into(), alert: true } })).is_ok();
+    let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileCancelled { id } })).is_ok();
     let mut bad_frames = 0u32;
     let mut rot_frames = 0u32;
     'conn: loop {
@@ -158,7 +158,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         *pos = end;
                         last_tx = Instant::now();
                     }
-                    if *pos >= x.f.padded.len() { outx = None; if ev.send(In::Conn(ConnEvent::FileSent { id, gen })).is_err() { break; } }
+                    if *pos >= x.f.padded.len() { outx = None; if ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileSent { id } })).is_err() { break; } }
                 }
             }
         }
@@ -192,7 +192,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                             last_tx = Instant::now();
                         } else {
                             inx = Some(InXfer { o, padded: o.bucket as usize, buf: Zeroizing::new(Vec::new()), st: InState::Pending(Instant::now() + OFFER_WAIT) });
-                            if ev.send(In::Conn(ConnEvent::FileOffer { id, gen, xid: o.xid, bucket: o.bucket })).is_err() { break; }
+                            if ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileOffer { id, xid: o.xid, bucket: o.bucket } })).is_err() { break; }
                         }
                     }
                     Some(file::KIND_FILE_ACCEPT) => {
@@ -232,7 +232,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                                         Ok(c) => {
                                             let resanitised = c.data.len() != content.len() || (mode == nerd_chat_strip::Mode::Auto && !c.report.is_empty());
                                             let data = Zeroizing::new(c.data);
-                                            if ev.send(In::Conn(ConnEvent::File { id, gen, data, format: c.format, report: c.report, resanitised })).is_err() { break; }
+                                            if ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::File { id, data, format: c.format, report: c.report, resanitised } })).is_err() { break; }
                                         }
                                         Err(e) => { if !alert(&ev, &format!("received file refused ({e})")) || !cancelled(&ev) { break; } }
                                     }
@@ -249,7 +249,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         if ev.send(In::Conn(ConnEvent::Rotate { id, kind: k, keys })).is_err() { break; }
                     }
                     _ => match asm.feed(&m.body) {
-                        Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Msg { id, gen, text })).is_err() { break; } }
+                        Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::Message { id, text } })).is_err() { break; } }
                         Ok(_) => {}
                         Err(_) => break,
                     },
