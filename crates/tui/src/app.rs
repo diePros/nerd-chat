@@ -71,7 +71,7 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
             TorSetup::Spawn(SpawnConfig::new(path))
         }
     };
-    TorTransport::start(setup, |p| progress(p)).map(|t| Box::new(t) as Box<dyn Transport>)
+    TorTransport::start(setup, progress).map(|t| Box::new(t) as Box<dyn Transport>)
 }
 
 /// Where the engine is. (UI reads this.)
@@ -575,7 +575,7 @@ impl App {
             Key::Char('s') => self.start_save(),
             Key::Char('h') => self.toggle_host_anyway(),
             Key::Char('v') => self.start_verify(),
-            Key::Char('d') => if self.sel_name().is_some() { self.open_prompt(Prompt::ConfirmDelete, "") },
+            Key::Char('d') if self.sel_name().is_some() => { self.open_prompt(Prompt::ConfirmDelete, "") },
             _ => {}
         }
         Action::None
@@ -1046,7 +1046,7 @@ impl App {
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
         let expires = offer.expires_in();
-        let info = Zeroizing::new(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt; x = cancel). Tell the other person the address and code IN PERSON.", &*code, expires.as_secs() / 60));
+        let info = Zeroizing::new(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt; x = cancel). Tell the other person the address and code IN PERSON.", *code, expires.as_secs() / 60));
         self.spawn_pair(info, move |cancel, slot, ident| {
             listener.set_nonblocking(true).ok();
             let deadline = Instant::now() + expires;

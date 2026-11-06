@@ -94,7 +94,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let sock = d.path().join("notor");
         let l = UnixListener::bind(&sock).unwrap();
-        thread::spawn(move || { for s in l.incoming() { if let Ok(mut s) = s { let _ = s.write_all(b"SSH-2.0-nope\r\n"); let mut b = [0u8; 64]; let _ = s.read(&mut b); } } });
+        thread::spawn(move || { for mut s in l.incoming().flatten() { let _ = s.write_all(b"SSH-2.0-nope\r\n"); let mut b = [0u8; 64]; let _ = s.read(&mut b); } });
         let c = Candidates { control: vec![Addr::Unix(d.path().join("missing")), Addr::Unix(sock)], socks: vec![Addr::Unix(d.path().join("nosocks"))] };
         let r = probe(&c, false, &AuthPref::default(), false).join("\n");
         assert!(r.contains("not reachable"), "{r}");

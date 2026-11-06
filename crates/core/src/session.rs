@@ -287,7 +287,7 @@ mod tests {
             m1[off] ^= 1;
             assert!(Handshake::respond(&b, &ab, &m1).is_err(), "msg1 flip at {off}");
         }
-        assert!(Handshake::respond(&b, &ab, &vec![0; 100]).is_err());
+        assert!(Handshake::respond(&b, &ab, &[0; 100]).is_err());
         assert!(Handshake::respond(&b, &ab, &vec![0; 5000]).is_err());
     }
 

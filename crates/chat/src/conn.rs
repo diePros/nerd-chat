@@ -273,7 +273,7 @@ mod tests {
     impl Read for Drip {
         fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
             self.tick += 1;
-            if self.tick % 2 == 0 { return Err(ErrorKind::TimedOut.into()); }
+            if self.tick.is_multiple_of(2) { return Err(ErrorKind::TimedOut.into()); }
             if self.pos >= self.data.len() { return Ok(0); }
             let n = 7.min(b.len()).min(self.data.len() - self.pos);
             b[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);

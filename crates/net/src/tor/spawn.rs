@@ -41,7 +41,7 @@ const RAMFS_MAGIC: i64 = 0x8584_58f6;
 
 /// Is `dir` on RAM-backed storage (tmpfs/ramfs)? tor's consensus cache and state must not touch a disk.
 fn is_ram_backed(dir: &Path) -> bool {
-    rustix::fs::statfs(dir).is_ok_and(|st| { let t = st.f_type as i64; t == TMPFS_MAGIC || t == RAMFS_MAGIC })
+    rustix::fs::statfs(dir).is_ok_and(|st| { let t = st.f_type; t == TMPFS_MAGIC || t == RAMFS_MAGIC })
 }
 
 /// Unix socket paths are limited to ~108 bytes; fail early with a clear message instead of a generic tor exit.

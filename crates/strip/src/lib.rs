@@ -137,7 +137,7 @@ fn jpeg(d: &[u8]) -> Result<Cleaned, StripError> {
                 break;
             }
             0x00 | 0x01 | 0xD0..=0xD8 => return Err(StripError::Malformed(M, "unexpected standalone marker")),
-            0xC8 | 0xC9..=0xCB | 0xCD..=0xCF | 0xCC => return Err(StripError::Unsupported), // arithmetic coding / reserved: not supported
+            0xC8..=0xCF => return Err(StripError::Unsupported), // arithmetic coding / reserved: not supported
             _ => {}
         }
         if i + 2 > d.len() { return Err(StripError::Malformed(M, "truncated segment")); }
@@ -216,7 +216,7 @@ fn zlib_valid(z: &[u8], expect: usize) -> bool {
 
     if z.len() < 6 { return false; }
     let (cmf, flg) = (z[0], z[1]);
-    if cmf & 0x0F != 8 || cmf >> 4 > 7 || ((cmf as u16) << 8 | flg as u16) % 31 != 0 || flg & 0x20 != 0 { return false; }
+    if cmf & 0x0F != 8 || cmf >> 4 > 7 || !((cmf as u16) << 8 | flg as u16).is_multiple_of(31) || flg & 0x20 != 0 { return false; }
     let mut b = Bits { d: &z[2..], pos: 0, bit: 0, nbits: 0 };
     let mut win = zeroize::Zeroizing::new(vec![0u8; 32768]);
     let (mut out, mut a, mut bsum) = (0usize, 1u32, 0u32);
@@ -383,7 +383,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
             }
             // PLTE is kept only where it is REQUIRED (palette images); a "suggested palette" on other colour types is dropped.
             b"PLTE" if ctype == 3 => {
-                if !ihdr || idat || plte || trns || len == 0 || len % 3 != 0 || len > 768 || len / 3 > (1usize << depth.min(8)) { return Err(StripError::Malformed(M, "invalid PLTE")); }
+                if !ihdr || idat || plte || trns || len == 0 || !len.is_multiple_of(3) || len > 768 || len / 3 > (1usize << depth.min(8)) { return Err(StripError::Malformed(M, "invalid PLTE")); }
                 plte = true; plte_entries = len / 3; out.extend_from_slice(whole);
             }
             // tRNS only with its exact legal length per colour type (grey 2, RGB 6, palette <= entries); never with alpha types.
@@ -676,7 +676,7 @@ mod tests {
         let push = |bits: &mut Vec<bool>, v: u32, n: u32| for i in 0..n { bits.push(v >> i & 1 == 1) };
         for _ in 0..25_000 { push(&mut bits, 0, 1); push(&mut bits, 1, 2); push(&mut bits, 0, 7); }
         push(&mut bits, 1, 1); push(&mut bits, 0, 2);
-        while bits.len() % 8 != 0 { bits.push(false); }
+        while !bits.len().is_multiple_of(8) { bits.push(false); }
         let mut z = vec![0x78, 0x01];
         for c in bits.chunks(8) { z.push(c.iter().enumerate().fold(0u8, |a, (i, &b)| a | (b as u8) << i)); }
         z.extend_from_slice(&[2, 0, 0xFD, 0xFF, 0, 0, 0x00, 0x02, 0x00, 0x01]);

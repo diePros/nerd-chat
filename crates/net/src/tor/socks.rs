@@ -34,7 +34,7 @@ fn rd<R: Read>(r: &mut R, n: usize) -> Result<Vec<u8>, SocksError> {
 }
 
 pub fn connect<S: Read + Write>(s: &mut S, host: &str, port: u16, creds: Option<(&[u8], &[u8])>) -> Result<(), SocksError> {
-    if host.is_empty() || host.len() > 255 || host.bytes().any(|b| b < 0x21 || b > 0x7e) { return Err(SocksError::BadArg); }
+    if host.is_empty() || host.len() > 255 || host.bytes().any(|b| !(0x21..=0x7e).contains(&b)) { return Err(SocksError::BadArg); }
     if let Some((u, p)) = creds { if u.is_empty() || u.len() > 255 || p.is_empty() || p.len() > 255 { return Err(SocksError::BadArg); } }
 
     // greeting: offer exactly one method

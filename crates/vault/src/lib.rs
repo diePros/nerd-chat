@@ -329,7 +329,7 @@ mod tests {
         let mut b = Vault::create(b"pw", None, P).unwrap();
         let (x, y) = (a.seal(b"1").unwrap(), b.seal(b"1").unwrap());
         assert_ne!(x[..6], y[..6]);
-        let big = a.seal(&vec![1u8; 100]).unwrap();
+        let big = a.seal(&[1u8; 100]).unwrap();
         assert_eq!(x.len(), big.len(), "size must not reveal exact length");
         assert_ne!(a.seal(b"1").unwrap().len(), a.seal(&vec![0u8; PAD_BUCKET]).unwrap().len());
         assert_eq!(x.len() % PAD_BUCKET, 0, "TOTAL file length must be a bucket multiple");

@@ -25,7 +25,7 @@ fn run(prog: &[libc::sock_filter], d: &[u8; 64]) -> u32 {
         let i = prog.get(pc).unwrap_or_else(|| panic!("fell off the program at {pc}"));
         pc += 1;
         match i.code {
-            0x20 => { let k = i.k as usize; assert!(k % 4 == 0 && k + 4 <= 64, "bad load offset {k}"); a = u32::from_le_bytes(d[k..k + 4].try_into().unwrap()); }
+            0x20 => { let k = i.k as usize; assert!(k.is_multiple_of(4) && k + 4 <= 64, "bad load offset {k}"); a = u32::from_le_bytes(d[k..k + 4].try_into().unwrap()); }
             0x15 => pc += if a == i.k { i.jt } else { i.jf } as usize,
             0x45 => pc += if a & i.k != 0 { i.jt } else { i.jf } as usize,
             0x35 => pc += if a >= i.k { i.jt } else { i.jf } as usize,
@@ -170,7 +170,7 @@ fn four_hundred_thousand_random_inputs_agree_with_the_specification() {
         let nr = match next() % 4 { 0 => (next() % 512) as u32, 1 => [0u32, 1, 9, 11, 12, 25, 28, 131, 228, 231, 318][(next() % 11) as usize] | if next() % 4 == 0 { 0x4000_0000 } else { 0 }, _ => next() as u32 };
         let arch = if next() % 8 == 0 { next() as u32 } else { AUDIT_ARCH_X86_64 };
         let mut args = [0u64; 6];
-        for a in args.iter_mut() { *a = match next() % 5 { 0 => 0, 1 => next() % 4, 2 => next() % 16, 3 => next(), _ => next() % 4 | (next() << 32) }; }
+        for a in args.iter_mut() { *a = match next() % 5 { 0 => 0, 1 => next() % 4, 2 => next() % 16, 3 => next(), _ => (next() % 4) | (next() << 32) }; }
         assert_eq!(run(&p, &data(nr, arch, args)), spec(nr, arch, args), "nr {nr:#x} arch {arch:#x} args {args:?}");
     }
 }

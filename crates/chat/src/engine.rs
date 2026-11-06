@@ -609,7 +609,7 @@ mod tests {
     fn wait_for<F: FnMut(&Event) -> bool>(e: &Engine, limit: Duration, mut f: F) -> bool {
         let end = Instant::now() + limit;
         while Instant::now() < end {
-            match e.events.recv_timeout(Duration::from_millis(50)) { Ok(ev) => if f(&ev) { return true }, Err(_) => {} }
+            if let Ok(ev) = e.events.recv_timeout(Duration::from_millis(50)) { if f(&ev) { return true } }
         }
         false
     }
@@ -1057,7 +1057,7 @@ mod tests {
         v.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]));
         v.extend(seg(0xC4, &[0; 17]));
         v.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0]));
-        v.extend(std::iter::repeat(0x11u8).take(scan));
+        v.extend(std::iter::repeat_n(0x11u8, scan));
         v.extend_from_slice(&[0xFF, 0xD9]);
         v
     }
