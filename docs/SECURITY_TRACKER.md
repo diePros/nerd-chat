@@ -394,3 +394,13 @@ Verdict of the reviewer: nothing CRITICAL/HIGH; in the code nothing reaches the 
 | R22-L7 | `H` discards a draft | ACCEPTED | RAM-only text, same as leaving a chat |
 | R22-I | shred checks the opened file against the earlier lstat (dev/ino) | FIXED | a swapped-in file is not overwritten (still unlinked) |
 | R22-tests | surviving mutants: autosave on receive/send, decode caps, rollbacks, wrong delete index, select kept on panic, purge tracking of saved files, unlink on failed overwrite, small estimate | FIXED | tests drive real traffic and compare the vault FILE bytes, check all three decode caps, the Saved-view delete index, panic wiping the cursor, unlink-after-failure, the capacity |
+
+## Lost terminal (cycle 35)
+| ID | Item | Status | Notes |
+|---|---|---|---|
+| LT-1 | when the terminal vanished (window closed, ssh dropped, tmux killed) the app did NOT exit: crossterm's event reader loops forever on `read(0) = 0` inside ONE `event::poll` call, so our SIGHUP/lost-terminal handling was never reached: the process burned 100% CPU indefinitely with the vault OPEN in RAM (and a Tor child running when it was online). Found when the owner saw seven such processes (left behind by my own UI tests) | FIXED | the main loop checks the terminal itself (`input_ready`: poll for hangup/error and for readable-with-nothing-to-read = EOF) before crossterm is asked to read, so it never reads a dead terminal; a watchdog thread force-exits two seconds after the terminal hangs up if the main loop has not reacted; test with a socket pair (alive / byte waiting / hung up); verified in tmux: the app exits within one second of `tmux kill-server`, offline and online (its Tor child exits with it) |
+
+## Lost terminal (cycle 35)
+| ID | Item | Status | Notes |
+|---|---|---|---|
+| LT-1 | when the terminal vanished (window closed, ssh dropped, tmux killed) the app did NOT exit: crossterm's event reader spins forever inside `event::poll` once its tty returns EOF (`read(0) = 0` in a tight loop), so our SIGHUP/lost-terminal handling was never reached: a process at 100% CPU for hours with the vault open in RAM (found on the owner's machine: 7 leaked instances, each also holding a `tor`) | FIXED | the main loop checks the terminal itself (`input_ready`: hangup/error/EOF = terminal gone -> normal wipe-and-exit path) before crossterm is asked to read; a watchdog thread force-exits two seconds after a hangup if the main loop did not react; test with a socket pair, and verified end to end in tmux (online and offline: exits within 1 s). Honest note: a killed instance (SIGKILL) cannot wipe or remove its RAM directory: the next start sweeps `ramtor-*`/`seburity-*` directories of dead owners |

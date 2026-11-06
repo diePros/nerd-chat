@@ -21,7 +21,7 @@ nerd-chat-sandbox = { path = "../sandbox" }
 ratatui = "0.30"
 zeroize = "1"
 getrandom = "0.3"
-rustix = { version = "1", features = ["process", "thread"] }
+rustix = { version = "1", features = ["process", "thread", "event"] }
 signal-hook = "0.3"
 
 [dev-dependencies]

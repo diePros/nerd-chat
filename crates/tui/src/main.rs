@@ -183,6 +183,43 @@ fn harden() -> Vec<String> {
     w
 }
 
+/// Wait up to `timeout` for input on `fd`. `Err(UnexpectedEof)` = the terminal is GONE (window closed, ssh dropped, tmux killed: hangup, error or
+/// end-of-file). We look ourselves because crossterm's event reader spins forever inside `event::poll` once its tty returns EOF (observed: a
+/// process at 100% CPU for hours that never reaches our SIGHUP check), so it must never be asked to read from a dead terminal.
+fn input_ready(fd: impl std::os::fd::AsFd, timeout: Duration) -> std::io::Result<bool> {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+    let ts = Timespec { tv_sec: timeout.as_secs() as i64, tv_nsec: timeout.subsec_nanos() as i64 };
+    match poll(&mut fds, Some(&ts)) {
+        Ok(_) => {}
+        Err(rustix::io::Errno::INTR) => return Ok(false), // a signal arrived: the loop looks at the flag
+        Err(e) => return Err(e.into()),
+    }
+    let r = fds[0].revents();
+    let gone = || std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the terminal is gone");
+    if r.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) { return Err(gone()); }
+    if r.contains(PollFlags::IN) {
+        // readable with nothing to read = end-of-file
+        return if rustix::io::ioctl_fionread(&fd).map_err(std::io::Error::from)? == 0 { Err(gone()) } else { Ok(true) };
+    }
+    Ok(false)
+}
+
+/// Last line of defence: if the terminal is gone and the main loop has not reacted within two seconds (stuck in a library, or busy), the
+/// process ends instead of lingering with the vault open in RAM. A dead terminal has no screen left to wipe.
+fn spawn_terminal_watchdog() {
+    std::thread::spawn(|| loop {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        let stdin = std::io::stdin();
+        let mut fds = [PollFd::new(&stdin, PollFlags::empty())]; // only hangup / error conditions are reported
+        let ts = Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
+        if poll(&mut fds, Some(&ts)).is_ok() && !fds[0].revents().is_empty() {
+            std::thread::sleep(Duration::from_secs(2));
+            std::process::exit(1);
+        }
+    });
+}
+
 fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
     app.panic_wipe();
     // Draw the blank Wiped screen twice so BOTH of ratatui's buffers are overwritten.
@@ -235,12 +272,14 @@ fn main() {
         let _ = signal_hook::flag::register(s, sig.clone());
     }
     let mut app = App::new(cfg);
+    spawn_terminal_watchdog();
     let mut term = ratatui::init(); // raw mode + alternate screen + panic hook that restores the terminal
     let result = loop {
         if sig.load(Ordering::SeqCst) { panic_exit(&mut app, &mut term); }
         if let Err(e) = term.draw(|f| ui::draw(f, &app)) { break Err(e); }
         app.poll();
-        match event::poll(Duration::from_millis(200)) {
+        // (waits up to 200 ms; crossterm is only asked once we know the terminal is alive, and then without blocking)
+        match input_ready(std::io::stdin(), Duration::from_millis(200)).and_then(|_| event::poll(Duration::ZERO)) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(k)) => if let Some(k) = map_key(k) {
                     match app.handle(k) {
@@ -266,6 +305,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vanished_terminal_is_detected_instead_of_being_read_forever() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        let (mine, mut peer) = UnixStream::pair().unwrap();
+        assert!(!input_ready(&mine, Duration::from_millis(30)).unwrap(), "alive and quiet: just no input yet");
+        peer.write_all(b"x").unwrap();
+        assert!(input_ready(&mine, Duration::from_millis(30)).unwrap(), "a byte is waiting");
+        let mut buf = [0u8; 1];
+        std::io::Read::read_exact(&mut &mine, &mut buf).unwrap();
+        drop(peer);                                                  // the other end hangs up: what a closed terminal looks like
+        let e = input_ready(&mine, Duration::from_millis(30)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof, "{e}");
+        // and it stays detected (never reports 'ready' for an endless stream of EOFs)
+        for _ in 0..3 { assert!(input_ready(&mine, Duration::from_millis(1)).is_err()); }
+    }
 
     #[test]
     fn panic_lock_and_purge_have_different_keys() {
