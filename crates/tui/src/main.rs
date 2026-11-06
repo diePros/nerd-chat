@@ -94,7 +94,10 @@ fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "--strip") { strip_cmd(&raw[1..]); }
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
-    let mut path = Some(PathBuf::from("nerd-chat.vault"));
+    // before the rename the default file was ./seburity.vault: keep using it instead of silently offering to create a new vault
+    let legacy = !std::path::Path::new("nerd-chat.vault").exists() && std::path::Path::new("seburity.vault").exists();
+    if legacy { eprintln!("note: using the existing ./seburity.vault (the default file name is now nerd-chat.vault)"); }
+    let mut path = Some(PathBuf::from(if legacy { "seburity.vault" } else { "nerd-chat.vault" }));
     let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
     let mut allow_swap = false;

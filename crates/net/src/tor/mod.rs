@@ -206,7 +206,6 @@ impl Tor {
         })))
     }
 
-
     /// The private (0700, RAM) directory of our own spawned tor, if any: a safe place for our onion-target unix sockets.
     pub fn spawn_dir(&self) -> Option<&std::path::Path> { self._spawned.as_ref().map(|s| s.dir()) }
 
@@ -222,7 +221,7 @@ impl Tor {
     /// Host OUR onion service for this contact: reachable only by the peer's authorized client key.
     /// `target` is where our listener accepts the (Noise) connections tor forwards: prefer a unix socket in a 0700 dir
     /// when tor runs as us (spawn mode); external tors need TCP loopback.
-    /// Like `host`, but also authorizes `extra_auth` client keys (the peer's previous key during a key rotation).
+    /// `extra_auth`: further client keys to authorize (the peer's previous key during a key rotation).
     pub fn host_with(&mut self, me: &ContactIdentity, peer: &Bundle, extra_auth: &[[u8; 32]], target: &Target) -> Result<String, TorError> {
         let mut auth = vec![peer.auth_pub];
         for a in extra_auth.iter().take(2) { if !auth.contains(a) { auth.push(*a); } }

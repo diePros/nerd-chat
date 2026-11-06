@@ -147,7 +147,6 @@ impl Bundle {
         h.update(body);
         h.finalize().into()
     }
-
 }
 
 fn digits(f: &[u8; 32]) -> String {

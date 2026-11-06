@@ -26,12 +26,13 @@ spelled `Bash` (capital B).
 | 27 | (this commit) | review 18 fixes: anonymous-only mmap, clock id limit, test gaps (grid, kernel markers/timeouts, helper seccomp status), exit-code message, hygiene test, scripts/sandbox-check.sh | yes (review 19), fixes in cycle 28 | yes (sandbox-check passes) | yes, 3/3 |
 | 28 | (this commit) | review 19 fixes: forged exit-4 probe, parent-pid orphan check, token-based hygiene test, kernel-test fixes, memlock 0 | not re-reviewed (small) | yes (sandbox-check passes) | n/a (no transport change) |
 | 29 | (this commit) | TUI overhaul: permanent sidebar, vim-style Normal/Insert modes, Esc ladder to a privacy screen, history scrolling, context hints, stale Tor text removed, `I` = import | yes (review 20: 1 HIGH, fixed in cycle 30) | yes | n/a |
+| 30-31 | (this commit) | review 20 fixes, AGPL LICENSE, README/SECURITY.md, rename to nerd-chat with tooling, cleanup (-90 lines + dead API), review 21 fixes | yes (reviews 20, 21) | yes (static, sandbox-check) | yes, 3/3 live |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
 2. (done) rotation retry; counter rejected; random port accepted as unneeded.
 3. R12-5: probe hosting capability automatically at export.
-4. Sandbox the file parsers (seccomp/Landlock) and a cargo-fuzz target (needs the user's OK for new tooling/deps).
+4. (sandbox done) cargo-fuzz is installed (nightly toolchain added with the user's OK): write fuzz targets for nerd-chat-strip (jpeg/png/text), the bundle/cell/handshake decoders and the vault/store decoders; run them for a while.
 5. (done, cycles 19-20) snow wiping, ml-kem key wipe verified. mlock stays deferred: RLIMIT_MEMLOCK (usually 8 MiB) is far below Argon2's 512 MiB, swap is refused anyway.
 6. cargo-deny (ask first), cargo-vet, CI, cross-machine reproducible build.
 7. R8-I7/R13: stop wasted dials to a peer that flipped (needs signalling).

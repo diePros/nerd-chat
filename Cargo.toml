@@ -21,6 +21,6 @@ opt-level = 3
 [profile.dev.package.nerd-chat-strip]
 opt-level = 3
 
-# snow 0.10.0 never wipes key material. vendor/snow is the unmodified crate plus Drop-time zeroization (see vendor/snow/NERD-CHAT-PATCH.md).
+# snow 0.10.0 never wipes key material. vendor/snow is the unmodified crate plus Drop-time zeroization (see vendor/snow/PATCH-NOTES.md).
 [patch.crates-io]
 snow = { path = "vendor/snow" }

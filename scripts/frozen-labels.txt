@@ -1,4 +1,4 @@
-# Strings that are part of the DISK and WIRE formats / cryptographic domain separation. They contain the ORIGINAL project codename
+# Strings that are part of the DISK and WIRE formats (and `seburity.vault`, the legacy default vault file name the app still falls back to) / cryptographic domain separation. They contain the ORIGINAL project codename
 # and must NEVER change when the project is renamed: changing one would make existing vaults, contact bundles, safety numbers and
 # handshakes incompatible (and silently change the cryptography). scripts/rename-project.py protects every line of this file;
 # crates/core/tests/frozen_labels.rs fails if source and this list disagree. One exact string per line, comments start with '#'.
@@ -20,3 +20,5 @@ seburity-pair-frame
 seburity-pair-pop-v1
 -----BEGIN SEBURITY CONTACT-----
 -----END SEBURITY CONTACT-----
+seburity.vault
+seburity-

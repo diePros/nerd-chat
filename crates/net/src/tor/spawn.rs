@@ -73,21 +73,19 @@ pub struct SpawnedTor {
     pub socks: Addr,
 }
 
-/// Remove leftover `ramtor-*` directories of OUR user whose owning process is gone (e.g. after SIGKILL/abort,
-/// where Drop never ran). A directory without a pid file only counts as stale after a minute (it may be mid-creation).
+/// Remove leftover `ramtor-*` (and pre-rename `seburity-*`) directories of OUR user whose owning process is gone (e.g. after SIGKILL/abort,
+/// where Drop never ran). Only a directory with OUR `owner.pid` marker qualifies: a foreign tool's `ramtor-*` directory is never touched.
 fn sweep_stale(base: &Path) {
     use std::os::unix::fs::MetadataExt;
     let me = rustix::process::geteuid().as_raw();
     let Ok(rd) = fs::read_dir(base) else { return };
     for e in rd.flatten() {
         let name = e.file_name();
-        if !name.to_str().is_some_and(|n| n.starts_with("ramtor-")) { continue; }
+        if !name.to_str().is_some_and(|n| n.starts_with("ramtor-") || n.starts_with("seburity-")) { continue; }
         let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
         if !md.is_dir() || md.uid() != me { continue; }
-        let alive = fs::read_to_string(e.path().join("owner.pid")).ok().and_then(|t| t.trim().parse::<u32>().ok())
-            .map(|pid| Path::new(&format!("/proc/{pid}")).exists());
-        let stale = match alive { Some(a) => !a, None => md.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|d| d > Duration::from_secs(60)) };
-        if stale { let _ = fs::remove_dir_all(e.path()); }
+        let Some(pid) = fs::read_to_string(e.path().join("owner.pid")).ok().and_then(|t| t.trim().parse::<u32>().ok()) else { continue };
+        if !Path::new(&format!("/proc/{pid}")).exists() { let _ = fs::remove_dir_all(e.path()); }
     }
 }
 

@@ -35,6 +35,24 @@ def files():
             yield p, str(rel)
 
 
+def forms_of(name):
+    """Every spelling of a project name that occurs in the tree, longest first."""
+    kebab, snake = name, name.replace("-", "_")
+    out = {kebab, snake, kebab.upper(), snake.upper(), kebab[0].upper() + kebab[1:], snake[0].upper() + snake[1:]}
+    return sorted(out, key=len, reverse=True)
+
+
+def mapping(old, new):
+    """(kebab map, snake map): old spelling -> new spelling, form by form (kebab stays kebab, snake stays snake, UPPER stays UPPER, Title stays Title).
+    A single-word old name has the SAME kebab and snake spelling, so the replacement is chosen by context (see `main`)."""
+    def spell(n, snake):
+        n2 = n.replace("-", "_") if snake else n
+        return (n2, n2.upper(), n2[0].upper() + n2[1:])
+    kebab = dict(zip(spell(old, False), spell(new, False)))
+    snake = dict(zip(spell(old, True), spell(new, True)))
+    return kebab, snake
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
@@ -46,47 +64,55 @@ def main():
     old = (ROOT / "scripts/project-name.txt").read_text().strip()
     if new == old:
         sys.exit(f"the project is already called {old}")
+    # a name that is short, or contains / is contained in the old one, would be replaced inside other words or inside itself
+    if len(new) < 4 or new in old or old in new:
+        sys.exit(f"refusing {new!r}: it must be at least 4 characters and must not contain, or be contained in, the current name {old!r}")
     if "--dry-run" not in flags and "--force" not in flags:
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
         if dirty:
             sys.exit("the git working tree is not clean: commit or stash first (so that `git checkout .` can undo the rename), or use --force")
 
-    frozen = [l.strip() for l in (ROOT / "scripts/frozen-labels.txt").read_text().splitlines() if l.strip() and not l.startswith("#")]
-    frozen.sort(key=len, reverse=True)
-    old_snake, new_snake = old.replace("-", "_"), new.replace("-", "_")
-    forms = [  # most specific first
-        (old.upper().replace("-", "_") + "_", new.upper().replace("-", "_") + "_"),   # env vars  OLD_FOO -> NEW_FOO
-        (old.upper(), new.upper()),                                                   # display    OLD -> NEW
-        (old[0].upper() + old[1:], new[0].upper() + new[1:]),                         # Title
-        (old_snake + "_", new_snake + "_"),                                           # Rust paths old_core -> new_core
-        (old + "-", new + "-"),                                                       # package names old-core -> new-core
-        (old, new),                                                                   # the bare word
-    ]
-    changed = []
+    frozen = sorted((l.strip() for l in (ROOT / "scripts/frozen-labels.txt").read_text().splitlines() if l.strip() and not l.startswith("#")), key=len, reverse=True)
+    kebab_map, snake_map = mapping(old, new)
+
+    def replace(m):
+        # `old_xyz` (a Rust path, an env var prefix) takes the snake spelling, everything else the kebab one
+        nxt = m.string[m.end():m.end() + 1]
+        first, second = (snake_map, kebab_map) if nxt == "_" else (kebab_map, snake_map)
+        return first.get(m.group(0)) or second[m.group(0)]
+    # ONE pass: a single alternation with identifier boundaries, so the output of one replacement is never replaced again and the
+    # name is never replaced inside a longer word (`nerd-chats`, `ubernerd-chat`, `nerd_chat2`)
+    rx = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(f) for f in forms_of(old)) + r")(?![A-Za-z0-9])")
+    newrx = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(f) for f in forms_of(new)) + r")(?![A-Za-z0-9])")
+    plan = []
     for p, rel in files():
         try:
             text = p.read_text()
         except UnicodeDecodeError:
             continue
-        out = text
+        masked = text
         for i, label in enumerate(frozen):  # protect the frozen strings behind placeholders
-            out = out.replace(label, f"\x00F{i}\x00")
-        for a, b in forms:
-            out = out.replace(a, b)
+            masked = masked.replace(label, f"\x00F{i}\x00")
+        if newrx.search(masked):
+            sys.exit(f"refusing {new!r}: it already occurs in {rel} (the rename would merge it with existing text)")
+        out = rx.sub(replace, masked)
         for i, label in enumerate(frozen):
             out = out.replace(f"\x00F{i}\x00", label)
         if out != text:
-            changed.append(rel)
-            if "--dry-run" not in flags:
-                p.write_text(out)
-    print(f"{old} -> {new}: {len(changed)} file(s) {'would change' if '--dry-run' in flags else 'changed'}")
-    for rel in changed:
+            plan.append((p, rel, out))
+    print(f"{old} -> {new}: {len(plan)} file(s) {'would change' if '--dry-run' in flags else 'changed'}")
+    for _, rel, _ in plan:
         print("  ", rel)
     if "--dry-run" in flags:
         return
+    for p, _, out in plan:
+        p.write_text(out)
     (ROOT / "scripts/project-name.txt").write_text(new + "\n")
     r = subprocess.run(["cargo", "update", "--workspace", "--offline"], cwd=ROOT, capture_output=True, text=True)
-    print("Cargo.lock refreshed" if r.returncode == 0 else "WARNING: cargo update failed:\n" + r.stderr)
+    if r.returncode != 0:
+        (ROOT / "scripts/project-name.txt").write_text(old + "\n")
+        sys.exit("cargo update FAILED, the tree is NOT in a usable state; undo with `git checkout . && git clean -fd`:\n" + r.stderr)
+    print("Cargo.lock refreshed")
     if "--test" in flags:
         sys.exit(subprocess.run(["cargo", "test", "--workspace"], cwd=ROOT).returncode)
     print("Next: cargo test --workspace, rebuild, and rename the GitHub repository if you want it to match.")

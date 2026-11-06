@@ -32,7 +32,7 @@ fn labels_in_sources() -> BTreeSet<String> {
                 let after = &rest[i + 1..];
                 let Some(j) = after.find('"') else { break };
                 let s = &after[..j];
-                if s.starts_with("seburity-") || s.contains("SEBURITY CONTACT") { found.insert(s.to_string()); }
+                if s.starts_with("seburity") || s.contains("SEBURITY CONTACT") { found.insert(s.to_string()); }
                 rest = &after[j + 1..];
             }
         }
@@ -52,5 +52,5 @@ fn every_frozen_label_is_still_used_and_unchanged() {
     let (list, found) = (frozen(), labels_in_sources());
     let missing: Vec<_> = list.difference(&found).collect();
     assert!(missing.is_empty(), "frozen labels that no source uses any more (renamed by accident, or removed?): {missing:?}");
-    assert!(list.len() >= 18, "the frozen list was truncated");
+    assert!(list.len() >= 20, "the frozen list was truncated");
 }

@@ -95,6 +95,7 @@ mod tests {
         assert_eq!(a.dh_public().to_bytes(), b.dh_public().to_bytes());
         assert!(a.kem_public() == b.kem_public());
         assert_ne!(a.onion_public(), b.onion_public());
+        assert_eq!(&b.secret_bytes()[128..192], &t[..], "exactly the proposed onion seed and auth key were installed");
         assert_ne!(a.auth_public().to_bytes(), b.auth_public().to_bytes());
         assert_eq!(&b.secret_bytes()[..128], &a.secret_bytes()[..128]);
     }
