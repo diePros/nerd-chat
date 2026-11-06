@@ -36,6 +36,7 @@ fn default_counter_path(p: &Path) -> PathBuf {
 /// honest about it: on flash media (SSD/USB stick) wear levelling may keep old blocks, so this is not a guarantee: the real protection
 /// of a vault is its password (and keyfile), which a purge destroys together with the vault and the counter.
 pub fn shred_file(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::MetadataExt;
     let md = fs::symlink_metadata(path).map_err(io)?;
     if !md.is_file() { return fs::remove_file(path).map_err(io); } // a symlink or special file: unlink only
     let overwrite = (|| -> std::io::Result<()> {
@@ -43,7 +44,10 @@ pub fn shred_file(path: &Path) -> Result<(), StoreError> {
         o.write(true);
         #[cfg(unix)]
         o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let mut f = o.open(path)?;
+        let f0 = o.open(path)?;
+        // the file we opened must be the one we looked at (a swapped-in file is not ours to overwrite)
+        { let m = f0.metadata()?; if (m.dev(), m.ino()) != (md.dev(), md.ino()) { return Err(std::io::Error::other("the file changed while being shredded")); } }
+        let mut f = f0;
         let mut left = md.len().min(1 << 30);
         let mut buf = vec![0u8; 64 * 1024];
         while left > 0 {
@@ -237,6 +241,17 @@ mod tests {
         shred_file(&link).unwrap();
         assert!(!link.exists() && fs::read(&target).unwrap() == b"keep me");
         assert!(shred_file(&d.path().join("missing")).is_err(), "a missing file is reported");
+    }
+
+    #[test]
+    fn shred_still_unlinks_when_the_overwrite_is_impossible() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("readonly");
+        fs::write(&p, b"data").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o444)).unwrap();   // cannot be opened for writing
+        assert!(shred_file(&p).is_err(), "the failed overwrite is reported");
+        assert!(!p.exists(), "but the file is deleted anyway");
     }
 
     #[test]

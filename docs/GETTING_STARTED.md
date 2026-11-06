@@ -34,8 +34,11 @@ Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode
 **Panic-lock: F12 or Ctrl+\\** wipes memory, clears screen + scrollback and exits immediately; the vault file stays, the password opens it again.
 **PURGE: Ctrl+] (or Shift+F12)** does the same AND overwrites and deletes the vault, its rollback counter, the keyfile and every file this
 session exported or saved: contacts, keys and saved messages are gone for good. No confirmation, no undo. Works from any screen, also at the
-password prompt. Limit: on flash media (SSD, USB stick) overwritten blocks may survive wear levelling; the password (and keyfile, which the purge
-destroys too) is what really protects a vault. `purge: N file(s) overwritten and deleted` is printed after the screen was wiped (counts only).
+password prompt. Honest limits: every save writes a NEW file and renames it over the old one, so EARLIER versions of the vault (with contacts, keys, and messages you
+later deleted) stay in free disk blocks on any filesystem, and on copy-on-write filesystems (btrfs, ZFS) the overwrite never touches old blocks at all;
+flash media (SSD, USB stick) may also keep blocks through wear levelling. What really protects a vault is the password plus a KEYFILE on separate
+media, which the purge destroys: use both. A keyfile that other vaults share (or a photo you reuse as keyfile) is destroyed too. Symlinks are
+followed for the purge (the real file is destroyed, then the link). Files you exported or saved in earlier sessions are not known and stay. `purge: N file(s) overwritten and deleted` is printed after the screen was wiped (counts only).
 
 ## 3. Try the file exchange with yourself (two terminals)
 Terminal 1 (Alice):

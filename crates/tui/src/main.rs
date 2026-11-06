@@ -120,7 +120,7 @@ fn parse_args() -> Config {
             "--keyfile" => {
                 let p = it.next().unwrap_or_else(|| usage());
                 match std::fs::read(&p) {
-                    Ok(b) => { keyfile = Some(Zeroizing::new(b)); keyfile_path = Some(PathBuf::from(&p)); }
+                    Ok(b) => { keyfile = Some(Zeroizing::new(b)); keyfile_path = Some(std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(&p))); } // the real file, not a symlink to it
                     Err(e) => { eprintln!("cannot read keyfile {p}: {e}"); std::process::exit(2) }
                 }
             }

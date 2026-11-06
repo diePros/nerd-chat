@@ -374,5 +374,23 @@ Verdict of the reviewer: the refactor preserves behaviour, security and privacy 
 | ID | Item | Status | Notes |
 |---|---|---|---|
 | SV-1 | the user can save single messages into the vault by hand (`m`, `y`); never automatic | ACCEPTED (by design, user decision) | stored encrypted in the vault (SBS5), no timestamp, caps 500 per contact / 4 MiB total, refused in `--ram` mode, shown only in the Saved view (`H`), deleted with `d d` or with the contact, wiped from RAM on panic. Honest limits: whoever has vault + password reads them; messages are signed by the contact, so a saved copy can prove authorship to third parties; old vault copies on flash may keep deleted entries (wear levelling); each save rewrites the vault (counter bump). Saved text sits in RAM (zeroizing) while the vault is open |
-| SV-2 | `Store::encode` reserves its final size (no reallocation copies of keys and saved messages in freed heap) | FIXED | |
+| SV-2 | `Store::encode` reserves its final size (no reallocation copies of keys and saved messages in freed heap) | FIXED (re-fixed in cycle 34) | the first estimate was too small for a contact in the middle of a key rotation (review 22 L-1); now computed from the real constants, test asserts the capacity never changes |
 | PG-1 | PURGE (Ctrl+] / Shift+F12): panic-lock plus overwrite-and-delete of the vault, rollback counter, keyfile, leftover `<vault>.*.tmp` files and the files exported/saved this session; no confirmation; also from the password prompt | ACCEPTED (by design, user decision) | tests: files gone, foreign files untouched, symlinks only unlinked, report counts. Limits: flash wear levelling may keep old blocks (a purge destroys the keyfile and counter too, so a strong password plus keyfile is what protects an already copied vault); files created outside this session (earlier exports, files you copied) are not known and stay; an accidental Ctrl+] destroys the vault: keep a backup of the vault ONLY if you accept that risk |
+
+## Review 22 (Opus, queued label + manual saving + purge) — integrated in cycle 34
+Verdict of the reviewer: nothing CRITICAL/HIGH; in the code nothing reaches the vault or disk without the explicit save key, but the tests did not prove it and four MEDIUM issues remained.
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R22-M1 | a message arriving while the message cursor was active shifted the cursor: the WRONG (possibly unread) message could be saved | FIXED | `push_line` keeps the cursor on the same message; if the 500-line cap drops it, the cursor goes away; tests |
+| R22-M2 | after "SAVE FAILED" the vault FILE could still contain the message (vault written, counter write failed) | FIXED | memory is rolled back, the save is retried once to bring the file back in line, and the status says so honestly either way; test with a read-only counter directory |
+| R22-M3 | purge did not destroy a symlinked keyfile (only the link) yet counted it as destroyed | FIXED | the keyfile path is canonicalized at start-up and every symlink target is shredded before the link; test |
+| R22-M4 | docs overclaimed that deleting/purging is final | FIXED (docs) | every save leaves the old vault version in free blocks on ANY filesystem; CoW filesystems are not overwritten at all; keyfile on separate media + strong password is the real protection |
+| R22-L1 | the `encode` capacity estimate was too small during a key rotation | FIXED | see SV-2 |
+| R22-L2 | the ★ stayed after deleting a saved message and blocked saving it again | FIXED | cleared with the delete; test |
+| R22-L3 | `Flushed` cleared "(queued)" on lines whose messages the engine had dropped; going offline left lines "queued" although the queue is gone | FIXED | only the newest `count` lines count as handed over, the rest (and everything after going offline) show "(NOT SENT)"; test |
+| R22-L4 | the purge `.tmp` scan matched files like `v.my-notes.tmp` | FIXED | exactly `<vault>.<16 lowercase hex>.tmp` |
+| R22-L5 | purge counted missing files as failures | FIXED | missing = nothing to do |
+| R22-L6 | purge also shreds exported bundles and saved received files of this session; a shared keyfile is destroyed | ACCEPTED | disclosed in the docs; the owner asked for "everything else" |
+| R22-L7 | `H` discards a draft | ACCEPTED | RAM-only text, same as leaving a chat |
+| R22-I | shred checks the opened file against the earlier lstat (dev/ino) | FIXED | a swapped-in file is not overwritten (still unlinked) |
+| R22-tests | surviving mutants: autosave on receive/send, decode caps, rollbacks, wrong delete index, select kept on panic, purge tracking of saved files, unlink on failed overwrite, small estimate | FIXED | tests drive real traffic and compare the vault FILE bytes, check all three decode caps, the Saved-view delete index, panic wiping the cursor, unlink-after-failure, the capacity |

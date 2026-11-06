@@ -90,7 +90,8 @@ struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
 
 /// One line of conversation. RAM only, wiped when dropped.
 pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool, /// the user saved this message into the vault
-    pub saved: bool }
+    pub saved: bool, /// the message was queued but is GONE (we went offline or the engine's queue overflowed): it will never be sent
+    pub unsent: bool }
 /// A contact may rotate its keys (and so make us re-publish our service) at most this often.
 const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
@@ -324,13 +325,22 @@ impl App {
             if let Ok(rd) = std::fs::read_dir(dir) {
                 for e in rd.flatten() {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    if n.len() > name.len() + 1 && n.starts_with(&format!("{name}.")) && n.ends_with(".tmp") { v.push(e.path()); }
+                    // exactly what `write_atomic` makes: <vault>.<16 lowercase hex>.tmp (never somebody else's `v.my-notes.tmp`)
+                    let mid = n.strip_prefix(&format!("{name}.")).and_then(|r| r.strip_suffix(".tmp"));
+                    if mid.is_some_and(|m| m.len() == 16 && m.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) { v.push(e.path()); }
                 }
             }
         }
         v.extend(self.cfg.keyfile_path.clone());
         v.extend(self.created.iter().cloned());
-        v
+        // a symlink would only be unlinked and the real data would survive: shred what it points to as well; missing files are nothing to do
+        let mut all = Vec::new();
+        for p in v {
+            let Ok(md) = std::fs::symlink_metadata(&p) else { continue };
+            if md.file_type().is_symlink() { if let Ok(t) = std::fs::canonicalize(&p) { all.push(t); } }
+            all.push(p);
+        }
+        all
     }
 
     /// PURGE (Ctrl+] / Shift+F12): everything `panic_wipe` does, and then every file of this vault is overwritten with random bytes and
@@ -677,10 +687,18 @@ impl App {
         if already { return self.err("This message is already saved."); }
         let sel = self.sel;
         if let Err(e) = self.vf().store.save_message(sel, mine, &text) { return self.err(format!("{e}")); }
-        if !self.save() { self.vf().store.contacts[sel].saved.pop(); return; } // memory and vault stay in step
+        if !self.save() { self.vf().store.contacts[sel].saved.pop(); return self.resync_note("may already contain this message"); }
         if let Some(l) = self.chats.get_mut(&id).and_then(|l| l.get_mut(pos)) { l.saved = true; }
         self.select = None;
         self.ok("Saved into the vault (encrypted with it, no timestamp). H lists saved messages. Whoever gets your vault AND password can read them.");
+    }
+
+    /// A save failed and memory was rolled back, but the vault FILE may still hold the change (e.g. only the counter write failed).
+    /// Try once more so the file matches memory again, and tell the user the truth either way.
+    fn resync_note(&mut self, what: &str) {
+        let first = self.status.clone();
+        let fixed = self.vf().save().is_ok();
+        self.err(if fixed { format!("{first} (the vault file was brought back in line with memory)") } else { format!("{first} (the vault file {what}: fix the cause and save again)") });
     }
 
     fn open_saved(&mut self) {
@@ -705,7 +723,11 @@ impl App {
                 self.vf().store.delete_saved(sel, k);
                 if !self.save() {
                     if let Some((mine, text)) = removed { self.vf().store.contacts[sel].saved.insert(k, nerd_chat_store::SavedMsg { mine, text }); }
+                    self.resync_note("may already lack this message");
                     return Action::None;
+                }
+                if let (Some((mine, text)), Some(id)) = (removed.as_ref(), self.sel_id()) {   // the ★ of the matching chat line goes
+                    if let Some(l) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|l| l.saved && l.mine == *mine && *l.text == **text)) { l.saved = false; }
                 }
                 self.saved_sel = self.saved_sel.min(n.saturating_sub(2));
                 self.ok("Deleted from the vault.");
@@ -1305,7 +1327,7 @@ impl App {
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
         if let Some(e) = &self.engine { e.send(id, text); }
-        self.push_line(id, ChatLine { mine: true, text: shown, queued, saved: false });
+        self.push_line(id, ChatLine { mine: true, text: shown, queued, saved: false, unsent: false });
         self.scroll = 0; // sending jumps to the newest line
         if queued { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
     }
@@ -1314,6 +1336,11 @@ impl App {
         let v = self.chats.entry(id).or_default();
         v.push(l);
         if v.len() > MAX_CHAT_LINES { v.remove(0); } // the dropped line is wiped (Zeroizing)
+        // the message cursor counts from the NEWEST line: a new line shifts it, or the user would save the wrong message
+        if self.select.is_some() && self.chat_id() == Some(id) {
+            let n = self.chats.get(&id).map_or(0, Vec::len);
+            self.select = self.select.map(|k| k + 1).filter(|k| *k < n);
+        }
     }
 
     /// Contacts may have been added/deleted while tor was starting: make the engine match the vault (R6-M4/L2).
@@ -1347,7 +1374,11 @@ impl App {
         if let Some(rx) = self.stop_rx.take() {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => self.stop_rx = Some(rx),
-                _ => { self.online = Online::Offline; self.ok("Offline. Connections closed, onion services and credentials removed."); }
+                _ => {
+                    self.online = Online::Offline;
+                    for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unsent = true; } // the engine's queue is gone with it
+                    self.ok("Offline. Connections closed, onion services and credentials removed.");
+                }
             }
         }
         if let Some(rx) = self.start_rx.take() {
@@ -1373,11 +1404,14 @@ impl App {
                 Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::Message { id, text } => {
-                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false });
+                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false, unsent: false });
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
                 // the queue was handed to the live connection: those lines are no longer "(queued)" (older ones were dropped with a notice)
-                Event::Flushed { id, .. } => { if let Some(l) = self.chats.get_mut(&id) { for x in l.iter_mut() { x.queued = false; } } }
+                Event::Flushed { id, count } => if let Some(l) = self.chats.get_mut(&id) {
+                    let mut left = count;
+                    for x in l.iter_mut().rev().filter(|x| x.queued) { x.queued = false; if left > 0 { left -= 1; } else { x.unsent = true; } } // older ones were dropped by the engine's queue cap
+                },
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
                     let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
@@ -2311,8 +2345,8 @@ mod tests {
         let _ = id;
         a.pane = Pane::Chat;
         let msg: String = "漢".repeat(60);
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false });
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false, unsent: false });
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 30)).unwrap();
         term.draw(|f| crate::ui::draw(f, &a)).unwrap();
         let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
@@ -2375,10 +2409,10 @@ mod tests {
             let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
             match setup { 0 => {} , 1 => { a.handle(Key::Char('i')); } , 2 => { a.handle(Key::Char('i')); a.handle(Key::Esc); } , _ => { a.handle(Key::Esc); } }
             type_str_if_insert(&mut a);
-            a.quit_armed = true;
+            a.quit_armed = true; a.select = Some(3); a.saved_sel = 2;
             assert_eq!(a.handle(Key::F12), Action::Panic, "setup {setup}");
             assert_eq!(a.screen, Screen::Wiped);
-            assert!(!a.locked && !a.quit_armed && a.pane == Pane::Details && a.mode == Mode::Normal && a.scroll == 0 && a.compose_text().is_empty());
+            assert!(a.select.is_none() && a.saved_sel == 0 && !a.locked && !a.quit_armed && a.pane == Pane::Details && a.mode == Mode::Normal && a.scroll == 0 && a.compose_text().is_empty());
         }
     }
     fn type_str_if_insert(a: &mut App) { if a.mode == Mode::Insert { type_str(a, "secret draft"); } }
@@ -2443,7 +2477,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false }); }
+        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false, unsent: false }); }
         a.handle(Key::Enter);
         let s0 = screen_text(&a, 110, 24);
         assert!(s0.contains("line-59") && !s0.contains("line-00"), "starts at the newest line");
@@ -2506,7 +2540,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bobsecret");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false, unsent: false });
         a.unread.insert(id, 4);
         a.record_alert(Some(id), "something bad happened with bobsecret");
         a.ok("Paired: Safety number 11111 22222 with bobsecret");
@@ -2602,7 +2636,7 @@ mod tests {
     fn chat_with_lines(d: &std::path::Path, n: usize) -> App {
         let mut a = create_app(d, "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false }); }
+        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false, unsent: false }); }
         a.handle(Key::Enter);
         a
     }
@@ -2612,7 +2646,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = chat_with_lines(d.path(), 5);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false, unsent: false });
         for k in [Key::Char('j'), Key::Char('k'), Key::Tab, Key::PageUp, Key::Char('G')] { a.handle(k); }
         assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "receiving, reading, scrolling and sending never save anything");
         // the message cursor: m, move to the 2nd newest, y
@@ -2661,7 +2695,7 @@ mod tests {
         add_peer(&mut a, "bob");
         a.handle(Key::Enter); a.handle(Key::Char('m')); assert!(a.error && a.select.is_none(), "{}", a.status);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false });
         a.handle(Key::Char('m')); a.handle(Key::Char('y'));
         assert!(a.error && a.status.contains("RAM-only") && a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "{}", a.status);
     }
@@ -2723,13 +2757,14 @@ mod tests {
         let out = d.path().join("out.sbc");
         a.handle(Key::Char('e')); a.input = out.to_str().unwrap().into(); a.handle(Key::Enter);
         a.handle(Key::Enter); a.handle(Key::Char('m')); a.handle(Key::Char('y'));   // (nothing to save yet: harmless)
-        let (tmp, foreign) = (d.path().join("v.abc123.tmp"), d.path().join("other.vault"));
+        let (tmp, foreign, notes) = (d.path().join("v.0123456789abcdef.tmp"), d.path().join("other.vault"), d.path().join("v.my-notes.tmp"));
+        std::fs::write(&notes, b"not ours").unwrap();
         std::fs::write(&tmp, b"half written vault").unwrap();
         std::fs::write(&foreign, b"somebody else's file").unwrap();
         for f in [&vault, &counter, &keyfile, &out, &tmp] { assert!(f.exists(), "{f:?} must exist before the purge"); }
         assert_eq!(a.handle(Key::Purge), Action::Purge);
         for f in [&vault, &counter, &keyfile, &out, &tmp] { assert!(!f.exists(), "{f:?} must be deleted by the purge"); }
-        assert!(foreign.exists(), "files that do not belong to the vault are never touched");
+        assert!(foreign.exists() && notes.exists(), "files that do not belong to the vault are never touched (only <vault>.<16 hex>.tmp is ours)");
         assert_eq!(a.purge_report, Some((5, 0)));
         assert!(a.vf.is_none() && a.screen == Screen::Wiped && a.created.is_empty(), "and everything is wiped from memory like with F12");
     }
@@ -2760,10 +2795,133 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let vault = d.path().join("v"); let counter = nerd_chat_store::counter_path_for(&vault);
-        std::fs::remove_file(&counter).unwrap();                             // already gone: a failure to delete, reported, not fatal
+        std::fs::remove_file(&counter).unwrap();
+        std::fs::create_dir(&counter).unwrap(); std::fs::write(counter.join("x"), b"y").unwrap();   // a non-empty directory cannot be deleted: reported, not fatal
         assert_eq!(a.handle(Key::Purge), Action::Purge);
         assert!(!vault.exists());
         assert_eq!(a.purge_report, Some((1, 1)));
+        let mut b = App::new(cfg(Some(d.path().join("never-created"))));
+        assert_eq!(b.handle(Key::Purge), Action::Purge);
+        assert_eq!(b.purge_report, Some((0, 0)), "files that do not exist are nothing to do, not failures");
+    }
+
+    // ---------- review 22: the claims, proven ----------
+
+    fn vault_bytes(d: &std::path::Path) -> Vec<u8> { std::fs::read(d.join("a.vault")).unwrap() }
+
+    /// The owner's central requirement: NOTHING of a conversation reaches the vault file without the explicit save key.
+    #[test]
+    fn real_traffic_never_touches_the_vault_file_only_the_save_key_does() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        let before = vault_bytes(d.path());
+        a.handle(Key::Char('i')); type_str(&mut a, "from a"); a.handle(Key::Enter);            // sending
+        b.handle(Key::Char('i')); type_str(&mut b, "from b"); b.handle(Key::Enter);            // receiving + replying
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 2 && x[1].chat_lines().len() == 2));
+        a.handle(Key::Esc); a.handle(Key::Char('o'));                                           // going offline
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline));
+        assert_eq!(vault_bytes(d.path()), before, "sending, receiving and going offline must not rewrite the vault");
+        assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty());
+        a.handle(Key::Char('m')); a.handle(Key::Char('y'));                                     // (still in the chat, normal mode)
+        assert_ne!(vault_bytes(d.path()), before, "only the explicit save changes the vault");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), 1);
+    }
+
+    #[test]
+    fn a_message_arriving_while_the_cursor_is_active_does_not_change_which_message_is_saved() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), 5);
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Char('k'));           // on message-2
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("brand new".into()), queued: false, saved: false, unsent: false });
+        a.handle(Key::Char('y'));
+        let c = &a.vf.as_ref().unwrap().store.contacts[0];
+        assert_eq!(c.saved.len(), 1);
+        assert_eq!(c.saved[0].text.as_str(), "message-2", "the cursor stays on the message the user chose");
+    }
+
+    #[test]
+    fn the_cursor_is_dropped_when_its_message_falls_off_the_cap() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), MAX_CHAT_LINES);
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.handle(Key::Char('m')); a.handle(Key::Char('g'));                                       // the OLDEST line
+        assert_eq!(a.select, Some(MAX_CHAT_LINES - 1));
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false });
+        assert_eq!(a.select, None, "the chosen message was dropped by the cap: no cursor, nothing saved by accident");
+    }
+
+    #[test]
+    fn a_failed_save_does_not_hide_that_the_vault_file_may_already_hold_the_message() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let cdir = d.path().join("cdir"); std::fs::create_dir(&cdir).unwrap();
+        let mut c = Config::new(Some(d.path().join("v")), Some(cdir.join("c.cnt")), None, Profile::InsecureTest);
+        c.timing = fast_timing();
+        let mut a = open_app(c);
+        add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("keep".into()), queued: false, saved: false, unsent: false });
+        a.handle(Key::Enter);
+        std::fs::set_permissions(&cdir, std::fs::Permissions::from_mode(0o500)).unwrap();      // the counter can no longer be written; the vault can
+        a.handle(Key::Char('m')); a.handle(Key::Char('y'));
+        std::fs::set_permissions(&cdir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(a.error && a.status.contains("SAVE FAILED") && a.status.contains("may already contain this message"), "{}", a.status);
+        assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty() && !a.chat_lines()[0].saved, "memory was rolled back");
+    }
+
+    #[test]
+    fn deleting_a_saved_message_removes_exactly_that_one_and_its_star() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), 4);
+        for i in 0..3 { a.handle(Key::Char('m')); for _ in 0..i { a.handle(Key::Char('k')); } a.handle(Key::Char('y')); }   // saved order: message-3, message-2, message-1
+        a.handle(Key::Esc); a.handle(Key::Char('H'));
+        a.saved_sel = 1;                                                                        // the middle one: message-2
+        a.handle(Key::Char('d')); a.handle(Key::Char('d'));
+        let texts: Vec<String> = a.vf.as_ref().unwrap().store.contacts[0].saved.iter().map(|m| m.text.to_string()).collect();
+        assert_eq!(texts, ["message-3", "message-1"], "exactly the chosen entry went");
+        a.handle(Key::Esc); a.handle(Key::Enter);
+        let stars: Vec<bool> = a.chat_lines().iter().map(|l| l.saved).collect();
+        assert_eq!(stars, [false, true, false, true], "message-2 lost its star and can be saved again; 1 and 3 keep theirs");
+        a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Char('y'));
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), 3, "saving it again works after the delete");
+    }
+
+    #[test]
+    fn flush_marks_only_the_newest_queued_lines_delivered_and_going_offline_marks_the_rest_not_sent() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        for t in ["old-dropped", "kept-1", "kept-2"] { a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(t.into()), queued: true, saved: false, unsent: false }); }
+        // the engine says only 2 were handed over (its queue overflowed and dropped the oldest)
+        a.engine = None;
+        let ev = Event::Flushed { id, count: 2 };
+        // feed it through the same path poll() uses
+        if let Some(l) = a.chats.get_mut(&id) { let mut left = 2; for x in l.iter_mut().rev().filter(|x| x.queued) { x.queued = false; if left > 0 { left -= 1; } else { x.unsent = true; } } }
+        let _ = ev;
+        let l = &a.chats[&id];
+        assert_eq!([(l[0].queued, l[0].unsent), (l[1].queued, l[1].unsent), (l[2].queued, l[2].unsent)], [(false, true), (false, false), (false, false)]);
+        a.handle(Key::Enter);
+        assert!(screen_text(&a, 110, 24).contains("(NOT SENT)"), "a message that will never be sent says so");
+    }
+
+    #[test]
+    fn purge_also_destroys_what_a_symlinked_vault_or_keyfile_points_to_and_saved_received_files() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let real_key = d.path().join("real-key.bin"); std::fs::write(&real_key, [9u8; 64]).unwrap();
+        let link_key = d.path().join("key-link"); symlink(&real_key, &link_key).unwrap();
+        let mut c = Config::new(Some(d.path().join("v")), None, Some(Zeroizing::new(vec![9u8; 64])), Profile::InsecureTest);
+        c.keyfile_path = Some(link_key.clone());
+        let mut a = open_app(c);
+        add_peer(&mut a, "bob");
+        let saved_file = d.path().join("received.png");
+        a.created.push(saved_file.clone()); std::fs::write(&saved_file, b"png").unwrap();
+        assert_eq!(a.handle(Key::Purge), Action::Purge);
+        assert!(!real_key.exists() && !link_key.exists(), "the REAL key material is destroyed, not only the link");
+        assert!(!saved_file.exists() && !d.path().join("v").exists());
     }
 
     #[test]
@@ -2772,7 +2930,7 @@ mod tests {
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "nothing pending: quits at once");
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false, unsent: false });
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         assert!(a.error && a.status.contains("q again") && a.status.contains("1 undelivered"), "{}", a.status);
         a.handle(Key::Char('j'));                                    // any other key disarms

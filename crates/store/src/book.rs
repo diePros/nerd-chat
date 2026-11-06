@@ -17,7 +17,7 @@ const MAGIC: &[u8; 4] = b"SBS5";
 /// SBS4 (no saved messages) and SBS3 (no rotation state either) are still read.
 const MAGIC_V4: &[u8; 4] = b"SBS4";
 const MAGIC_V3: &[u8; 4] = b"SBS3";
-/// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS4 (a ONE-WAY upgrade: older binaries cannot open it).
+/// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS5 on the next save (a ONE-WAY upgrade: older binaries cannot open it).
 const MAGIC_V2: &[u8; 4] = b"SBS2";
 
 /// One contact = one fresh keypair set (unlinkable across contacts) + the peer's public bundle once known.
@@ -123,12 +123,16 @@ impl Store {
         Ok(())
     }
 
+    /// Exact upper bound of the encoding (every optional part counted), so `encode` never reallocates.
+    fn encoded_size(&self) -> usize {
+        6 + self.contacts.iter().map(|c| 8 + 1 + c.name.len() + SECRET_LEN + 1 + (32 * 4 + KEM_PUB_LEN) + 1 + 64 + 64 + 2 + c.saved.iter().map(|m| 3 + m.text.len()).sum::<usize>()).sum::<usize>()
+    }
+
     /// Serialize (wiped on drop). Format: magic | count:u16 | per contact:
     /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1/2 trust, bit3 host_anyway, bit4 peer can_host, bit5/6 advertised can_host set/value) | [sign[32] dh[32] kem[1184]]
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         // reserve the final size up front: a growing Vec would leave copies of keys and saved messages in freed heap
-        let est = 8 + self.contacts.iter().map(|c| 8 + 1 + c.name.len() + 128 + 1 + 1250 + 1 + 64 + 64 + 2 + c.saved.iter().map(|m| 3 + m.text.len()).sum::<usize>()).sum::<usize>();
-        let mut v = Zeroizing::new(Vec::with_capacity(est));
+        let mut v = Zeroizing::new(Vec::with_capacity(self.encoded_size()));
         v.extend_from_slice(MAGIC);
         v.extend_from_slice(&(self.contacts.len() as u16).to_be_bytes());
         for c in &self.contacts {
@@ -327,6 +331,37 @@ mod tests {
         assert!(mutate(&|t| t[at + 2] = 1).is_err(), "length shorter: trailing bytes");
         let mut t = enc.clone(); let n = t.len(); t[n - 2] = 0xff; t[n - 1] = 0xfe; assert!(Store::decode(&t).is_err(), "invalid UTF-8");
         for cut in 0..enc.len() { assert!(Store::decode(&enc[..cut]).is_err(), "truncated at {cut}"); }
+    }
+
+    #[test]
+    fn decode_enforces_the_saved_message_caps_even_for_a_vault_written_by_something_else() {
+        let push = |s: &mut Store, i: usize, n: usize, len: usize| for _ in 0..n { s.contacts[i].saved.push(SavedMsg { mine: false, text: Zeroizing::new("x".repeat(len)) }); };
+        let mut many = Store::new(); let i = many.add_contact("a").unwrap();
+        push(&mut many, i, MAX_SAVED + 1, 1);
+        assert!(Store::decode(&many.encode()).is_err(), "too many messages for one contact");
+        let mut big = Store::new(); let (a, b) = (big.add_contact("a").unwrap(), big.add_contact("b").unwrap());
+        push(&mut big, a, 65, 32 * 1024); push(&mut big, b, 65, 32 * 1024);
+        assert!(big.saved_bytes() > MAX_SAVED_TOTAL && Store::decode(&big.encode()).is_err(), "too many bytes in the whole vault");
+        let mut long = Store::new(); let l = long.add_contact("a").unwrap();
+        push(&mut long, l, 1, 32 * 1024 + 1);
+        assert!(Store::decode(&long.encode()).is_err(), "a message longer than one chat message");
+        let mut ok = Store::new(); let o = ok.add_contact("a").unwrap();
+        push(&mut ok, o, MAX_SAVED, 1);
+        assert_eq!(Store::decode(&ok.encode()).unwrap().contacts[0].saved.len(), MAX_SAVED, "exactly at the cap is fine");
+    }
+
+    #[test]
+    fn encode_never_reallocates_so_no_copy_of_a_key_is_left_in_freed_heap() {
+        let mut s = Store::new();
+        let i = s.add_contact("alice").unwrap();
+        s.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
+        s.contacts[i].begin_rotation();                                   // next_transport set
+        let np = ContactIdentity::generate();
+        s.contacts[i].accept_peer_rotation(np.onion_public(), np.auth_public().to_bytes());   // peer_old set
+        s.save_message(i, true, "a saved message").unwrap();
+        let enc = s.encode();
+        assert!(enc.len() <= s.encoded_size(), "the estimate must cover the real size ({} > {})", enc.len(), s.encoded_size());
+        assert_eq!(enc.capacity(), s.encoded_size(), "the buffer kept its reserved capacity: it never grew");
     }
 
     #[test]
