@@ -46,3 +46,10 @@ path = "fuzz_targets/tor_parsers.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
