@@ -4,8 +4,9 @@
 - Delivery confirmation and resend: every text has an id (inside the text frame, so a short text is still one cell), the contact's UI
   confirms it once it HOLDS the text, unconfirmed texts are resent on every new connection and shown once (`docs/DELIVERY.md`). A message
   written into a dying connection is no longer lost. `(queued)` now means "not yet confirmed"; a full outbox (50) refuses the new message
-  instead of dropping an old one; going offline with unconfirmed messages asks first and marks them "(NOT CONFIRMED)". Known open
-  points (old 0.1.0 peers, timing of the confirmation cell): tracker review 24.
+  instead of dropping an old one; going offline with unconfirmed messages asks first and marks them "(NOT CONFIRMED)". The id travels inside the text frame; a peer
+  announces its capabilities first, and a peer that does not (v0.1.0) gets the old plain frames, so the two versions interoperate (tested
+  with the real 0.1.0 binary over Tor). Confirmations wait 1-5 s and are batched, so a reply cannot be timed. Tracker: review 24.
 - Default vault location: without `--vault`, an existing `~/.local/share/nerd-chat/nerd-chat.vault` ($XDG_DATA_HOME) is used from any
   directory, else an existing `./nerd-chat.vault`; a new vault is created there only after the user confirms the shown path (Tails gets a
   warning, directory mode 0700, unsafe directories refused, scripts must pass `--vault`). `--ram` now always wins over `--vault`.

@@ -18,7 +18,8 @@ use zeroize::Zeroizing;
 /// A file ready to send: `padded` is the full stream (`len | content | zeros`); `hash` covers the true content only.
 pub struct FileOut { pub xid: Xid, pub bucket: u32, pub mode: u8, pub hash: [u8; 32], pub padded: Zeroizing<Vec<u8>> }
 
-pub enum Out { Text { mid: proto::MsgId, text: Zeroizing<String> }, Ack(proto::MsgId), File(FileOut), Reply { xid: Xid, accept: bool }, Rotate { kind: u8, keys: [u8; 64] }, Close }
+/// `Text` carries an id (peer confirms), `TextPlain` is the v0.1.0 frame (no id, no confirmation), `Caps` announces our capabilities.
+pub enum Out { Text { mid: proto::MsgId, text: Zeroizing<String> }, TextPlain(Zeroizing<String>), Caps(u8), Ack(proto::MsgId), File(FileOut), Reply { xid: Xid, accept: bool }, Rotate { kind: u8, keys: [u8; 64] }, Close }
 
 const OFFER_WAIT: Duration = Duration::from_secs(120);
 const RECV_IDLE: Duration = Duration::from_secs(60);
@@ -85,6 +86,14 @@ impl CellReader {
     }
 }
 
+/// A random duration in `[min, max]`.
+fn between(min: Duration, max: Duration) -> Duration {
+    if max <= min { return min; }
+    let mut b = [0u8; 4];
+    getrandom::fill(&mut b).expect("OS RNG unavailable");
+    min + (max - min).mul_f64(u32::from_le_bytes(b) as f64 / u32::MAX as f64)
+}
+
 fn send_body(stream: &mut BoxStream, sess: &mut Session, me: &ContactIdentity, body: &[u8]) -> bool {
     match sess.send(me, body) { Ok(w) => stream.write_all(&w).and_then(|_| stream.flush()).is_ok(), Err(_) => false }
 }
@@ -110,6 +119,8 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileCancelled { id } })).is_ok();
     let mut bad_frames = 0u32;
     let mut rot_frames = 0u32;
+    let mut caps_frames = 0u32;
+    let (mut acks, mut ack_due): (Vec<proto::MsgId>, Option<Instant>) = (Vec::new(), None);
     'conn: loop {
         loop {
             match out_rx.try_recv() {
@@ -118,10 +129,19 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                     for body in proto::encode_text_with_id(&text, &mid) { if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; } }
                     last_tx = Instant::now();
                 }
-                Ok(Out::Ack(mid)) => {
-                    let Some(frame) = proto::encode_msg_acks(&[mid]) else { continue };
-                    if !send_body(&mut stream, &mut sess, &me, &frame) { break 'conn; }
+                Ok(Out::TextPlain(text)) => {
+                    for body in proto::encode_text(&text) { if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; } }
                     last_tx = Instant::now();
+                }
+                Ok(Out::Caps(flags)) => {
+                    if !send_body(&mut stream, &mut sess, &me, &proto::encode_caps(flags)) { break 'conn; }
+                    last_tx = Instant::now();
+                }
+                // confirmations are NOT answered at once: they wait 1-5 s (`Timing::ack_delay_*`), are sent together in one cell and
+                // take the place of a keepalive when one is due, so "a text arrived" is not a reply an observer can time (review 24)
+                Ok(Out::Ack(mid)) => {
+                    if !acks.contains(&mid) { acks.push(mid); }
+                    if ack_due.is_none() { ack_due = Some(Instant::now() + between(t.ack_delay_min, t.ack_delay_max)); }
                 }
                 Ok(Out::File(f)) => {
                     if outx.is_some() { notice(&ev, "a file transfer is already running on this connection"); continue; }
@@ -179,6 +199,16 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                 InState::Receiving(dl) if Instant::now() > dl => { inx = None; if !notice(&ev, "file transfer stalled and was cancelled") || !cancelled(&ev) { break; } }
                 _ => {}
             }
+        }
+        if !acks.is_empty() && (ack_due.is_some_and(|d| Instant::now() >= d) || last_tx.elapsed() >= t.keepalive) {
+            while !acks.is_empty() {
+                let n = acks.len().min(proto::MAX_ACKS);
+                let Some(frame) = proto::encode_msg_acks(&acks[..n]) else { break };
+                if !send_body(&mut stream, &mut sess, &me, &frame) { break 'conn; }
+                acks.drain(..n);
+            }
+            ack_due = None;
+            last_tx = Instant::now();
         }
         if last_tx.elapsed() >= t.keepalive {
             if !send_body(&mut stream, &mut sess, &me, &proto::keepalive()) { break; }
@@ -253,6 +283,13 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         let Some(keys) = proto::parse_rotate(&m.body) else { break };
                         if rot_frames > 6 { break; }
                         if ev.send(In::Conn(ConnEvent::Rotate { id, kind: k, keys })).is_err() { break; }
+                    }
+                    Some(proto::KIND_CAPS) => {
+                        // a few per connection (a flood of them is only noise); extra bytes of a later version are ignored
+                        caps_frames += 1;
+                        if let (Some(flags), true) = (proto::parse_caps(&m.body), caps_frames <= 3) {
+                            if ev.send(In::Conn(ConnEvent::Caps { id, gen, flags })).is_err() { break; }
+                        }
                     }
                     Some(proto::KIND_MSG_ACK) => {
                         let Some(mids) = proto::parse_msg_acks(&m.body) else { break };

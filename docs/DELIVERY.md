@@ -10,11 +10,24 @@ the contact confirms it, and sends every unconfirmed text again, oldest first, o
 |---|---|---|
 | `KIND_TEXT_ID_CONT` 0x32 / `KIND_TEXT_ID_FINAL` 0x33 | `kind \| id(8) \| payload` | a text with its id; EVERY chunk carries it |
 | `KIND_MSG_ACK` 0x31 | `kind \| id(8) * k`, 1 <= k <= 64 | "my UI has these texts" |
+| `KIND_CAPS` 0x34 | `kind \| flags`, bit 0 = "I understand id frames and will confirm them" | sent FIRST on every connection (extra bytes ignored) |
 
 The id is inside the text frame, so a text of up to ~940 bytes is still ONE cell, exactly as before (an earlier draft sent the id as
 its own cell; review 24 pointed out that this made messages recognisable by their cell count). Frames are fixed-size padded cells inside
 the authenticated session; ids never leave the encrypted session. The length rules of these frames are frozen (a wrong length cuts the
 connection); later changes use new kinds.
+
+**Old peers (v0.1.0).** v0.1.0 ignores frame kinds it does not know, so id frames sent to it would silently VANISH. Therefore nothing is
+written on a new connection until we know what the peer understands: a new peer announces itself first (`CAPS`), and a peer that has not
+done so within `Timing::caps_wait` (5 s) is treated as old. An old peer gets the plain v0.1.0 text frames, no id and no confirmation; a text
+written to it counts as done (`Event::Delivered`, "handed over"), is not kept, so the 50-text outbox can never fill up for lack of
+confirmations and nothing is resent on a reconnect. Verified with the real v0.1.0 binary over Tor, both directions and a reconnect
+(no loss, no duplicates). One consequence: for an old peer a text written just before its connection died may be lost (v0.1.0's own behaviour).
+
+**Confirmation timing.** A confirmation is not an immediate reply: it waits a random 1-5 s (`Timing::ack_delay_*`), all pending ids go
+out in ONE cell, and a due keepalive carries it instead (it is traffic anyway), so an observer on the Tor path cannot time "a message
+arrived" as a reply. The `(queued)` mark therefore stays a few seconds after a text arrives. Residual: the timing of a conversation
+itself (who answers when) is untouched and is the standing C6-timing item.
 
 **Sender** (`engine.rs`, `Rt::unacked`). A new text is appended to `unacked` and, if a connection is up, written. `Up` resends all of
 `unacked` in order. `ConnEvent::Acked` removes each named entry (the `Zeroizing` text is wiped on drop) and emits
@@ -41,10 +54,6 @@ The quit guard counts unconfirmed lines too.
 **Limits (accepted or open, see the tracker, review 24).**
 - Everything is RAM only: unconfirmed texts are lost when the sender quits or goes offline (both warn first).
 - A duplicate can appear if the receiver restarts AND the confirmation of that text was lost; a duplicate was chosen over a loss.
-- OPEN: a peer on 0.1.0 never confirms (it ignores the new frames but shows the texts): with such a peer the 50-text outbox fills up and
-  every reconnect resends it. Needs a per-connection capability signal; decision pending.
-- OPEN: the confirmation is a cell sent right after the text is held: an observer on the Tor path can tell "message" from "keepalive" by
-  that reply. The frame already carries up to 64 ids so confirmations can be delayed and batched; policy decision pending.
 - OPEN (not reachable from the TUI, whose draft is capped at 2 KiB): two sides that both resend ~50 x 32 KiB at once could block each
   other's writes until the 10 s write timeout, then repeat.
 - The 500-line chat trim can drop an unconfirmed line from view; the warnings then undercount what the engine still holds.

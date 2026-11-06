@@ -1917,7 +1917,8 @@ mod tests {
     // ---------- online + chat (over the in-memory network) ----------
     fn fast_timing() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(150), idle: Duration::from_secs(2),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0,
+                 ack_delay_min: Duration::from_millis(20), ack_delay_max: Duration::from_millis(40), caps_wait: Duration::from_millis(400) }
     }
 
     fn net_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet) -> App {

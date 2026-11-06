@@ -45,5 +45,11 @@ Use a fresh Tails session with Persistent Storage ON for the vault only, network
 6. Lost terminal: start the app, then `kill -HUP <pid of the terminal emulator>` or just close the window; `top` shows no process at 100% CPU.
 7. Wrong password 3 times: each takes ~4 s, no crash. Copy an old vault copy back over the vault: expect `ROLLBACK DETECTED`.
 
+## C2. Interop with the audited 0.1.0 (only while both versions are in use)
+Run the 0.1.0 binary on one side and a build of `next` on the other (two terminals on this laptop are enough), paired as in part C.
+1. Messages flow in BOTH directions. On the `next` side a sent line loses `(queued)` within about 5 s (it sees an old peer).
+2. Close the 0.1.0 terminal, type two messages on the `next` side, start 0.1.0 again and go online: both arrive, once each, nothing older repeats.
+3. Two `next` builds: `(queued)` disappears 1-6 s after sending (the confirmation is delayed on purpose).
+
 ## D. What to send back
 For every failed or odd step: step number, exact text on screen, `uname -r`, the Tails version, and the probe files. Pass/fail per step is enough for the rest.

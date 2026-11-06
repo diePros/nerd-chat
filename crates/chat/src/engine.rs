@@ -49,12 +49,19 @@ pub struct Timing {
     pub handshake: Duration,
     /// Engine-wide cap on handshake attempts per second (bounds CPU against floods without ever refusing by contact).
     pub handshakes_per_sec: f64,
+    /// A confirmation waits a random time in `[ack_delay_min, ack_delay_max]` (and is batched) before it is sent.
+    pub ack_delay_min: Duration,
+    pub ack_delay_max: Duration,
+    /// How long after a connection comes up we wait for the peer's capability frame before treating it as a v0.1.0 peer
+    /// (plain text frames, no confirmation expected).
+    pub caps_wait: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
         Self { poll: Duration::from_millis(200), keepalive: Duration::from_secs(30), idle: Duration::from_secs(100),
-               min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(45), handshakes_per_sec: 50.0 }
+               min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(45), handshakes_per_sec: 50.0,
+               ack_delay_min: Duration::from_secs(1), ack_delay_max: Duration::from_secs(5), caps_wait: Duration::from_secs(5) }
     }
 }
 
@@ -119,7 +126,8 @@ pub enum Event {
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
     File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
-    /// The contact's app confirmed the text with this id: "their client has it", not "they read it" (no read receipts, by design).
+    /// The contact's app confirmed the text with this id ("their client has it", not "they read it": no read receipts, by design), or,
+    /// for a v0.1.0-style peer that cannot confirm anything, the text was written to the connection (the old meaning of "sent").
     Delivered { id: [u8; 8], mid: proto::MsgId },
     /// The text with this id was refused (outbox full, empty, too long, unknown contact): it was NOT sent and never will be.
     Unsent { id: [u8; 8], mid: proto::MsgId },
@@ -136,6 +144,8 @@ pub(crate) enum ConnEvent {
     Text { id: [u8; 8], gen: u64, mid: Option<proto::MsgId>, text: Zeroizing<String> },
     /// The contact confirmed the text with this id (valid from any connection of the session: it is authenticated).
     Acked { id: [u8; 8], mids: Vec<proto::MsgId> },
+    /// The peer announced its capabilities (`proto::CAP_*`) on this connection.
+    Caps { id: [u8; 8], gen: u64, flags: u8 },
     Rotate { id: [u8; 8], kind: u8, keys: [u8; 64] },
     DialFailed { id: [u8; 8], epoch: u64 },
     /// The outbound thread has really ended (always sent last): only now may another dial start (R8-I6).
@@ -266,6 +276,10 @@ struct Rt {
     conn: Option<(u64, Sender<Out>)>,
     /// Texts not yet confirmed, oldest first (queued while offline AND already written to a connection that may have died).
     unacked: VecDeque<(proto::MsgId, Zeroizing<String>)>,
+    /// What the peer on the CURRENT connection understands (reset on every `Up`): until it says so, texts are only held, never written.
+    peer_mode: PeerMode,
+    /// When the current connection came up (the `caps_wait` clock).
+    up_at: Instant,
     /// Ids of texts already handed to the UI (see `MAX_SEEN`) and whether the UI has CONFIRMED them (only then do we confirm repeats).
     seen: VecDeque<(proto::MsgId, bool)>,
     dialing: bool,
@@ -273,6 +287,17 @@ struct Rt {
     next_dial: Instant,
     iso: [u8; 16],
     stop: Arc<AtomicBool>,
+}
+
+/// What we know about the peer of the current connection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PeerMode {
+    /// No capability frame yet (new peers send it first; an old one never does).
+    Unknown,
+    /// New peer: texts carry ids and are confirmed; unconfirmed ones are resent.
+    Confirms,
+    /// v0.1.0-style peer: plain text frames, no confirmation exists, a text written is a text done.
+    Legacy,
 }
 
 struct NextRetry { secret: Zeroizing<Vec<u8>>, extra: Vec<[u8; 32]>, guard: Arc<Mutex<HandshakeGuard>>, at: Instant }
@@ -378,7 +403,7 @@ impl Core {
             }
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: carried, seen: carried_seen, dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: carried, seen: carried_seen, peer_mode: PeerMode::Unknown, up_at: Instant::now(), dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -458,9 +483,11 @@ impl Core {
                 let had = rt.conn.is_some();
                 if let Some((_, old)) = rt.conn.replace((gen, tx.clone())) { let _ = old.send(Out::Close); }
                 rt.backoff = self.t.min_backoff;
-                // every text the contact has not confirmed yet is (re)sent, oldest first: the previous connection may have died
-                // with some of them unread (the contact drops a text it already showed, by id, and confirms it again)
-                for (mid, text) in &rt.unacked { let _ = tx.send(Out::Text { mid: *mid, text: text.clone() }); }
+                // WE announce what we understand first; texts are written only once we know what the peer understands (`flush`): a
+                // peer that never announces (v0.1.0) would silently DROP the new id frames, so it gets plain ones after `caps_wait`
+                rt.peer_mode = PeerMode::Unknown;
+                rt.up_at = Instant::now();
+                let _ = tx.send(Out::Caps(proto::CAP_CONFIRM));
                 // announce our current keys on every connection: a peer holding the NEW keys as pending learns the rotation is done
                 // even if the explicit DONE died with a replaced connection (it reveals nothing the peer does not already know)
                 let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_DONE, keys: rt.my_keys });
@@ -500,8 +527,14 @@ impl Core {
                     },
                 }
             }
+            In::Conn(ConnEvent::Caps { id, gen, flags }) => {
+                if !self.is_current(id, gen) { return; }
+                if let Some(rt) = self.rts.get_mut(&id) { rt.peer_mode = if flags & proto::CAP_CONFIRM != 0 { PeerMode::Confirms } else { PeerMode::Legacy }; }
+                self.flush(id);
+            }
             In::Conn(ConnEvent::Acked { id, mids }) => {
                 let Some(rt) = self.rts.get_mut(&id) else { return };
+                if rt.peer_mode == PeerMode::Unknown { rt.peer_mode = PeerMode::Confirms; } // it confirms, so it understands ids
                 for mid in mids {
                     if let Some(pos) = rt.unacked.iter().position(|(m, _)| *m == mid) {
                         rt.unacked.remove(pos); // dropping the Zeroizing text wipes it
@@ -540,10 +573,31 @@ impl Core {
         let full = match self.rts.get(&id) { None => return unsent(self, "unknown contact"), Some(rt) => rt.unacked.len() >= MAX_UNCONFIRMED };
         if full { return unsent(self, "outbox full: this message was NOT sent, wait until the contact has confirmed the earlier ones"); }
         let Some(rt) = self.rts.get_mut(&id) else { return };
-        rt.unacked.push_back((mid, text.clone()));
-        match &rt.conn {
-            Some((_, tx)) => { let _ = tx.send(Out::Text { mid, text }); }
-            None => { if rt.we_dial && !rt.dialing { rt.backoff = self.t.min_backoff; rt.next_dial = Instant::now(); } }
+        match (&rt.conn, rt.peer_mode) {
+            // an old peer cannot confirm: write the plain frame and consider it done (exactly the v0.1.0 behaviour)
+            (Some((_, tx)), PeerMode::Legacy) => { let _ = tx.send(Out::TextPlain(text)); let _ = self.ev.send(Event::Delivered { id, mid }); }
+            (Some((_, tx)), PeerMode::Confirms) => { rt.unacked.push_back((mid, text.clone())); let _ = tx.send(Out::Text { mid, text }); }
+            // capabilities not known yet: hold it, `flush` writes it as soon as they are
+            (Some(_), PeerMode::Unknown) => rt.unacked.push_back((mid, text)),
+            (None, _) => {
+                rt.unacked.push_back((mid, text));
+                if rt.we_dial && !rt.dialing { rt.backoff = self.t.min_backoff; rt.next_dial = Instant::now(); }
+            }
+        }
+    }
+
+    /// Write what is held, now that we know what the peer understands: every unconfirmed text again (new peer; it drops repeats by id
+    /// and confirms them again), or, for an old peer, once as plain frames and then forget it (reported as `Delivered`: handed over).
+    fn flush(&mut self, id: [u8; 8]) {
+        let Some(rt) = self.rts.get_mut(&id) else { return };
+        let Some((_, tx)) = rt.conn.as_ref() else { return };
+        match rt.peer_mode {
+            PeerMode::Unknown => {}
+            PeerMode::Confirms => for (mid, text) in &rt.unacked { let _ = tx.send(Out::Text { mid: *mid, text: text.clone() }); },
+            PeerMode::Legacy => while let Some((mid, text)) = rt.unacked.pop_front() {
+                let _ = tx.send(Out::TextPlain(text));
+                let _ = self.ev.send(Event::Delivered { id, mid });
+            },
         }
     }
 
@@ -582,6 +636,12 @@ impl Core {
     fn tick(&mut self) {
         let now = Instant::now();
         self.retry_next_services(now);
+        // a peer that has not announced itself within `caps_wait` is an old (v0.1.0) peer
+        let silent: Vec<[u8; 8]> = self.rts.iter().filter(|(_, r)| r.conn.is_some() && r.peer_mode == PeerMode::Unknown && now.duration_since(r.up_at) >= self.t.caps_wait).map(|(i, _)| *i).collect();
+        for id in silent {
+            if let Some(rt) = self.rts.get_mut(&id) { rt.peer_mode = PeerMode::Legacy; }
+            self.flush(id);
+        }
         let ids: Vec<[u8; 8]> = self.rts.iter().filter(|(_, r)| r.we_dial && r.conn.is_none() && !r.dialing && now >= r.next_dial).map(|(i, _)| *i).collect();
         for id in ids {
             let rt = self.rts.get_mut(&id).expect("exists");
@@ -651,7 +711,8 @@ mod tests {
 
     pub fn fast() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(100), idle: Duration::from_millis(700),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0,
+                 ack_delay_min: Duration::from_millis(20), ack_delay_max: Duration::from_millis(40), caps_wait: Duration::from_millis(400) }
     }
 
     fn ident() -> (ContactIdentity, Bundle) { let i = ContactIdentity::generate(); let b = Bundle::from_identity(&i); (i, b) }
@@ -1199,7 +1260,7 @@ mod tests {
             s.read_exact(&mut cell).unwrap();
             let body = sess.recv(me, &cell).unwrap().body;
             let k = body[0];
-            if k == proto::KIND_KEEPALIVE || (proto::KIND_ROTATE_OFFER..=proto::KIND_ROTATE_DONE).contains(&k) { continue; }
+            if k == proto::KIND_KEEPALIVE || k == proto::KIND_CAPS || (proto::KIND_ROTATE_OFFER..=proto::KIND_ROTATE_DONE).contains(&k) { continue; }
             return body.to_vec();
         }
         panic!("no application frame");
@@ -1210,7 +1271,12 @@ mod tests {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
             match dial(lb, &[1; 16]) {
-                Ok(mut s) => { s.set_timeout(Some(Duration::from_secs(5))).unwrap(); let sess = link::dial(&mut s, d, lb, &proto::keepalive()).unwrap(); return (s, sess); }
+                Ok(mut s) => {
+                    s.set_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut sess = link::dial(&mut s, d, lb, &proto::keepalive()).unwrap();
+                    raw_send(&mut s, &mut sess, d, &proto::encode_caps(proto::CAP_CONFIRM)); // a NEW peer announces itself first
+                    return (s, sess);
+                }
                 Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
                 Err(e) => panic!("{e}"),
             }
@@ -1321,6 +1387,104 @@ mod tests {
         assert!(wait(&el, |e| matches!(e, Event::Disconnected { .. })), "an ack without any id too");
     }
 
+    /// The next application frame, or `None` if nothing (but keepalives and announcements) arrives within `wait`.
+    fn raw_try_next(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity, wait: Duration) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let end = Instant::now() + wait;
+        s.set_timeout(Some(Duration::from_millis(50))).unwrap();
+        while Instant::now() < end {
+            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+            if s.read_exact(&mut cell).is_err() { continue; }
+            let body = sess.recv(me, &cell).unwrap().body;
+            let k = body[0];
+            if k == proto::KIND_KEEPALIVE || k == proto::KIND_CAPS || (proto::KIND_ROTATE_OFFER..=proto::KIND_ROTATE_DONE).contains(&k) { continue; }
+            return Some(body.to_vec());
+        }
+        None
+    }
+
+    /// A raw peer that does NOT announce capabilities: exactly what a v0.1.0 peer looks like on the wire.
+    fn raw_legacy_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) {
+        let dial = net.transport().dial_fn();
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            match dial(lb, &[1; 16]) {
+                Ok(mut s) => { let sess = link::dial(&mut s, d, lb, &proto::keepalive()).unwrap(); return (s, sess); }
+                Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    /// v0.1.0 ignores unknown frame kinds, so id frames sent to it would VANISH. A peer that never announces gets the old plain
+    /// frames, its texts count as done once written, and the outbox never fills up for lack of confirmations.
+    #[test]
+    fn a_peer_that_never_announces_itself_gets_plain_frames_and_is_never_blocked() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        // (a raw peer sends no keepalives: a long idle timeout keeps the engine from dropping it as dead)
+        let el = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &l, db.clone())], Timing { idle: Duration::from_secs(20), ..fast() });
+        let (mut s1, mut sess1) = raw_legacy_connect(&net, &lb, &d);
+        assert!(connected(&el));
+        say(&el, ID, "hello old peer");
+        assert!(!wait_for(&el, Duration::from_millis(150), |e| matches!(e, Event::Delivered { .. })), "held while the peer might still announce itself");
+        assert_eq!(raw_try_next(&mut s1, &mut sess1, &d, Duration::from_secs(3)), Some([&[proto::KIND_TEXT_FINAL][..], b"hello old peer"].concat()), "plain frame, no id");
+        assert!(wait(&el, |e| matches!(e, Event::Delivered { .. })), "written = done for an old peer");
+        for i in 0..(MAX_UNCONFIRMED + 10) {
+            say(&el, ID, &format!("n{i}"));
+            assert_eq!(raw_try_next(&mut s1, &mut sess1, &d, Duration::from_secs(3)), Some([&[proto::KIND_TEXT_FINAL][..], format!("n{i}").as_bytes()].concat()));
+        }
+        assert!(!wait_for(&el, Duration::from_millis(100), |e| matches!(e, Event::Notice { text, .. } if text.contains("outbox full"))), "never blocked");
+        // nothing old is resent on a reconnect
+        drop((s1, sess1));
+        let (mut s2, mut sess2) = raw_legacy_connect(&net, &lb, &d);
+        assert!(connected(&el));
+        say(&el, ID, "fresh");
+        assert_eq!(raw_try_next(&mut s2, &mut sess2, &d, Duration::from_secs(3)), Some([&[proto::KIND_TEXT_FINAL][..], b"fresh"].concat()), "only the new text");
+    }
+
+    #[test]
+    fn texts_are_held_until_the_peer_has_announced_itself_and_then_sent_with_ids() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let el = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &l, db.clone())], Timing { caps_wait: Duration::from_secs(30), idle: Duration::from_secs(20), ..fast() });
+        let (mut s, mut sess) = raw_legacy_connect(&net, &lb, &d);
+        assert!(connected(&el));
+        say(&el, ID, "held");
+        assert_eq!(raw_try_next(&mut s, &mut sess, &d, Duration::from_millis(600)), None, "nothing is written before we know what the peer understands");
+        raw_send(&mut s, &mut sess, &d, &proto::encode_caps(proto::CAP_CONFIRM));
+        let f = raw_try_next(&mut s, &mut sess, &d, Duration::from_secs(3)).expect("written after the announcement");
+        assert_eq!((f[0], &f[9..]), (proto::KIND_TEXT_ID_FINAL, &b"held"[..]));
+    }
+
+    /// Review 24 / M3: the confirmation is not an immediate reply: it waits 1-5 s in production, several are sent in ONE cell.
+    #[test]
+    fn confirmations_are_delayed_and_sent_together() {
+        let (el, mut s, mut sess, me) = raw_peer_with(Timing { ack_delay_min: Duration::from_millis(250), ack_delay_max: Duration::from_millis(300), keepalive: Duration::from_secs(10), idle: Duration::from_secs(20), ..fast() });
+        let ids = [[1u8; 8], [2; 8], [3; 8]];
+        let t0 = Instant::now();
+        for (i, m) in ids.iter().enumerate() { raw_send(&mut s, &mut sess, &me, &id_text(m, &format!("t{i}"))); }
+        for i in 0..3 { assert!(got(&el, &format!("t{i}"))); }
+        let mut all = Vec::new();
+        let mut frames = 0;
+        while all.len() < 3 { all.extend(raw_acks(&mut s, &mut sess, &me)); frames += 1; }
+        assert!(t0.elapsed() >= Duration::from_millis(240), "not an immediate reply ({:?})", t0.elapsed());
+        all.sort();
+        assert_eq!(all, ids.to_vec());
+        assert_eq!(frames, 1, "all three in one cell");
+    }
+
+    /// A pending confirmation takes the place of a keepalive that is due (it is traffic anyway), so it never waits longer than one.
+    #[test]
+    fn a_pending_confirmation_rides_on_the_next_keepalive() {
+        let (el, mut s, mut sess, me) = raw_peer_with(Timing { ack_delay_min: Duration::from_secs(30), ack_delay_max: Duration::from_secs(30), keepalive: Duration::from_millis(150), idle: Duration::from_secs(20), ..fast() });
+        raw_send(&mut s, &mut sess, &me, &id_text(&[7; 8], "x"));
+        assert!(got(&el, "x"));
+        let t0 = Instant::now();
+        assert_eq!(raw_acks(&mut s, &mut sess, &me), vec![[7u8; 8]]);
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}: sent with the keepalive, not after 30 s", t0.elapsed());
+    }
+
     /// The case that motivated all this: the sender writes into a connection whose peer is already gone.
     #[test]
     fn a_text_written_to_a_dead_connection_arrives_after_the_reconnect() {
@@ -1366,15 +1530,18 @@ mod tests {
     }
 
     /// A raw authenticated peer that speaks the file protocol badly.
-    fn raw_peer() -> (Engine, crate::transport::BoxStream, nerd_chat_core::session::Session, ContactIdentity) {
+    fn raw_peer() -> (Engine, crate::transport::BoxStream, nerd_chat_core::session::Session, ContactIdentity) { raw_peer_with(fast()) }
+
+    fn raw_peer_with(timing: Timing) -> (Engine, crate::transport::BoxStream, nerd_chat_core::session::Session, ContactIdentity) {
         let net = MemNet::new();
         let ((l, lb), (d, db)) = ordered();
-        let el = start(&net, &l, &db, ID);
+        let el = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &l, db.clone())], timing);
         let dial = net.transport().dial_fn();
         let end = Instant::now() + Duration::from_secs(5);
         let mut s = loop { match dial(&lb, &[1; 16]) { Ok(s) => break s, Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)), Err(e) => panic!("{e}") } };
         s.set_timeout(Some(Duration::from_secs(5))).unwrap();
-        let sess = link::dial(&mut s, &d, &lb, &proto::keepalive()).unwrap();
+        let mut sess = link::dial(&mut s, &d, &lb, &proto::keepalive()).unwrap();
+        raw_send(&mut s, &mut sess, &d, &proto::encode_caps(proto::CAP_CONFIRM)); // a NEW peer announces itself first
         assert!(wait(&el, |e| matches!(e, Event::Connected { .. })));
         (el, s, sess, d)
     }

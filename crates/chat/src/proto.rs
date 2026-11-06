@@ -16,6 +16,14 @@ pub const KIND_ROTATE_DONE: u8 = 0x22;
 pub const KIND_MSG_ACK: u8 = 0x31;
 pub const KIND_TEXT_ID_CONT: u8 = 0x32;
 pub const KIND_TEXT_ID_FINAL: u8 = 0x33;
+/// Capability announcement, the FIRST frame our side sends on every connection: `CAPS | flags`. A peer that never sends it (v0.1.0, which
+/// ignores unknown kinds) gets only the old plain text frames and no confirmation is expected from it.
+pub const KIND_CAPS: u8 = 0x34;
+/// Flag: "I understand `TEXT_ID_*` frames and will confirm them" (further bytes/flags are ignored, never an error).
+pub const CAP_CONFIRM: u8 = 1;
+pub fn encode_caps(flags: u8) -> Vec<u8> { vec![KIND_CAPS, flags] }
+/// The flags byte of a capability frame; extra bytes of a later version are ignored.
+pub fn parse_caps(body: &[u8]) -> Option<u8> { body.get(1).copied() }
 /// Ids per confirmation frame (a frame is one cell: 1 + 8 * k <= MAX_BODY).
 pub const MAX_ACKS: usize = 64;
 
