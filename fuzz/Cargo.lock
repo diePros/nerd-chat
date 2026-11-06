@@ -555,6 +555,7 @@ dependencies = [
  "nerd-chat-chat",
  "nerd-chat-core",
  "nerd-chat-exchange",
+ "nerd-chat-net",
  "nerd-chat-store",
  "nerd-chat-strip",
 ]
