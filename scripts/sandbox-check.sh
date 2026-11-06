@@ -18,7 +18,8 @@ open(d+"/big.txt","wb").write(("some text ​ more\n"*400000).encode()[:8*1024*1
 open(d+"/bad.bin","wb").write(b"MZ\x90\x00 not an image")
 P
 fail=0
-"$B" --strip "$d/big.png" "$d/out.png" --allow-swap | grep -q "removed: text chunks" && echo "ok  big PNG cleaned in the helper" || { echo "FAIL big PNG"; fail=1; }
+out=$("$B" --strip "$d/big.png" "$d/out.png" --allow-swap || true)   # capture first: `grep -q` would close the pipe early
+if echo "$out" | grep -q "removed: text chunks"; then echo "ok  big PNG cleaned in the helper"; else echo "FAIL big PNG"; fail=1; fi
 "$B" --strip "$d/big.txt" "$d/out.txt" --text --allow-swap >/dev/null && [ "$(stat -c %s "$d/out.txt")" -lt "$(stat -c %s "$d/big.txt")" ] && echo "ok  8 MiB text cleaned in the helper" || { echo "FAIL big text"; fail=1; }
 out=$("$B" --strip "$d/bad.bin" "$d/out.bad" --allow-swap 2>&1 || true)
 if echo "$out" | grep -q "REFUSED"; then echo "ok  unsupported file refused"; else echo "FAIL unsupported file"; fail=1; fi
