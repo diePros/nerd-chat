@@ -404,3 +404,19 @@ Verdict of the reviewer: nothing CRITICAL/HIGH; in the code nothing reaches the 
 | ID | Item | Status | Notes |
 |---|---|---|---|
 | LT-1 | when the terminal vanished (window closed, ssh dropped, tmux killed) the app did NOT exit: crossterm's event reader spins forever inside `event::poll` once its tty returns EOF (`read(0) = 0` in a tight loop), so our SIGHUP/lost-terminal handling was never reached: a process at 100% CPU for hours with the vault open in RAM (found on the owner's machine: 7 leaked instances, each also holding a `tor`) | FIXED | the main loop checks the terminal itself (`input_ready`: hangup/error/EOF = terminal gone -> normal wipe-and-exit path) before crossterm is asked to read; a watchdog thread force-exits two seconds after a hangup if the main loop did not react; test with a socket pair, and verified end to end in tmux (online and offline: exits within 1 s). Honest note: a killed instance (SIGKILL) cannot wipe or remove its RAM directory: the next start sweeps `ramtor-*`/`seburity-*` directories of dead owners |
+
+## Review 23 (Opus, delta 3568db6..f0b62aa, before the first release) — integrated in cycle 36
+Verdict of the reviewer: nothing CRITICAL/HIGH; four MEDIUM issues, all reproduced, all fixed.
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| R23-M1 | purge followed planted symlinks (`v.<hex>.tmp -> ~/thesis.txt`) and destroyed what they point to (regression of R22-M3) | FIXED | links are never followed (only unlinked); created files carry (dev, ino) and are destroyed only if still the same file; test `purge_spares_planted_links_and_files_that_replaced_ours` |
+| R23-M2 | a read-only (chmod 400) keyfile was only unlinked, content intact | FIXED | owner chmods 0600 and retries; test with a hard-link witness |
+| R23-M3 | the screen kept showing contacts/messages until all shredding finished (seconds for big files / slow sticks) | FIXED | `purge_prepare` (RAM) -> blank screen -> `purge_finish` (files) |
+| R23-M4 | pasted text containing byte 0x1D purged the vault (0x1C panic-locks, a pasted Esc switched modes) | FIXED | bracketed paste enabled; a paste is literal text for the message line in Insert mode and ignored everywhere else; test `pasted_text_is_never_a_command`. ACCEPTED: Ctrl+4/Ctrl+5 and Ctrl+\ / Ctrl+] are neighbours, a slip under stress destroys the vault (owner's choice, PG-1) |
+| R23-L1 | already-read input was processed at 5 events/s | FIXED | drain without waiting while crossterm has a backlog |
+| R23-L2 | watchdog could exit without the wipe | FIXED | it first raises the signal flag, force-exits 3 s later only if the main loop is stuck. RESIDUAL: a hang-up exactly between our check and crossterm's read can still trap the main thread; the watchdog then exits without wipe (no Drop; External-tor client-auth cleanup is skipped) |
+| R23-L3 | purge missed counter temp files | FIXED | scanned next to the counter too |
+| R23-L4 | stale target list during a vault create | FIXED | targets are looked up after the wipe |
+| R23-L5 | Enter in the message cursor saved the newest message | FIXED | only `y` saves |
+| R23-L6 | imported bundle files are not purged | ACCEPTED | documented |
+| R23-I | OsStr compared lossily; duplicate targets; tracker had LT-1 twice | FIXED (raw bytes, dedup); LT-1 duplicate left as history |

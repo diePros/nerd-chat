@@ -28,6 +28,7 @@ spelled `Bash` (capital B).
 | 29 | (this commit) | TUI overhaul: permanent sidebar, vim-style Normal/Insert modes, Esc ladder to a privacy screen, history scrolling, context hints, stale Tor text removed, `I` = import | yes (review 20: 1 HIGH, fixed in cycle 30) | yes | n/a |
 | 30-31 | (this commit) | review 20 fixes, AGPL LICENSE, README/SECURITY.md, rename to nerd-chat with tooling, cleanup (-90 lines + dead API), review 21 fixes | yes (reviews 20, 21) | yes (static, sandbox-check) | yes, 3/3 live |
 | 33-34 | (this commit) | queued-label fix, manual message saving (SBS5), purge panic, review 22 fixes | yes (review 22) | yes | yes |
+| 35-36 | (this commit) | terminal-loss fix, release prep (--version, scripts/release.sh, RELEASE_TESTING), review 23 fixes (purge never follows links, read-only keyfile, blank-before-shred, bracketed paste) | yes (review 23), fixes applied | yes | yes (net test now uses the tor RAM dir: Ubuntu AppArmor system_tor blocks sockets elsewhere) |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.

@@ -168,6 +168,7 @@ fn map_key(k: event::KeyEvent) -> Option<Key> {
 
 /// Clear screen AND scrollback, leave the alternate screen, restore the terminal.
 fn wipe_terminal() {
+    let _ = execute!(stdout(), event::DisableBracketedPaste);
     ratatui::restore();
     let _ = execute!(stdout(), Clear(ClearType::All), Clear(ClearType::Purge), ratatui::crossterm::cursor::MoveTo(0, 0));
 }
@@ -212,15 +213,16 @@ fn input_ready(fd: impl std::os::fd::AsFd, timeout: Duration) -> std::io::Result
 
 /// Last line of defence: if the terminal is gone and the main loop has not reacted within two seconds (stuck in a library, or busy), the
 /// process ends instead of lingering with the vault open in RAM. A dead terminal has no screen left to wipe.
-fn spawn_terminal_watchdog() {
-    std::thread::spawn(|| loop {
+fn spawn_terminal_watchdog(sig: Arc<AtomicBool>) {
+    std::thread::spawn(move || loop {
         use rustix::event::{poll, PollFd, PollFlags, Timespec};
         let stdin = std::io::stdin();
         let mut fds = [PollFd::new(&stdin, PollFlags::empty())]; // only hangup / error conditions are reported
         let ts = Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
         if poll(&mut fds, Some(&ts)).is_ok() && !fds[0].revents().is_empty() {
-            std::thread::sleep(Duration::from_secs(2));
-            std::process::exit(1);
+            sig.store(true, Ordering::SeqCst);                 // first ask the main loop for the normal wipe-and-exit ...
+            std::thread::sleep(Duration::from_secs(3));
+            std::process::exit(1);                             // ... and only force the exit if it is stuck
         }
     });
 }
@@ -231,6 +233,7 @@ fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
     for _ in 0..2 { let _ = term.draw(|f| ui::draw(f, app)); }
     let _ = term.clear();
     wipe_terminal();
+    app.purge_finish(); // a purge destroys its files only now, with the screen already blank (large files / slow sticks take a while)
     // after the wipe, counts only (a path printed here would stay in the scrollback)
     if let Some((ok, failed)) = app.purge_report { eprintln!("purge: {ok} file(s) overwritten and deleted{}", if failed > 0 { format!(", {failed} could NOT be removed (delete them yourself)") } else { String::new() }); }
     std::process::exit(0)
@@ -277,15 +280,18 @@ fn main() {
         let _ = signal_hook::flag::register(s, sig.clone());
     }
     let mut app = App::new(cfg);
-    spawn_terminal_watchdog();
+    spawn_terminal_watchdog(sig.clone());
     let mut term = ratatui::init(); // raw mode + alternate screen + panic hook that restores the terminal
+    // pasted text arrives as ONE Paste event (never as keystrokes: a pasted 0x1D must not be a purge key, a pasted Esc no mode switch)
+    let _ = execute!(stdout(), event::EnableBracketedPaste);
+    let mut backlog = false; // crossterm may hold already-read events that the fd no longer shows: drain them without waiting
     let result = loop {
         if sig.load(Ordering::SeqCst) { panic_exit(&mut app, &mut term); }
         if let Err(e) = term.draw(|f| ui::draw(f, &app)) { break Err(e); }
         app.poll();
         // (waits up to 200 ms; crossterm is only asked once we know the terminal is alive, and then without blocking)
-        match input_ready(std::io::stdin(), Duration::from_millis(200)).and_then(|_| event::poll(Duration::ZERO)) {
-            Ok(true) => match event::read() {
+        match input_ready(std::io::stdin(), if backlog { Duration::ZERO } else { Duration::from_millis(200) }).and_then(|_| event::poll(Duration::ZERO)) {
+            Ok(true) => { backlog = true; match event::read() {
                 Ok(Event::Key(k)) => if let Some(k) = map_key(k) {
                     match app.handle(k) {
                         Action::None => {}
@@ -294,10 +300,11 @@ fn main() {
                         Action::Purge => panic_exit(&mut app, &mut term),
                     }
                 },
+                Ok(Event::Paste(t)) => app.paste(&t),
                 Ok(_) => {}
                 Err(e) => break Err(e),
-            },
-            Ok(false) => {}
+            } },
+            Ok(false) => backlog = false,
             Err(e) => break Err(e),
         }
     };

@@ -191,7 +191,9 @@ pub struct App {
     linked: HashSet<[u8; 8]>,
     unread: HashMap<[u8; 8], u32>,
     /// Files this session created on request (exported bundles, saved received files): a PURGE deletes them too.
-    created: Vec<PathBuf>,
+    created: Vec<(PathBuf, (u64, u64))>,
+    /// Set by `purge_prepare`: the session's created files, destroyed by `purge_finish`.
+    purge_pending: Option<Vec<(PathBuf, (u64, u64))>>,
     /// (deleted, failed) after a purge, for the one-line report printed after the terminal was wiped.
     pub purge_report: Option<(usize, usize)>,
     /// Right pane: details of the selected contact, or the conversation with it (the open chat is ALWAYS `sel_id()`).
@@ -242,7 +244,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -314,40 +316,58 @@ impl App {
     fn ok(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = false; }
     fn err(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = true; }
 
-    /// Every file on disk that belongs to this vault: the vault, its rollback counter, the keyfile, leftover temp files of the atomic
-    /// write, and the files this session created on request (exported bundles, saved received files).
-    fn purge_targets(&self) -> Vec<PathBuf> {
-        let mut v = Vec::new();
-        if let Some(p) = &self.cfg.path {
-            v.push(p.clone());
-            v.push(self.cfg.counter.clone().unwrap_or_else(|| nerd_chat_store::counter_path_for(p)));
-            let (dir, name) = (p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")), p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                for e in rd.flatten() {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    // exactly what `write_atomic` makes: <vault>.<16 lowercase hex>.tmp (never somebody else's `v.my-notes.tmp`)
-                    let mid = n.strip_prefix(&format!("{name}.")).and_then(|r| r.strip_suffix(".tmp"));
-                    if mid.is_some_and(|m| m.len() == 16 && m.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) { v.push(e.path()); }
-                }
-            }
-        }
-        v.extend(self.cfg.keyfile_path.clone());
-        v.extend(self.created.iter().cloned());
-        // a symlink would only be unlinked and the real data would survive: shred what it points to as well; missing files are nothing to do
-        let mut all = Vec::new();
-        for p in v {
-            let Ok(md) = std::fs::symlink_metadata(&p) else { continue };
-            if md.file_type().is_symlink() { if let Ok(t) = std::fs::canonicalize(&p) { all.push(t); } }
-            all.push(p);
-        }
-        all
+    /// Leftover temp files of an atomic write next to `p`: exactly `<name>.<16 lowercase hex>.tmp` (never somebody else's `v.my-notes.tmp`).
+    fn temp_siblings(p: &std::path::Path) -> Vec<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let Some(name) = p.file_name() else { return Vec::new() };
+        let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        let mut pre = name.as_bytes().to_vec();
+        pre.push(b'.');
+        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        rd.flatten().filter(|e| {
+            let n = e.file_name();
+            let mid = n.as_bytes().strip_prefix(&pre[..]).and_then(|r| r.strip_suffix(b".tmp"));
+            mid.is_some_and(|m| m.len() == 16 && m.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)))
+        }).map(|e| e.path()).collect()
     }
 
-    /// PURGE (Ctrl+] / Shift+F12): everything `panic_wipe` does, and then every file of this vault is overwritten with random bytes and
-    /// deleted: contacts, keys, saved messages, the rollback counter, the keyfile. No confirmation: it is a panic key.
-    pub fn purge(&mut self) {
-        let targets = self.purge_targets();         // collected BEFORE the wipe forgets the session's paths
+    /// Remember a file this session created, with its identity: a PURGE only destroys it if it is still THAT file.
+    fn note_created(&mut self, path: &std::path::Path) {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(m) = std::fs::symlink_metadata(path) { self.created.push((path.to_path_buf(), (m.dev(), m.ino()))); }
+    }
+
+    /// Every file on disk that belongs to this vault: the vault, its rollback counter, the keyfile, leftover temp files of the atomic
+    /// write, and the files this session created on request (only while they are still the very files we created).
+    /// Symlinks are NEVER followed: none of these paths is legitimately a link, so a link is somebody's trap (it is only unlinked).
+    fn purge_targets(&self, created: &[(PathBuf, (u64, u64))]) -> Vec<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let mut v = Vec::new();
+        if let Some(p) = &self.cfg.path {
+            let counter = self.cfg.counter.clone().unwrap_or_else(|| nerd_chat_store::counter_path_for(p));
+            for f in [p.clone(), counter] { v.extend(Self::temp_siblings(&f)); v.push(f); }
+        }
+        v.extend(self.cfg.keyfile_path.clone());
+        v.extend(created.iter().filter(|(p, id)| std::fs::symlink_metadata(p).is_ok_and(|m| (m.dev(), m.ino()) == *id)).map(|(p, _)| p.clone()));
+        v.retain(|p| std::fs::symlink_metadata(p).is_ok()); // missing files are nothing to do
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// PURGE, step 1 (Ctrl+] / Shift+F12): everything `panic_wipe` does (RAM and screen first: it must be instant). The files are
+    /// destroyed by `purge_finish` once the screen is blank.
+    pub fn purge_prepare(&mut self) {
+        self.purge_pending = Some(std::mem::take(&mut self.created));
         self.panic_wipe();
+    }
+
+    /// PURGE, step 2: every file of this vault is overwritten with random bytes and deleted: contacts, keys, saved messages, the
+    /// rollback counter, the keyfile. No confirmation: it is a panic key. Targets are looked up only now, after the wipe (so a vault
+    /// that a create worker was still writing is included).
+    pub fn purge_finish(&mut self) {
+        let Some(created) = self.purge_pending.take() else { return };
+        let targets = self.purge_targets(&created);
         let failed = targets.iter().filter(|p| nerd_chat_store::shred_file(p).is_err()).count();
         self.purge_report = Some((targets.len() - failed, failed));
     }
@@ -406,7 +426,7 @@ impl App {
     }
 
     pub fn handle(&mut self, k: Key) -> Action {
-        if k == Key::Purge { self.purge(); return Action::Purge; }
+        if k == Key::Purge { self.purge_prepare(); return Action::Purge; }
         if matches!(k, Key::F12 | Key::CtrlBackslash) { self.panic_wipe(); return Action::Panic; }
         match &self.screen {
             Screen::Wiped => Action::Quit,
@@ -580,6 +600,14 @@ impl App {
     }
 
     /// Insert mode (chat only): keys are TEXT. Nothing typed here can act as a command.
+    /// Pasted text (one terminal paste event, never keystrokes): literal text for the message line while typing in a chat, and nothing
+    /// anywhere else (a paste must not be able to press commands, a purge key or Esc). Control characters and newlines are dropped.
+    pub fn paste(&mut self, text: &str) {
+        if self.screen == Screen::Main && self.pane == Pane::Chat && self.mode == Mode::Insert && !self.locked {
+            for c in text.chars().filter(|c| !c.is_control()) { self.compose.push(c); }
+        }
+    }
+
     fn key_insert(&mut self, k: Key) {
         match k {
             Key::Esc => self.mode = Mode::Normal,
@@ -617,7 +645,7 @@ impl App {
             // contact / global commands: work in the details view AND while reading a chat
             Key::Char('?') => self.screen = Screen::Help,
             Key::Char('K') => self.start_rotation(),
-            Key::Char('m') => if chatting { if self.chat_lines().is_empty() { self.err("No messages to select yet.") } else { self.select = Some(0); self.ok("Message cursor: j/k choose a message, y or Enter saves it into the vault, Esc cancels.") } },
+            Key::Char('m') => if chatting { if self.chat_lines().is_empty() { self.err("No messages to select yet.") } else { self.select = Some(0); self.ok("Message cursor: j/k choose a message, y saves it into the vault, Esc cancels.") } },
             Key::Char('H') => self.open_saved(),
             Key::Char('P') => if self.pending_pair.is_some() { self.open_prompt(Prompt::InPerson, "") } else { self.err("No finished pairing is waiting for an answer.") },
             Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } else { self.alerts_dropped = 0; } }
@@ -673,7 +701,7 @@ impl App {
             Key::Down | Key::Char('j') => self.select = Some(i.saturating_sub(1)),
             Key::Home | Key::Char('g') => self.select = Some(n.saturating_sub(1)),
             Key::End | Key::Char('G') => self.select = Some(0),
-            Key::Char('y') | Key::Enter => self.save_selected(i),
+            Key::Char('y') => self.save_selected(i),
             _ => {}
         }
     }
@@ -1058,7 +1086,7 @@ impl App {
                     Err(e) => return self.err(format!("Cannot save (nothing was overwritten): {e}")),
                 };
                 match f.write_all(&r.data).and_then(|_| f.sync_all()) {
-                    Ok(()) => { self.inbox.remove(&id); self.created.push(path.clone()); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
+                    Ok(()) => { self.inbox.remove(&id); self.note_created(&path); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
                     Err(e) => { drop(f); let _ = fs::remove_file(&path); self.err(format!("Cannot save: {e}")) }
                 }
             }
@@ -1077,7 +1105,7 @@ impl App {
                         let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
                         self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
                     }
-                    Ok(()) => { self.created.push(path.clone()); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
+                    Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
                     Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
                 }
             }
@@ -2662,7 +2690,7 @@ mod tests {
         assert!(a.select.is_none() && a.chat_lines().iter().filter(|l| l.saved).count() == 1);
         assert!(screen_text(&a, 110, 24).contains("me★>"), "a saved message is marked");
         // saving it again is refused, nothing doubles
-        a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Enter);
+        a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Char('y'));
         assert!(a.error && a.status.contains("already saved") && a.vf.as_ref().unwrap().store.contacts[0].saved.len() == 1, "{}", a.status);
         // it really reached the vault FILE: reopen it
         drop(a);
@@ -2763,6 +2791,7 @@ mod tests {
         std::fs::write(&foreign, b"somebody else's file").unwrap();
         for f in [&vault, &counter, &keyfile, &out, &tmp] { assert!(f.exists(), "{f:?} must exist before the purge"); }
         assert_eq!(a.handle(Key::Purge), Action::Purge);
+        a.purge_finish();
         for f in [&vault, &counter, &keyfile, &out, &tmp] { assert!(!f.exists(), "{f:?} must be deleted by the purge"); }
         assert!(foreign.exists() && notes.exists(), "files that do not belong to the vault are never touched (only <vault>.<16 hex>.tmp is ours)");
         assert_eq!(a.purge_report, Some((5, 0)));
@@ -2782,11 +2811,13 @@ mod tests {
         assert!(vault.exists() && counter.exists() && a.purge_report.is_none(), "F12 is panic-LOCK: the vault stays, only the password opens it");
         let mut b = App::new(cfg(Some(vault.clone())));
         assert_eq!(b.handle(Key::Purge), Action::Purge, "also from the password prompt (e.g. under pressure)");
+        b.purge_finish();
         assert!(!vault.exists() && !counter.exists());
         assert_eq!(b.purge_report, Some((2, 0)));
         let mut r = App::new(cfg(None));                                     // RAM-only: nothing on disk, purge is just a panic
         r.handle(Key::Enter);
         assert_eq!(r.handle(Key::Purge), Action::Purge);
+        r.purge_finish();
         assert_eq!(r.purge_report, Some((0, 0)));
     }
 
@@ -2798,10 +2829,12 @@ mod tests {
         std::fs::remove_file(&counter).unwrap();
         std::fs::create_dir(&counter).unwrap(); std::fs::write(counter.join("x"), b"y").unwrap();   // a non-empty directory cannot be deleted: reported, not fatal
         assert_eq!(a.handle(Key::Purge), Action::Purge);
+        a.purge_finish();
         assert!(!vault.exists());
         assert_eq!(a.purge_report, Some((1, 1)));
         let mut b = App::new(cfg(Some(d.path().join("never-created"))));
         assert_eq!(b.handle(Key::Purge), Action::Purge);
+        b.purge_finish();
         assert_eq!(b.purge_report, Some((0, 0)), "files that do not exist are nothing to do, not failures");
     }
 
@@ -2908,7 +2941,7 @@ mod tests {
     }
 
     #[test]
-    fn purge_also_destroys_what_a_symlinked_vault_or_keyfile_points_to_and_saved_received_files() {
+    fn purge_never_follows_links_and_destroys_the_files_we_created() {
         use std::os::unix::fs::symlink;
         let d = tempfile::tempdir().unwrap();
         let real_key = d.path().join("real-key.bin"); std::fs::write(&real_key, [9u8; 64]).unwrap();
@@ -2918,10 +2951,46 @@ mod tests {
         let mut a = open_app(c);
         add_peer(&mut a, "bob");
         let saved_file = d.path().join("received.png");
-        a.created.push(saved_file.clone()); std::fs::write(&saved_file, b"png").unwrap();
+        std::fs::write(&saved_file, b"png").unwrap(); a.note_created(&saved_file);
         assert_eq!(a.handle(Key::Purge), Action::Purge);
-        assert!(!real_key.exists() && !link_key.exists(), "the REAL key material is destroyed, not only the link");
+        a.purge_finish();
+        assert!(real_key.exists() && !link_key.exists(), "a link is only unlinked: whatever it points to is never touched (a planted link must not make us destroy other files)");
         assert!(!saved_file.exists() && !d.path().join("v").exists());
+    }
+
+    #[test]
+    fn pasted_text_is_never_a_command() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = open_app(Config::new(Some(d.path().join("v")), None, None, Profile::InsecureTest));
+        add_peer(&mut a, "bob");
+        a.paste("\u{1d}q\u{1b}d");                       // details view / normal mode: ignored completely
+        assert!(a.vf.is_some() && d.path().join("v").exists() && a.contacts_len() == 1);
+        a.handle(Key::Char('i'));                          // typing in the chat
+        a.paste("hi\u{1d}\u{1b}there\nq");
+        assert!(a.vf.is_some() && d.path().join("v").exists(), "no purge, still in insert mode");
+        assert_eq!(a.compose.chars(), "hithereq".len(), "only printable characters arrive");
+        a.handle(Key::Esc);
+        a.paste("zzz");
+        assert_eq!(a.compose.chars(), "hithereq".len(), "normal mode: pastes are ignored");
+    }
+
+    #[test]
+    fn purge_spares_planted_links_and_files_that_replaced_ours() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let mut a = open_app(Config::new(Some(d.path().join("v")), None, None, Profile::InsecureTest));
+        add_peer(&mut a, "bob");
+        let precious = d.path().join("thesis.txt"); std::fs::write(&precious, b"mine").unwrap();
+        symlink(&precious, d.path().join("v.0123456789abcdef.tmp")).unwrap();   // planted next to the vault
+        symlink(&precious, d.path().join("v.counter.fedcba9876543210.tmp")).unwrap();
+        let stale = d.path().join("v.counter.0000000000000000.tmp"); std::fs::write(&stale, [0u8; 8]).unwrap(); // a real counter temp file
+        let exported = d.path().join("bundle.sbc"); std::fs::write(&exported, b"x").unwrap(); a.note_created(&exported);
+        std::fs::remove_file(&exported).unwrap(); std::fs::write(&exported, b"the user later put THIS here").unwrap();
+        assert_eq!(a.handle(Key::Purge), Action::Purge);
+        a.purge_finish();
+        assert_eq!(std::fs::read(&precious).unwrap(), b"mine", "what a planted link points to is never touched");
+        assert!(!d.path().join("v.0123456789abcdef.tmp").exists() && !stale.exists() && !d.path().join("v").exists());
+        assert!(exported.exists(), "a file that is no longer the one we created is not ours to destroy");
     }
 
     #[test]

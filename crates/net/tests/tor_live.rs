@@ -16,8 +16,9 @@ fn two_contacts_chat_over_real_onion_service_with_client_auth() {
     let mut tor = Tor::spawn(&SpawnConfig::new(tor_path), Duration::from_secs(240), |p| eprintln!("bootstrap {p}%")).expect("spawn tor");
 
     // A: listener that tor forwards to: a UNIX socket in a private directory (no TCP port any local user could reach)
-    let dir = tempfile::Builder::new().prefix("sbt-").tempdir_in(if std::path::Path::new("/dev/shm").is_dir() { "/dev/shm" } else { "/tmp" }).unwrap();
-    let sock = dir.path().join("a.sock");
+    // (the same place the app uses: tor's own RAM directory. Distribution AppArmor profiles such as Ubuntu's `system_tor`
+    // stop tor from connecting to sockets anywhere else, e.g. /dev/shm: "connection refused by the target")
+    let sock = tor.spawn_dir().expect("spawned tor has a directory").join("a.sock");
     let listener = UnixListener::bind(&sock).unwrap();
     let local = Target::Unix(sock);
     let a2 = ContactIdentity::from_secret_bytes(&a.secret_bytes()).unwrap();

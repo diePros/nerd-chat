@@ -82,7 +82,7 @@ fn footer_hint(app: &App) -> &'static str {
         (Screen::Prompt(_), _, _) => " Enter ok  Esc cancel   F12 PANIC-LOCK  Ctrl+] PURGE",
         (Screen::Main, Pane::Chat, Mode::Insert) => " -- INSERT --  Enter send  Esc normal mode   F12 PANIC-LOCK  Ctrl+] PURGE",
         (Screen::Main, Pane::Saved, _) => " SAVED  j/k move  d d delete  Esc back   F12 PANIC-LOCK  Ctrl+] PURGE",
-        (Screen::Main, Pane::Chat, Mode::Normal) if app.select.is_some() => " SELECT  j/k choose a message  y / Enter save it  Esc cancel   F12 PANIC",
+        (Screen::Main, Pane::Chat, Mode::Normal) if app.select.is_some() => " SELECT  j/k choose a message  y save it  Esc cancel   F12 PANIC",
         (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  m select+save  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC  Ctrl+] PURGE",
         (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC  Ctrl+] PURGE",
         _ => " F12 PANIC-LOCK  Ctrl+] PURGE",
@@ -270,7 +270,7 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
             ((total - eff).saturating_sub(h), total - eff, eff)
         }
     };
-    let title = if app.select.is_some() { "Conversation: choose a message (j/k), y or Enter saves it, Esc cancels".to_string() }
+    let title = if app.select.is_some() { "Conversation: choose a message (j/k), y saves it, Esc cancels".to_string() }
         else if eff > 0 { format!("Conversation (RAM only) - scrolled up {eff} line(s), G = newest") } else { "Conversation (RAM only, wiped on exit/panic; m = select a message to save)".to_string() };
     let lines: Vec<Line> = msgs.drain(..).flatten().skip(begin).take(end - begin).collect();
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(title)), rows[1]);
@@ -331,7 +331,7 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "",
         "Esc, Esc, Esc: typing -> normal -> details -> PRIVACY SCREEN (Enter unlocks, q quits).",
         "  The privacy screen only hides the screen: the vault stays open, anyone can press Enter.",
-        "Keeping messages: NOTHING is saved automatically. In a chat: m = message cursor, j/k choose, y or Enter saves THAT message into the",
+        "Keeping messages: NOTHING is saved automatically. In a chat: m = message cursor, j/k choose, y saves THAT message into the",
         "  vault (encrypted, no timestamp). H = saved messages of this contact (d d deletes one). Whoever gets vault + password can read them.",
         "q quits (wipes RAM; asks again if queued messages or unsaved files would be lost).",
         "",

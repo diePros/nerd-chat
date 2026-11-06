@@ -27,7 +27,7 @@ Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode
   Tab/Shift+Tab switch to the next/previous contact.
 - **Esc ladder:** typing -> normal mode -> details -> **privacy screen**. On the privacy screen `Enter` unlocks (no password) and `q` quits.
   It only hides the screen: the vault stays open and anyone at the keyboard can press Enter; messages keep arriving underneath. It is not a lock.
-- **Keeping messages (by hand, never automatic):** in a chat press `m` (message cursor), `j`/`k` choose a message, `y` or Enter saves THAT message into the
+- **Keeping messages (by hand, never automatic):** in a chat press `m` (message cursor), `j`/`k` choose a message, `y` saves THAT message into the
   vault (encrypted with it; no timestamp; at most 500 per contact and 4 MiB in total; not possible in `--ram` mode). Saved messages are marked ★ in the chat.
   `H` opens the saved messages of the selected contact (`d` twice deletes one). Whoever gets your vault AND password can read what you saved.
 - `q` quits and wipes RAM; if queued messages or unsaved files would be lost it asks you to press `q` a second time.
@@ -37,8 +37,7 @@ session exported or saved: contacts, keys and saved messages are gone for good. 
 password prompt. Honest limits: every save writes a NEW file and renames it over the old one, so EARLIER versions of the vault (with contacts, keys, and messages you
 later deleted) stay in free disk blocks on any filesystem, and on copy-on-write filesystems (btrfs, ZFS) the overwrite never touches old blocks at all;
 flash media (SSD, USB stick) may also keep blocks through wear levelling. What really protects a vault is the password plus a KEYFILE on separate
-media, which the purge destroys: use both. A keyfile that other vaults share (or a photo you reuse as keyfile) is destroyed too. Symlinks are
-followed for the purge (the real file is destroyed, then the link). Files you exported or saved in earlier sessions are not known and stay. `purge: N file(s) overwritten and deleted` is printed after the screen was wiped (counts only).
+media, which the purge destroys: use both. A keyfile that other vaults share (or a photo you reuse as keyfile) is destroyed too. Symlinks are never followed (a link is only unlinked; the keyfile path is resolved once at start-up). Files exported or saved by this session are destroyed only if they are still the very files the session created. Files you imported, and files exported or saved in earlier sessions, stay. Pasted text is never interpreted as keys (a pasted Ctrl+] cannot purge). `purge: N file(s) overwritten and deleted` is printed after the screen was wiped (counts only).
 
 ## 3. Try the file exchange with yourself (two terminals)
 Terminal 1 (Alice):

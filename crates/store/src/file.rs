@@ -44,7 +44,15 @@ pub fn shred_file(path: &Path) -> Result<(), StoreError> {
         o.write(true);
         #[cfg(unix)]
         o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let f0 = o.open(path)?;
+        // a read-only file we own (chmod 400 keyfiles are common) must still be overwritten, not merely unlinked
+        let f0 = match o.open(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+                o.open(path)?
+            }
+            r => r?,
+        };
         // the file we opened must be the one we looked at (a swapped-in file is not ours to overwrite)
         { let m = f0.metadata()?; if (m.dev(), m.ino()) != (md.dev(), md.ino()) { return Err(std::io::Error::other("the file changed while being shredded")); } }
         let mut f = f0;
@@ -244,14 +252,16 @@ mod tests {
     }
 
     #[test]
-    fn shred_still_unlinks_when_the_overwrite_is_impossible() {
+    fn shred_overwrites_a_read_only_file_we_own_before_deleting_it() {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("readonly");
-        fs::write(&p, b"data").unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o444)).unwrap();   // cannot be opened for writing
-        assert!(shred_file(&p).is_err(), "the failed overwrite is reported");
-        assert!(!p.exists(), "but the file is deleted anyway");
+        let (p, witness) = (d.path().join("key.bin"), d.path().join("witness"));
+        fs::write(&p, [7u8; 4096]).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o400)).unwrap();    // chmod 400 keyfiles are common
+        fs::hard_link(&p, &witness).unwrap();                                     // keeps the same inode alive to look at it afterwards
+        shred_file(&p).unwrap();
+        assert!(!p.exists());
+        assert_ne!(fs::read(&witness).unwrap(), vec![7u8; 4096], "the content was overwritten, not merely unlinked");
     }
 
     #[test]
