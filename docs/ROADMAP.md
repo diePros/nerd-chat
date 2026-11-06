@@ -1,5 +1,13 @@
 # Roadmap (ideas, NOT scheduled: the terminal UI is the supported front end today)
 
+## Release plan (decision, 0.1.0 era)
+- **0.1.x:** the terminal UI only; audit findings, the Tails result and hardening. The TUI stays a first-class, fully maintained front end
+  in every later release (it is the one that runs from a live USB with nothing but a terminal).
+- **0.2 / next major:** the GUI, built only after the UI-agnostic core is extracted (below) and after the first audit, so that the audited
+  security-critical code is not rewritten while it is being audited. Every feature lands in the core first and then in BOTH front ends.
+- **Toolkit recommendation:** a native Rust toolkit (egui/eframe or iced) in a second binary `nerd-chat-gui`: still one static-ish executable, no web
+  view, no JavaScript, no IPC to a separate backend. Tauri/Electron are rejected for the memory-wiping and attack-surface reasons below.
+
 ## Real GUI (future)
 Goal: usability for people who do not live in a terminal, without hiding anything from the people who do.
 - **Layout:** the familiar chat-platform layout, kept minimal: contact list on the left, conversation in the middle, composer at the bottom.
