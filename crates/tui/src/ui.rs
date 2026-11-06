@@ -81,8 +81,10 @@ fn footer_hint(app: &App) -> &'static str {
     match (&app.screen, app.pane, app.mode) {
         (Screen::Prompt(_), _, _) => " Enter ok  Esc cancel   F12 / Ctrl+\\ = PANIC WIPE",
         (Screen::Main, Pane::Chat, Mode::Insert) => " -- INSERT --  Enter send  Esc normal mode   F12 / Ctrl+\\ = PANIC WIPE",
-        (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC",
-        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC",
+        (Screen::Main, Pane::Saved, _) => " SAVED  j/k move  d d delete  Esc back   F12 / Ctrl+\\ = PANIC WIPE",
+        (Screen::Main, Pane::Chat, Mode::Normal) if app.select.is_some() => " SELECT  j/k choose a message  y / Enter save it  Esc cancel   F12 PANIC",
+        (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  m select+save  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC",
+        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC",
         _ => " F12 / Ctrl+\\ = PANIC WIPE",
     }
 }
@@ -116,6 +118,7 @@ fn lock_view(f: &mut Frame, area: Rect, app: &App) {
 fn body(f: &mut Frame, area: Rect, app: &App) {
     if area.width < 70 {
         if app.pane == Pane::Chat { chat_view(f, area, app) }
+        else if app.pane == Pane::Saved { saved_view(f, area, app) }
         else {
             // one column: the list on top, the selected contact's details below (nothing is hidden on a narrow terminal)
             let r = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
@@ -127,7 +130,7 @@ fn body(f: &mut Frame, area: Rect, app: &App) {
     let side_w = (area.width / 4).clamp(24, 34);
     let cols = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Length(side_w), Constraint::Min(20)]).split(area);
     sidebar(f, cols[0], app);
-    if app.pane == Pane::Chat { chat_view(f, cols[1], app) } else { details_view(f, cols[1], app) }
+    match app.pane { Pane::Chat => chat_view(f, cols[1], app), Pane::Saved => saved_view(f, cols[1], app), Pane::Details => details_view(f, cols[1], app) }
 }
 
 fn sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -175,6 +178,8 @@ fn details_view(f: &mut Frame, area: Rect, app: &App) {
                         if told { "CAN" } else { "CANNOT" }, if told { "--cannot-host" } else { "hosting enabled" }), Style::default().fg(Color::Yellow))));
                 }
             }
+            let saved = app.saved_msgs().len();
+            if saved > 0 { v.push(Line::from("")); v.push(Line::from(format!("Saved messages: {saved} (H shows them; they are stored encrypted in the vault, only what YOU saved)"))); }
             if let Some(r) = app.rotation_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(r, Style::default().fg(Color::Yellow)))); }
             if let Some(fs) = app.file_state() { v.push(Line::from("")); v.push(Line::from(Span::styled(fs, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))); }
             v
@@ -194,6 +199,41 @@ fn tail(t: &str, cols: usize) -> &str {
     t
 }
 
+/// Wrap one message by DISPLAY width (wide CJK characters take two cells): nothing may silently fall off the right edge (R6-L5).
+/// Borrowed slices of the (sanitised) text, no per-frame copy; `marked` = the message cursor is on it.
+fn wrap_msg<'a>(text: &'a str, tag: &str, style: Style, w: usize, marked: bool) -> Vec<Line<'a>> {
+    let tw = Span::raw(tag).width();
+    let avail = w.saturating_sub(tw).max(2);
+    let mut chunks: Vec<&str> = Vec::new();
+    let (mut start, mut cols) = (0usize, 0usize);
+    for (i, ch) in text.char_indices() {
+        let cw = Span::raw(&text[i..i + ch.len_utf8()]).width().max(1);
+        if cols + cw > avail && i > start { chunks.push(&text[start..i]); start = i; cols = 0; }
+        cols += cw;
+    }
+    if start < text.len() || chunks.is_empty() { chunks.push(&text[start..]); }
+    chunks.iter().enumerate().map(|(i, c)| {
+        let l = Line::from(vec![Span::styled(if i == 0 { tag.to_string() } else { " ".repeat(tw) }, style), Span::raw(*c)]);
+        if marked { l.style(Style::default().add_modifier(Modifier::REVERSED)) } else { l }
+    }).collect()
+}
+
+/// The messages the user saved for the selected contact (read from the vault's copy in RAM).
+fn saved_view(f: &mut Frame, area: Rect, app: &App) {
+    let (name, msgs) = (app.selected_detail().map_or("", |d| d.0), app.saved_msgs());
+    let w = area.width.saturating_sub(4).max(8) as usize;
+    let h = area.height.saturating_sub(2) as usize;
+    let per: Vec<Vec<Line>> = msgs.iter().enumerate().map(|(i, m)| wrap_msg(&m.text, if m.mine { "me> " } else { "them> " }, Style::default().fg(if m.mine { Color::Cyan } else { Color::Green }), w, i == app.saved_sel)).collect();
+    let total: usize = per.iter().map(Vec::len).sum();
+    let sel = app.saved_sel.min(per.len().saturating_sub(1));
+    let first: usize = per[..sel].iter().map(Vec::len).sum();
+    let last = first + per.get(sel).map_or(0, Vec::len);
+    let mut end = last.max(h).min(total);
+    if end.saturating_sub(first) > h { end = first + h; }
+    let lines: Vec<Line> = per.into_iter().flatten().skip(end.saturating_sub(h)).take(h).collect();
+    f.render_widget(Paragraph::new(lines).block(Block::bordered().title(format!("Saved messages of {name} ({} in the encrypted vault, no timestamps): j/k move, d d delete, Esc back", msgs.len()))), area);
+}
+
 fn chat_view(f: &mut Frame, area: Rect, app: &App) {
     let file_line = app.file_state();
     let rows = Layout::default().direction(Direction::Vertical)
@@ -209,32 +249,31 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
     // messages: newest at the bottom (shifted up by `scroll`), wrapped by hand (no per-frame String copies of message text)
     let w = rows[1].width.saturating_sub(4).max(8) as usize;
     let h = rows[1].height.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    for l in app.chat_lines().iter().rev() {
-        let (tag, style) = if l.mine { (if l.queued { "me (queued)> " } else { "me> " }, Style::default().fg(Color::Cyan)) } else { ("them> ", Style::default().fg(Color::Green)) };
-        // wrap by DISPLAY width (wide CJK characters take two cells): nothing may silently fall off the right edge (R6-L5)
-        let mut chunks: Vec<&str> = Vec::new();
-        let t: &str = &l.text;
-        let avail = w.saturating_sub(tag.len()).max(2);
-        let (mut start, mut cols) = (0usize, 0usize);
-        for (i, ch) in t.char_indices() {
-            let cw = Span::raw(&t[i..i + ch.len_utf8()]).width().max(1);
-            if cols + cw > avail && i > start { chunks.push(&t[start..i]); start = i; cols = 0; }
-            cols += cw;
+    let n = app.chat_lines().len();
+    let mut msgs: Vec<Vec<Line>> = app.chat_lines().iter().enumerate().map(|(i, l)| {
+        let who = if l.mine { "me" } else { "them" };
+        let tag = format!("{who}{}{}> ", if l.saved { "★" } else { "" }, if l.queued { " (queued)" } else { "" });
+        wrap_msg(&l.text, &tag, Style::default().fg(if l.mine { Color::Cyan } else { Color::Green }), w, app.select == Some(n - 1 - i))
+    }).collect();
+    let total: usize = msgs.iter().map(Vec::len).sum();
+    let (begin, end, eff) = match app.select {
+        Some(k) if k < n => {   // the message cursor: show the chosen message (the top of it when it is taller than the window)
+            let first: usize = msgs[..n - 1 - k].iter().map(Vec::len).sum();
+            let last = first + msgs[n - 1 - k].len();
+            let mut end = last.max(h).min(total);
+            if end - first > h { end = first + h; }
+            (end.saturating_sub(h), end, 0)
         }
-        if start < t.len() { chunks.push(&t[start..]); }
-        for (i, c) in chunks.iter().enumerate().rev() {
-            lines.push(Line::from(vec![Span::styled(if i == 0 { tag.to_string() } else { " ".repeat(tag.len()) }, style), Span::raw(*c)]));
+        _ => {
+            app.max_scroll.set(Some(total.saturating_sub(h)));        // tell the app how far up it can go
+            let eff = app.scroll.min(total.saturating_sub(h));         // never scroll past the oldest line we have
+            ((total - eff).saturating_sub(h), total - eff, eff)
         }
-    }
-    lines.reverse();
-    let total = lines.len();
-    app.max_scroll.set(Some(total.saturating_sub(h)));        // tell the app how far up it can go
-    let eff = app.scroll.min(total.saturating_sub(h)); // never scroll past the oldest line we have
-    let end = total - eff;
-    let begin = end.saturating_sub(h);
-    let title = if eff > 0 { format!("Conversation (RAM only) - scrolled up {eff} line(s), G = newest") } else { "Conversation (RAM only, wiped on exit/panic)".to_string() };
-    f.render_widget(Paragraph::new(lines.drain(begin..end).collect::<Vec<_>>()).block(Block::bordered().title(title)), rows[1]);
+    };
+    let title = if app.select.is_some() { "Conversation: choose a message (j/k), y or Enter saves it, Esc cancels".to_string() }
+        else if eff > 0 { format!("Conversation (RAM only) - scrolled up {eff} line(s), G = newest") } else { "Conversation (RAM only, wiped on exit/panic; m = select a message to save)".to_string() };
+    let lines: Vec<Line> = msgs.drain(..).flatten().skip(begin).take(end - begin).collect();
+    f.render_widget(Paragraph::new(lines).block(Block::bordered().title(title)), rows[1]);
 
     let insert = app.mode == Mode::Insert;
     let inner = rows[2].width.saturating_sub(4) as usize;

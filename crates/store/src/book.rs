@@ -4,8 +4,18 @@ use zeroize::Zeroizing;
 
 pub const MAX_CONTACTS: usize = 1024;
 pub const MAX_NAME: usize = 64;
-const MAGIC: &[u8; 4] = b"SBS4";
-/// SBS3 (no rotation state) is still read.
+/// Messages the USER chose to keep (and nothing else is ever written): at most this many per contact ...
+pub const MAX_SAVED: usize = 500;
+/// ... and at most this many bytes of text in the whole vault.
+pub const MAX_SAVED_TOTAL: usize = 4 * 1024 * 1024;
+/// One saved message is at most one chat message (the chat caps a message at 32 KiB).
+const MAX_SAVED_LEN: usize = 32 * 1024;
+
+/// A message the user saved by hand. Order = order of saving; there is deliberately NO timestamp.
+pub struct SavedMsg { pub mine: bool, pub text: Zeroizing<String> }
+const MAGIC: &[u8; 4] = b"SBS5";
+/// SBS4 (no saved messages) and SBS3 (no rotation state either) are still read.
+const MAGIC_V4: &[u8; 4] = b"SBS4";
 const MAGIC_V3: &[u8; 4] = b"SBS3";
 /// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS4 (a ONE-WAY upgrade: older binaries cannot open it).
 const MAGIC_V2: &[u8; 4] = b"SBS2";
@@ -29,6 +39,8 @@ pub struct Contact {
     pub next_transport: Option<Zeroizing<[u8; 64]>>,
     /// Key rotation, THEIR side: the peer's previous (onion, auth) public keys, kept (authorized on our hosted service) until its DONE.
     pub peer_old: Option<([u8; 32], [u8; 32])>,
+    /// Messages of this conversation that the user saved by hand (never automatic). Encrypted with the rest of the vault.
+    pub saved: Vec<SavedMsg>,
 }
 
 impl std::fmt::Debug for Contact {
@@ -87,16 +99,36 @@ impl Store {
         if self.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Duplicate); }
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).expect("OS RNG unavailable");
-        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None, next_transport: None, peer_old: None });
+        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None, next_transport: None, peer_old: None, saved: Vec::new() });
         Ok(self.contacts.len() - 1)
     }
 
     pub fn remove(&mut self, idx: usize) { if idx < self.contacts.len() { self.contacts.remove(idx); } }
 
+    /// Total bytes of saved text in the whole vault.
+    pub fn saved_bytes(&self) -> usize { self.contacts.iter().flat_map(|c| &c.saved).map(|m| m.text.len()).sum() }
+
+    /// Delete saved message `k` of contact `idx` (zeroized on drop).
+    pub fn delete_saved(&mut self, idx: usize, k: usize) -> bool {
+        match self.contacts.get_mut(idx) { Some(c) if k < c.saved.len() => { c.saved.remove(k); true } _ => false }
+    }
+
+    /// Keep one message of contact `idx` (the user pressed save). Refuses beyond the caps instead of dropping anything silently.
+    pub fn save_message(&mut self, idx: usize, mine: bool, text: &str) -> Result<(), StoreError> {
+        if text.is_empty() || text.len() > MAX_SAVED_LEN { return Err(StoreError::Corrupt); }
+        if self.saved_bytes() + text.len() > MAX_SAVED_TOTAL { return Err(StoreError::SavedFull); }
+        let c = self.contacts.get_mut(idx).ok_or(StoreError::Corrupt)?;
+        if c.saved.len() >= MAX_SAVED { return Err(StoreError::SavedFull); }
+        c.saved.push(SavedMsg { mine, text: Zeroizing::new(text.to_string()) });
+        Ok(())
+    }
+
     /// Serialize (wiped on drop). Format: magic | count:u16 | per contact:
     /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1/2 trust, bit3 host_anyway, bit4 peer can_host, bit5/6 advertised can_host set/value) | [sign[32] dh[32] kem[1184]]
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
-        let mut v = Zeroizing::new(Vec::new());
+        // reserve the final size up front: a growing Vec would leave copies of keys and saved messages in freed heap
+        let est = 8 + self.contacts.iter().map(|c| 8 + 1 + c.name.len() + 128 + 1 + 1250 + 1 + 64 + 64 + 2 + c.saved.iter().map(|m| 3 + m.text.len()).sum::<usize>()).sum::<usize>();
+        let mut v = Zeroizing::new(Vec::with_capacity(est));
         v.extend_from_slice(MAGIC);
         v.extend_from_slice(&(self.contacts.len() as u16).to_be_bytes());
         for c in &self.contacts {
@@ -117,6 +149,9 @@ impl Store {
             v.push(c.next_transport.is_some() as u8 | (c.peer_old.is_some() as u8) << 1);
             if let Some(t) = &c.next_transport { v.extend_from_slice(&**t); }
             if let Some((o, a)) = &c.peer_old { v.extend_from_slice(o); v.extend_from_slice(a); }
+            // SBS5: the messages the user saved: count:u16 | per message: flags:u8 (bit0 mine) | len:u16 | text
+            v.extend_from_slice(&(c.saved.len() as u16).to_be_bytes());
+            for m in &c.saved { v.push(m.mine as u8); v.extend_from_slice(&(m.text.len() as u16).to_be_bytes()); v.extend_from_slice(m.text.as_bytes()); }
         }
         v
     }
@@ -124,7 +159,8 @@ impl Store {
     pub fn decode(b: &[u8]) -> Result<Self, StoreError> {
         let mut r = Reader(b);
         let magic = r.take(4)?;
-        let v4 = magic == MAGIC;
+        let v5 = magic == MAGIC;
+        let v4 = v5 || magic == MAGIC_V4;
         let v3 = v4 || magic == MAGIC_V3;
         if !v3 && magic != MAGIC_V2 { return Err(StoreError::Corrupt); }
         let n = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
@@ -164,9 +200,21 @@ impl Store {
                     peer_old = Some((o, a));
                 }
             }
-            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host, next_transport, peer_old });
+            let mut saved = Vec::new();
+            if v5 {
+                let n = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
+                if n > MAX_SAVED { return Err(StoreError::Corrupt); }
+                for _ in 0..n {
+                    let flags = r.take(1)?[0];
+                    let len = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
+                    if flags > 1 || len == 0 || len > MAX_SAVED_LEN { return Err(StoreError::Corrupt); }
+                    let text = std::str::from_utf8(r.take(len)?).map_err(|_| StoreError::Corrupt)?;
+                    saved.push(SavedMsg { mine: flags == 1, text: Zeroizing::new(text.to_string()) });
+                }
+            }
+            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host, next_transport, peer_old, saved });
         }
-        if !r.0.is_empty() { return Err(StoreError::Corrupt); }
+        if !r.0.is_empty() || s.saved_bytes() > MAX_SAVED_TOTAL { return Err(StoreError::Corrupt); }
         Ok(s)
     }
 }
@@ -203,7 +251,7 @@ mod tests {
         let i = s2.add_contact("carol").unwrap();
         s2.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
         let mut old = s2.encode().to_vec(); old[..4].copy_from_slice(b"SBS2");
-        old.pop(); // the SBS4 'flags2' byte (no rotation state) did not exist in SBS2/SBS3
+        old.truncate(old.len() - 3); // the SBS4 'flags2' byte and the SBS5 saved-message count did not exist in SBS2/SBS3
         // SBS2 had flags with bit4 clear; our SBS3 encode set it (can_host = true): clear it as the old writer would have
         let flags_at = 4 + 2 + 8 + 1 + "carol".len() + SECRET_LEN;
         old[flags_at] &= !0b1_0000;
@@ -242,6 +290,43 @@ mod tests {
         let mut e = Store::new(); e.add_contact("bob").unwrap();
         e.contacts[0].peer_old = Some(([1; 32], [2; 32]));
         assert!(Store::decode(&e.encode()).is_err());
+    }
+
+    #[test]
+    fn saved_messages_roundtrip_respect_the_caps_and_old_vaults_still_load() {
+        let mut s = Store::new();
+        let a = s.add_contact("alice").unwrap();
+        let b = s.add_contact("bob").unwrap();
+        s.save_message(a, false, "hello \u{1F600}").unwrap();
+        s.save_message(a, true, "reply").unwrap();
+        let d = Store::decode(&s.encode()).unwrap();
+        assert_eq!(d.contacts[a].saved.len(), 2);
+        assert!(!d.contacts[a].saved[0].mine && &*d.contacts[a].saved[0].text == "hello \u{1F600}" && d.contacts[a].saved[1].mine);
+        assert!(d.contacts[b].saved.is_empty(), "saved messages belong to one contact only");
+        // an SBS4 vault (no saved messages) loads with an empty list
+        let mut s4 = Store::new(); s4.add_contact("carol").unwrap();
+        let mut old = s4.encode().to_vec(); old[..4].copy_from_slice(b"SBS4"); old.truncate(old.len() - 2);
+        assert!(Store::decode(&old).unwrap().contacts[0].saved.is_empty());
+        // caps: per contact and in total, never a silent drop
+        let mut f = Store::new(); let i = f.add_contact("dave").unwrap();
+        for _ in 0..MAX_SAVED { f.save_message(i, true, "x").unwrap(); }
+        assert!(matches!(f.save_message(i, true, "x"), Err(StoreError::SavedFull)));
+        let mut g = Store::new(); let j = g.add_contact("erin").unwrap(); let k = g.add_contact("frank").unwrap();
+        let big = "y".repeat(32 * 1024);
+        for n in 0..(MAX_SAVED_TOTAL / big.len()) { g.save_message(if n % 2 == 0 { j } else { k }, false, &big).unwrap(); }
+        assert!(matches!(g.save_message(j, false, "z"), Err(StoreError::SavedFull)), "total byte cap");
+        assert!(matches!(g.save_message(j, false, ""), Err(StoreError::Corrupt)) && matches!(g.save_message(j, false, &"q".repeat(32 * 1024 + 1)), Err(StoreError::Corrupt)));
+        // hostile blob: bad flag, zero length, invalid UTF-8, too many, truncated
+        let mut one = Store::new(); let o = one.add_contact("gina").unwrap(); one.save_message(o, true, "ab").unwrap();
+        let enc = one.encode().to_vec();
+        let at = enc.len() - 5;                                         // flags(1) len(2) "ab"(2)
+        let mutate = |f: &dyn Fn(&mut Vec<u8>)| { let mut t = enc.clone(); f(&mut t); Store::decode(&t) };
+        assert!(mutate(&|t| t[at] = 2).is_err(), "unknown flag bits");
+        assert!(mutate(&|t| { t[at + 1] = 0; t[at + 2] = 0; }).is_err(), "zero length");
+        assert!(mutate(&|t| t[at + 2] = 3).is_err(), "length larger than the data left");
+        assert!(mutate(&|t| t[at + 2] = 1).is_err(), "length shorter: trailing bytes");
+        let mut t = enc.clone(); let n = t.len(); t[n - 2] = 0xff; t[n - 1] = 0xfe; assert!(Store::decode(&t).is_err(), "invalid UTF-8");
+        for cut in 0..enc.len() { assert!(Store::decode(&enc[..cut]).is_err(), "truncated at {cut}"); }
     }
 
     #[test]

@@ -87,10 +87,12 @@ enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
 
 /// One line of conversation. RAM only, wiped when dropped.
-pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool }
+pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool, /// the user saved this message into the vault
+    pub saved: bool }
 /// A contact may rotate its keys (and so make us re-publish our service) at most this often.
 const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
+const NO_CONTACT: &str = "No contact selected. Press n to add one.";
 /// Upper bound of the history scroll offset (the UI clamps to what really exists).
 const SCROLL_CAP: usize = 100_000;
 
@@ -107,7 +109,8 @@ pub enum Prompt {
 
 /// What the right-hand pane shows (the contact list sidebar is always there).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pane { Details, Chat }
+pub enum Pane { Details, Chat, /// the messages the user saved for the selected contact
+    Saved }
 
 /// Vim-style input: in `Normal` every key is a command, in `Insert` (chat only) keys are TEXT and nothing else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +192,11 @@ pub struct App {
     pub locked: bool,
     /// Lines scrolled up from the newest message (the UI clamps what it can show).
     pub scroll: usize,
+    /// Message cursor (`m` in a chat): index counted from the NEWEST message (0 = newest). While set, `y`/Enter saves that message.
+    pub select: Option<usize>,
+    /// Cursor in the saved-messages view and the armed state of its two-press delete.
+    pub saved_sel: usize,
+    del_armed: bool,
     /// Largest useful `scroll`, reported by the last frame (it knows the wrapped width); None before the first frame.
     pub max_scroll: std::cell::Cell<Option<usize>>,
     /// `q` pressed once with something that would be lost: a second `q` quits.
@@ -225,7 +233,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -271,6 +279,8 @@ impl App {
             _ => None,
         }
     }
+    /// The messages the user saved for the selected contact.
+    pub fn saved_msgs(&self) -> &[nerd_chat_store::SavedMsg] { self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map_or(&[], |c| c.saved.as_slice()) }
     pub fn chat_lines(&self) -> &[ChatLine] { self.chat_id().and_then(|id| self.chats.get(&id)).map_or(&[], |v| v.as_slice()) }
     pub fn compose_text(&self) -> &str { self.compose.as_str() }
     pub fn online_label(&self) -> String {
@@ -316,6 +326,9 @@ impl App {
         self.mode = Mode::Normal;
         self.locked = false;
         self.scroll = 0;
+        self.select = None;
+        self.saved_sel = 0;
+        self.del_armed = false;
         self.quit_armed = false;
         self.compose.clear();
         self.code_buf.clear();
@@ -529,12 +542,14 @@ impl App {
     }
 
     fn key_normal(&mut self, k: Key) -> Action {
-        let chatting = self.pane == Pane::Chat;
         if k != Key::Char('q') { self.quit_armed = false; }
+        if self.pane == Pane::Saved { return self.key_saved(k); }
+        if self.select.is_some() { self.key_select(k); return Action::None; }
+        let chatting = self.pane == Pane::Chat;
         match k {
             // Esc ladder: (Insert -> Normal is in key_insert) chat -> details -> privacy lock
             Key::Esc => {
-                if chatting { self.pane = Pane::Details; self.compose.clear(); self.scroll = 0; }
+                if chatting { self.pane = Pane::Details; self.compose.clear(); self.scroll = 0; self.select = None; }
                 else { self.locked = true; }
             }
             Key::Char('q') => return self.quit_request(),
@@ -553,6 +568,8 @@ impl App {
             // contact / global commands: work in the details view AND while reading a chat
             Key::Char('?') => self.screen = Screen::Help,
             Key::Char('K') => self.start_rotation(),
+            Key::Char('m') => if chatting { if self.chat_lines().is_empty() { self.err("No messages to select yet.") } else { self.select = Some(0); self.ok("Message cursor: j/k choose a message, y or Enter saves it into the vault, Esc cancels.") } },
+            Key::Char('H') => self.open_saved(),
             Key::Char('P') => if self.pending_pair.is_some() { self.open_prompt(Prompt::InPerson, "") } else { self.err("No finished pairing is waiting for an answer.") },
             Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } else { self.alerts_dropped = 0; } }
             Key::Char('n') => self.open_prompt(Prompt::NewContact, ""),
@@ -597,6 +614,71 @@ impl App {
         v
     }
 
+    /// Message cursor (`m`): j/k move between messages, `y`/Enter saves the chosen one, Esc/`m` leaves. Every other key is ignored.
+    fn key_select(&mut self, k: Key) {
+        let n = self.chat_lines().len();
+        let Some(i) = self.select else { return };
+        match k {
+            Key::Esc | Key::Char('m') => { self.select = None; self.ok("Cancelled."); }
+            Key::Up | Key::Char('k') => self.select = Some((i + 1).min(n.saturating_sub(1))),
+            Key::Down | Key::Char('j') => self.select = Some(i.saturating_sub(1)),
+            Key::Home | Key::Char('g') => self.select = Some(n.saturating_sub(1)),
+            Key::End | Key::Char('G') => self.select = Some(0),
+            Key::Char('y') | Key::Enter => self.save_selected(i),
+            _ => {}
+        }
+    }
+
+    /// Save ONE message the user chose, by hand: the only way anything of a conversation ever reaches the disk.
+    fn save_selected(&mut self, from_newest: usize) {
+        let Some(id) = self.chat_id() else { return };
+        if self.cfg.path.is_none() { return self.err("RAM-only mode: nothing is written to disk, so nothing can be saved."); }
+        let Some(pos) = self.chats.get(&id).and_then(|l| l.len().checked_sub(1 + from_newest)) else { return };
+        let (mine, text, already) = { let l = &self.chats[&id][pos]; (l.mine, l.text.clone(), l.saved) };
+        if already { return self.err("This message is already saved."); }
+        let sel = self.sel;
+        if let Err(e) = self.vf().store.save_message(sel, mine, &text) { return self.err(format!("{e}")); }
+        if !self.save() { self.vf().store.contacts[sel].saved.pop(); return; } // memory and vault stay in step
+        if let Some(l) = self.chats.get_mut(&id).and_then(|l| l.get_mut(pos)) { l.saved = true; }
+        self.select = None;
+        self.ok("Saved into the vault (encrypted with it, no timestamp). H lists saved messages. Whoever gets your vault AND password can read them.");
+    }
+
+    fn open_saved(&mut self) {
+        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)) else { return self.err(NO_CONTACT) };
+        if c.saved.is_empty() { return self.ok("No saved messages for this contact. In a chat: m selects a message, y saves it."); }
+        self.pane = Pane::Saved; self.mode = Mode::Normal; self.saved_sel = c.saved.len() - 1; self.del_armed = false; self.compose.clear(); self.select = None;
+    }
+
+    /// The saved-messages view: j/k move, `d` twice deletes the chosen one, Esc goes back to the details.
+    fn key_saved(&mut self, k: Key) -> Action {
+        let n = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map_or(0, |c| c.saved.len());
+        let armed = std::mem::take(&mut self.del_armed);
+        match k {
+            Key::Esc => self.pane = Pane::Details,
+            Key::Up | Key::Char('k') => self.saved_sel = self.saved_sel.saturating_sub(1),
+            Key::Down | Key::Char('j') => self.saved_sel = (self.saved_sel + 1).min(n.saturating_sub(1)),
+            Key::Home | Key::Char('g') => self.saved_sel = 0,
+            Key::End | Key::Char('G') => self.saved_sel = n.saturating_sub(1),
+            Key::Char('d') if armed => {
+                let (sel, k) = (self.sel, self.saved_sel);
+                let removed = self.vf().store.contacts[sel].saved.get(k).map(|m| (m.mine, m.text.clone()));
+                self.vf().store.delete_saved(sel, k);
+                if !self.save() {
+                    if let Some((mine, text)) = removed { self.vf().store.contacts[sel].saved.insert(k, nerd_chat_store::SavedMsg { mine, text }); }
+                    return Action::None;
+                }
+                self.saved_sel = self.saved_sel.min(n.saturating_sub(2));
+                self.ok("Deleted from the vault.");
+                if n <= 1 { self.pane = Pane::Details; }
+            }
+            Key::Char('d') => { if n > 0 { self.del_armed = true; self.ok("Press d again to delete this saved message from the vault."); } }
+            Key::Char('q') => { self.quit_armed = false; return self.quit_request(); }
+            _ => {}
+        }
+        Action::None
+    }
+
     /// `q`: quit (RAM is wiped on exit). If something may be lost, the SECOND `q` quits.
     fn quit_request(&mut self) -> Action {
         let risk = self.at_risk();
@@ -618,6 +700,7 @@ impl App {
         let pos = ids.iter().position(|&i| i == self.sel).unwrap_or(0);
         let next = if forward { (pos + 1) % ids.len() } else { (pos + ids.len() - 1) % ids.len() };
         self.sel = ids[next];
+        self.select = None;
         self.compose.clear();
         self.scroll = 0;
         self.max_scroll.set(None);
@@ -1165,6 +1248,7 @@ impl App {
         if c.peer.is_none() { return self.err("No peer key yet: import their file (I) or pair (l / c) first."); }
         let id = c.id;
         self.pane = Pane::Chat;
+        self.select = None;
         self.mode = if typing { Mode::Insert } else { Mode::Normal };
         self.unread.remove(&id);
         self.compose.clear();
@@ -1182,7 +1266,7 @@ impl App {
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
         if let Some(e) = &self.engine { e.send(id, text); }
-        self.push_line(id, ChatLine { mine: true, text: shown, queued });
+        self.push_line(id, ChatLine { mine: true, text: shown, queued, saved: false });
         self.scroll = 0; // sending jumps to the newest line
         if queued { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
     }
@@ -1250,7 +1334,7 @@ impl App {
                 Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::Message { id, text } => {
-                    self.push_line(id, ChatLine { mine: false, text, queued: false });
+                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false });
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
                 // the queue was handed to the live connection: those lines are no longer "(queued)" (older ones were dropped with a notice)
@@ -2188,8 +2272,8 @@ mod tests {
         let _ = id;
         a.pane = Pane::Chat;
         let msg: String = "漢".repeat(60);
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false });
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false });
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 30)).unwrap();
         term.draw(|f| crate::ui::draw(f, &a)).unwrap();
         let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
@@ -2320,7 +2404,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false }); }
+        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false }); }
         a.handle(Key::Enter);
         let s0 = screen_text(&a, 110, 24);
         assert!(s0.contains("line-59") && !s0.contains("line-00"), "starts at the newest line");
@@ -2383,7 +2467,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bobsecret");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false });
         a.unread.insert(id, 4);
         a.record_alert(Some(id), "something bad happened with bobsecret");
         a.ok("Paired: Safety number 11111 22222 with bobsecret");
@@ -2474,13 +2558,125 @@ mod tests {
         assert!(a.at_risk().is_empty(), "nothing is at risk any more");
     }
 
+    // ---------- manual saving of chosen messages (nothing is ever saved automatically) ----------
+
+    fn chat_with_lines(d: &std::path::Path, n: usize) -> App {
+        let mut a = create_app(d, "v"); add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false }); }
+        a.handle(Key::Enter);
+        a
+    }
+
+    #[test]
+    fn nothing_is_saved_unless_the_user_selects_a_message_and_confirms() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), 5);
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false });
+        for k in [Key::Char('j'), Key::Char('k'), Key::Tab, Key::PageUp, Key::Char('G')] { a.handle(k); }
+        assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "receiving, reading, scrolling and sending never save anything");
+        // the message cursor: m, move to the 2nd newest, y
+        a.handle(Key::Char('m')); assert_eq!(a.select, Some(0));
+        a.handle(Key::Char('k')); assert_eq!(a.select, Some(1));
+        let shown = screen_text(&a, 110, 24);
+        assert!(shown.contains("choose a message") && shown.contains("SELECT"), "{shown}");
+        a.handle(Key::Esc); assert!(a.select.is_none() && a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "Esc saves nothing");
+        a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Char('y'));
+        let c = &a.vf.as_ref().unwrap().store.contacts[0];
+        assert_eq!(c.saved.len(), 1);
+        assert_eq!((c.saved[0].text.as_str(), c.saved[0].mine), ("message-4", true), "the SECOND newest message (index 4 of 0..5, even = mine)");
+        assert!(a.select.is_none() && a.chat_lines().iter().filter(|l| l.saved).count() == 1);
+        assert!(screen_text(&a, 110, 24).contains("me★>"), "a saved message is marked");
+        // saving it again is refused, nothing doubles
+        a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("already saved") && a.vf.as_ref().unwrap().store.contacts[0].saved.len() == 1, "{}", a.status);
+        // it really reached the vault FILE: reopen it
+        drop(a);
+        let mut b = App::new(cfg(Some(d.path().join("v"))));
+        type_str(&mut b, "correct horse battery"); b.handle(Key::Enter);
+        assert_eq!(&*b.vf.as_ref().unwrap().store.contacts[0].saved[0].text, "message-4");
+        assert!(b.chat_lines().is_empty(), "the conversation itself was never stored");
+    }
+
+    #[test]
+    fn the_message_cursor_ignores_every_other_key_and_insert_mode_never_starts_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), 3);
+        a.handle(Key::Char('i')); type_str(&mut a, "m"); assert_eq!((a.select, a.compose_text()), (None, "m"), "an `m` typed in insert mode is just text");
+        a.handle(Key::Esc);
+        a.compose.clear();
+        a.handle(Key::Char('m'));
+        for c in "qfatsvdohKzPnIlcxe?H".chars() { assert_eq!(a.handle(Key::Char(c)), Action::None, "{c}"); }
+        assert!(a.select.is_some() && a.screen == Screen::Main && a.online == Online::Offline && a.contacts_len() == 1, "no command ran while the cursor was active");
+        a.handle(Key::Esc); assert!(a.select.is_none() && a.pane == Pane::Chat, "Esc leaves the cursor, not the chat");
+        a.handle(Key::Char('m')); a.handle(Key::Esc); a.handle(Key::Esc);
+        assert_eq!(a.pane, Pane::Details, "the Esc ladder is unchanged: cursor -> chat -> details");
+        assert_eq!(a.handle(Key::F12), Action::Panic);
+    }
+
+    #[test]
+    fn ram_only_mode_cannot_save_and_an_empty_chat_has_nothing_to_select() {
+        let mut a = App::new(cfg(None));
+        a.handle(Key::Enter);                                         // RAM-only: no password
+        add_peer(&mut a, "bob");
+        a.handle(Key::Enter); a.handle(Key::Char('m')); assert!(a.error && a.select.is_none(), "{}", a.status);
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false });
+        a.handle(Key::Char('m')); a.handle(Key::Char('y'));
+        assert!(a.error && a.status.contains("RAM-only") && a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "{}", a.status);
+    }
+
+    #[test]
+    fn the_saved_view_lists_deletes_with_two_presses_and_goes_back() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), 4);
+        for i in 0..3 { a.handle(Key::Char('m')); for _ in 0..i { a.handle(Key::Char('k')); } a.handle(Key::Char('y')); }   // the newest, the 2nd, the 3rd
+        let n = a.vf.as_ref().unwrap().store.contacts[0].saved.len();
+        assert_eq!(n, 3);
+        a.handle(Key::Esc); assert_eq!(a.pane, Pane::Details);
+        assert!(screen_text(&a, 110, 24).contains(&format!("Saved messages: {n}")), "the details show how many are saved");
+        a.handle(Key::Char('H')); assert_eq!(a.pane, Pane::Saved);
+        let view = screen_text(&a, 110, 24);
+        assert!(view.contains("Saved messages of bob") && view.contains("message-"), "{view}");
+        a.handle(Key::Char('d')); assert!(a.status.contains("d again") && a.vf.as_ref().unwrap().store.contacts[0].saved.len() == n, "the first d only arms");
+        a.handle(Key::Char('j')); a.handle(Key::Char('d')); assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), n, "any other key disarms");
+        a.handle(Key::Char('d')); a.handle(Key::Char('d'));
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), n - 1);
+        // typed commands do not run in the saved view
+        for c in "fntvoh".chars() { a.handle(Key::Char(c)); }
+        assert!(a.screen == Screen::Main && a.online == Online::Offline && !a.locked);
+        while a.pane == Pane::Saved { a.handle(Key::Esc); }
+        assert_eq!(a.handle(Key::Esc), Action::None);                 // details -> privacy screen as before
+        assert!(a.locked);
+    }
+
+    #[test]
+    fn saved_messages_are_wiped_with_the_vault_on_panic_and_vanish_with_the_contact() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = chat_with_lines(d.path(), 2);
+        a.handle(Key::Char('m')); a.handle(Key::Char('y'));
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), 1);
+        a.handle(Key::F12);
+        assert!(a.vf.is_none() && a.saved_msgs().is_empty() && a.select.is_none() && a.saved_sel == 0);
+        // deleting the contact removes its saved messages from the vault with it
+        let mut c = App::new(cfg(Some(d.path().join("v"))));
+        type_str(&mut c, "correct horse battery"); c.handle(Key::Enter);
+        assert_eq!(c.vf.as_ref().unwrap().store.contacts[0].saved.len(), 1, "they survived in the vault file");
+        c.handle(Key::Char('d')); type_str(&mut c, "yes"); c.handle(Key::Enter);
+        assert_eq!(c.contacts_len(), 0);
+        let mut e = App::new(cfg(Some(d.path().join("v"))));
+        type_str(&mut e, "correct horse battery"); e.handle(Key::Enter);
+        assert_eq!(e.contacts_len(), 0, "and are gone from the file after the contact was deleted");
+    }
+
     #[test]
     fn quitting_asks_twice_only_when_something_would_be_lost() {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "nothing pending: quits at once");
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false });
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         assert!(a.error && a.status.contains("q again") && a.status.contains("1 undelivered"), "{}", a.status);
         a.handle(Key::Char('j'));                                    // any other key disarms
