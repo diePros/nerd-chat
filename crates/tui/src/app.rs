@@ -128,7 +128,8 @@ pub enum Screen {
     Wiped,
 }
 
-enum PairMsg { Done { contact_id: [u8; 8], result: Result<(ImportedContact, String), ExchangeError> } }
+/// What a pairing worker reports: (contact id, the paired contact and its safety number, or why it failed).
+type PairMsg = ([u8; 8], Result<(ImportedContact, String), ExchangeError>);
 
 /// Handle on a running pairing worker so it can be cancelled (user `x`, or panic).
 struct PairCtl { cancel: Arc<AtomicBool>, stream: Arc<Mutex<Option<TcpStream>>>, handle: JoinHandle<()> }
@@ -248,7 +249,7 @@ impl App {
     /// (name, trust, connected) of the open chat.
     pub fn chat_header(&self) -> Option<(&str, Trust, bool)> {
         let id = self.chat_id()?;
-        let c = self.vf.as_ref()?.store.contacts.iter().find(|c| c.id == id)?;
+        let c = self.contact(id)?;
         Some((c.name.as_str(), c.trust, self.linked.contains(&id)))
     }
     /// The open conversation: the selected contact while the right pane shows the chat (one source of truth: `sel`).
@@ -653,7 +654,7 @@ impl App {
             if !accept && self.inbox.remove(&id).is_some() { return self.ok("Received file discarded (wiped from RAM)."); }
             return self.err("No file offer from this contact.");
         }
-        let name = self.vf.as_ref().and_then(|v| v.store.contacts.iter().find(|c| c.id == id)).map(|c| c.name.clone()).unwrap_or_default();
+        let name = self.contact(id).map(|c| c.name.clone()).unwrap_or_default();
         let (xid, bucket) = self.offers[&id];
         if accept {
             let held: usize = self.inbox.values().map(|r| r.data.len()).sum::<usize>() + self.accepted.values().map(|b| *b as usize).sum::<usize>();
@@ -1018,30 +1019,46 @@ impl App {
         (ContactIdentity::from_secret_bytes(&c.identity.secret_bytes()).expect("valid"), c.id)
     }
 
-    fn start_listen(&mut self, addr: String) {
-        let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
-        if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let (offer, code) = match { let sel = self.sel; let adv = self.advertised(sel); self.pair_adv = Some(adv); PairingOffer::generate_in(self.lockout.clone()).map(|(o, c)| (o.with_can_host(adv), c)) } { Ok(x) => x, Err(e) => { self.err(format!("{e}")); return } };
-        let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
-        let bound = listener.local_addr().expect("bound");
+    /// Run one pairing job on a worker thread. The job gets the cancel flag, the slot where it must publish its socket (so `x`/panic can cut
+    /// a blocked read) and a private copy of the contact's identity; its outcome arrives through `pair_rx`.
+    fn spawn_pair<F>(&mut self, info: Zeroizing<String>, job: F)
+    where F: FnOnce(&AtomicBool, &Mutex<Option<TcpStream>>, &ContactIdentity) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> + Send + 'static {
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
-        let expires = offer.expires_in();
         let cancel = Arc::new(AtomicBool::new(false));
         let slot: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
         let (c2, s2) = (cancel.clone(), slot.clone());
         let handle = thread::spawn(move || {
+            let result = job(&c2, &s2, &ident).map(|p| (p.contact, p.safety_number));
+            let _ = tx.send((id, result));
+        });
+        self.pair_rx = Some(rx);
+        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
+        self.pair_info = Some(info);
+    }
+
+    fn start_listen(&mut self, addr: String) {
+        let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
+        if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
+        let adv = self.advertised(self.sel);
+        self.pair_adv = Some(adv);
+        let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok((o, c)) => (o.with_can_host(adv), c), Err(e) => { self.err(format!("{e}")); return } };
+        let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
+        let bound = listener.local_addr().expect("bound");
+        let expires = offer.expires_in();
+        let info = Zeroizing::new(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt; x = cancel). Tell the other person the address and code IN PERSON.", &*code, expires.as_secs() / 60));
+        self.spawn_pair(info, move |cancel, slot, ident| {
             listener.set_nonblocking(true).ok();
             let deadline = Instant::now() + expires;
-            let result = loop {
-                if c2.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
+            loop {
+                if cancel.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
                 match listener.accept() {
                     // ONE connection only: the listener is dropped right after, success or failure.
                     Ok((mut s, _)) => {
                         s.set_nonblocking(false).ok();
-                        *s2.lock().unwrap() = s.try_clone().ok();
-                        if c2.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
-                        break pair_result(offer.accept(&mut s, &ident), &ident);
+                        *slot.lock().unwrap() = s.try_clone().ok();
+                        if cancel.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
+                        break offer.accept(&mut s, ident);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline { break Err(ExchangeError::Expired); }
@@ -1049,12 +1066,8 @@ impl App {
                     }
                     Err(_) => break Err(ExchangeError::Io),
                 }
-            };
-            let _ = tx.send(PairMsg::Done { contact_id: id, result });
+            }
         });
-        self.pair_rx = Some(rx);
-        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
-        self.pair_info = Some(Zeroizing::new(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt; x = cancel). Tell the other person the address and code IN PERSON.", &*code, expires.as_secs() / 60)));
         self.ok("Waiting for the other device...");
     }
 
@@ -1063,25 +1076,18 @@ impl App {
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let join = match parsed.map(|j| { let sel = self.sel; let adv = self.advertised(sel); self.pair_adv = Some(adv); j.with_can_host(adv) }) { Ok(j) => j, Err(e) => { self.err(format!("{e}")); return } };
-        let (ident, id) = self.identity_clone();
-        let (tx, rx) = channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let slot: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
-        let (c2, s2) = (cancel.clone(), slot.clone());
-        let handle = thread::spawn(move || {
-            let result = match TcpStream::connect_timeout(&sock, Duration::from_secs(10)) {
-                Ok(mut s) if !c2.load(Ordering::SeqCst) => {
-                    *s2.lock().unwrap() = s.try_clone().ok();
-                    if c2.load(Ordering::SeqCst) { Err(ExchangeError::Io) } else { pair_result(join.join(&mut s, &ident), &ident) }
+        let adv = self.advertised(self.sel);
+        self.pair_adv = Some(adv);
+        let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
+        self.spawn_pair(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")), move |cancel, slot, ident| {
+            match TcpStream::connect_timeout(&sock, Duration::from_secs(10)) {
+                Ok(mut s) if !cancel.load(Ordering::SeqCst) => {
+                    *slot.lock().unwrap() = s.try_clone().ok();
+                    if cancel.load(Ordering::SeqCst) { Err(ExchangeError::Io) } else { join.join(&mut s, ident) }
                 }
                 _ => Err(ExchangeError::Io),
-            };
-            let _ = tx.send(PairMsg::Done { contact_id: id, result });
+            }
         });
-        self.pair_rx = Some(rx);
-        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
-        self.pair_info = Some(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")));
         self.ok("Pairing...");
     }
 
@@ -1203,7 +1209,7 @@ impl App {
     /// Name the contact; identical repeats only raise a counter; an unacknowledged alert is never evicted. Returns the shown text.
     fn record_alert(&mut self, id: Option<[u8; 8]>, text: &str) -> String {
         let mut t: String = text.chars().take(300).collect();
-        let who = id.and_then(|i| self.vf.as_ref().and_then(|v| v.store.contacts.iter().find(|c| c.id == i).map(|c| c.name.clone())));
+        let who = id.and_then(|i| self.contact(i)).map(|c| c.name.clone());
         if let Some(w) = who { t = format!("{w}: {t}"); }
         if let Some(e) = self.alerts.iter_mut().find(|(a, _)| *a == t) { e.1 = e.1.saturating_add(1); }
         else if self.alerts.len() < 5 { self.alerts.push((t.clone(), 1)); }
@@ -1211,7 +1217,8 @@ impl App {
         t
     }
 
-    fn known(&self, id: &[u8; 8]) -> bool { self.vf.as_ref().is_some_and(|v| v.store.contacts.iter().any(|c| c.id == *id)) }
+    fn contact(&self, id: [u8; 8]) -> Option<&nerd_chat_store::Contact> { self.vf.as_ref()?.store.contacts.iter().find(|c| c.id == id) }
+    fn known(&self, id: &[u8; 8]) -> bool { self.contact(*id).is_some() }
 
     fn poll_online(&mut self) {
         if let Some(rx) = self.stop_rx.take() {
@@ -1272,6 +1279,9 @@ impl App {
         }
     }
 
+    /// The worker is done (or gone): forget its handles and the code/address line.
+    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; }
+
     fn cancel_pairing(&mut self) {
         match self.pair_ctl.take() {
             Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.ok("Pairing cancelled."); }
@@ -1308,11 +1318,9 @@ impl App {
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; self.err("Pairing thread died."); }
-            Ok(PairMsg::Done { contact_id, result }) => {
-                self.pair_rx = None;
-                self.pair_ctl = None;
-                self.pair_info = None;
+            Err(TryRecvError::Disconnected) => { self.end_pairing(); self.err("Pairing thread died."); }
+            Ok((contact_id, result)) => {
+                self.end_pairing();
                 match result {
                     Ok((contact, sn)) => {
                         // NEVER open a prompt from here: the user may be typing a message or answering another question and their next
@@ -1350,10 +1358,6 @@ impl App {
             self.ok(format!("Paired: {how}. Safety number {sn}"));
         }
     }
-}
-
-fn pair_result(r: Result<nerd_chat_exchange::pair::Paired, ExchangeError>, _me: &ContactIdentity) -> Result<(ImportedContact, String), ExchangeError> {
-    r.map(|p| (p.contact, p.safety_number))
 }
 
 #[cfg(test)]
