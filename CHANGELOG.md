@@ -4,6 +4,9 @@
 - Delivery confirmation and resend: every text has an id, the contact's app confirms it, unconfirmed texts are resent on every new
   connection and shown once (`docs/DELIVERY.md`). A message written into a dying connection is no longer lost. `(queued)` now means
   "not yet confirmed"; a full outbox (50) refuses the new message instead of dropping an old one.
+- Default vault location: without `--vault`, an existing `~/.local/share/nerd-chat/nerd-chat.vault` ($XDG_DATA_HOME) is used from any
+  directory, else an existing `./nerd-chat.vault`; a new vault is created there only after the user confirms the shown path (Tails gets a
+  warning, directory mode 0700, unsafe directories refused, scripts must pass `--vault`). `--ram` now always wins over `--vault`.
 - Key-rotation notice no longer reads as a failure when the connection is briefly down; docs: `ldd` says "statically linked".
 
 ## 0.1.0 (first public release, unaudited)

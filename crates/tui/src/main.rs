@@ -6,6 +6,7 @@ mod app;
 mod cleaner;
 mod secret;
 mod ui;
+mod vault_path;
 
 use app::{Action, App, Config, Key};
 use ratatui::crossterm::{
@@ -19,7 +20,8 @@ use zeroize::Zeroizing;
 
 fn usage() -> ! {
     eprintln!("usage: nerd-chat [--version] [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
-  --vault PATH         vault file (default ./nerd-chat.vault). Put it on your USB stick.\n\
+  --vault PATH         vault file. Default: ~/.local/share/nerd-chat/nerd-chat.vault ($XDG_DATA_HOME), or an existing ./nerd-chat.vault.\n\
+                       On a USB stick or Tails Persistent Storage pass the path yourself.\n\
   --ram                RAM-only: never write anything to disk\n\
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
   --keyfile PATH       second factor file (>= 32 bytes), keep it on a SEPARATE device\n\
@@ -90,6 +92,27 @@ fn strip_cmd(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
+/// The vault to use when there is no `--vault`: an existing one (see `vault_path`), or a NEW one at the default place after the user
+/// confirmed that place (it is on this computer's disk, and on Tails it would be erased at shutdown).
+fn default_vault() -> PathBuf {
+    use std::io::IsTerminal;
+    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match vault_path::resolve(env("XDG_DATA_HOME").as_deref(), env("HOME").as_deref(), &cwd, &|p| std::fs::symlink_metadata(p).is_ok()) {
+        vault_path::Choice::Existing { path, note } => { if let Some(n) = note { eprintln!("{n}"); } path }
+        vault_path::Choice::Unusable(why) => { eprintln!("{why}"); std::process::exit(2) }
+        vault_path::Choice::New { dir, path } => {
+            let tails = std::fs::read_to_string("/etc/os-release").is_ok_and(|s| vault_path::is_tails(&s));
+            eprintln!("{}", vault_path::confirm_text(&path, tails));
+            if !std::io::stdin().is_terminal() { eprintln!("not interactive: pass --vault PATH to say where the new vault goes"); std::process::exit(2) }
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() { std::process::exit(2) }
+            if let Err(e) = vault_path::prepare_dir(&dir) { eprintln!("{e}"); std::process::exit(2) }
+            path
+        }
+    }
+}
+
 fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "--version" || a == "-V") {
@@ -99,10 +122,7 @@ fn parse_args() -> Config {
     if raw.first().is_some_and(|a| a == "--help" || a == "-h") { usage() }
     if raw.first().is_some_and(|a| a == "--strip") { strip_cmd(&raw[1..]); }
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
-    // before the rename the default file was ./seburity.vault: keep using it instead of silently offering to create a new vault
-    let legacy = !std::path::Path::new("nerd-chat.vault").exists() && std::path::Path::new("seburity.vault").exists();
-    if legacy { eprintln!("note: using the existing ./seburity.vault (the default file name is now nerd-chat.vault)"); }
-    let mut path = Some(PathBuf::from(if legacy { "seburity.vault" } else { "nerd-chat.vault" }));
+    let (mut path, mut ram) = (None, false);
     let (mut counter, mut keyfile, mut keyfile_path, mut profile) = (None, None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
     let mut allow_swap = false;
@@ -111,7 +131,7 @@ fn parse_args() -> Config {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--vault" => path = Some(it.next().unwrap_or_else(|| usage()).into()),
-            "--ram" => path = None,
+            "--ram" => ram = true,
             "--low-mem" => profile = Profile::LowMem,
             "--allow-swap" => allow_swap = true,
             "--no-sandbox" => {} // handled at startup: clean files in-process instead of in the limited helper
@@ -132,6 +152,8 @@ fn parse_args() -> Config {
             _ => usage(),
         }
     }
+    // --ram always wins (it promises that nothing is written); without --vault the default location applies (see vault_path.rs)
+    let path = if ram { None } else { Some(path.unwrap_or_else(default_vault)) };
     let mut cfg = Config::new(path, counter, keyfile, profile);
     cfg.keyfile_path = keyfile_path;
     cfg.tor = tor;

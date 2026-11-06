@@ -17,6 +17,13 @@ ls -la target/x86_64-unknown-linux-musl/release/nerd-chat
 mkdir -p ~/nerd-chat-demo && cd ~/nerd-chat-demo
 ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./alice.vault
 ```
+**Where the vault goes without `--vault`:** an existing `~/.local/share/nerd-chat/nerd-chat.vault` (`$XDG_DATA_HOME` if set to an absolute
+path) is used from any directory; otherwise an existing `./nerd-chat.vault` (or the old `./seburity.vault`) in the current directory, with a
+note; if there is none, the program shows the path it would create, says that it is on this computer's disk, and waits for Enter before
+creating the directory (mode 0700) and vault. It refuses a symlinked, foreign or group/world-writable directory. Without a terminal (a script)
+it refuses and asks for `--vault`. `--ram` always wins over `--vault`. For a vault on a USB stick or on Tails (`~/Persistent`, because the
+home directory there is erased at shutdown; the program warns when it recognises Tails) pass `--vault` yourself.
+
 Type a passphrase of at least 12 characters, Enter, repeat it, Enter (takes ~4 s: that is the memory-hard KDF).
 Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode (keys are text only, nothing typed there can trigger a command).
 - Contacts / details: Up/Down (or `j`/`k`, Tab/Shift+Tab) select, `Enter` opens the chat, `i` opens it and starts typing.

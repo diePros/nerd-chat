@@ -427,3 +427,12 @@ confirm one (dedup window 256, replaced connections, re-add carrying `seen`)? (2
 side channel (ack for unknown ids is a no-op; malformed ones cut the connection; one extra fixed-size cell each)? (3) is anything now
 kept longer in RAM than before (up to 50 x 32 KiB per contact until confirmed, wiped on drop/shutdown)? (4) does the quit guard
 and going offline still account for every unconfirmed line? Status: OPEN until reviewed.
+
+## Default vault location (branch `next`) — self-notes, review PENDING
+`crates/tui/src/vault_path.rs`, `main.rs::default_vault`. Trade-off accepted and visible: the default vault now sits on the computer's disk
+at a predictable path (easier to find in a forensic look than a vault on a USB stick the user chose); the first run says so and waits for
+Enter, and Tails gets an explicit warning (home is erased at shutdown). Checks: the directory is created 0700, an existing one must be a real
+directory (no symlink), owned by us and not group/world-writable (other users could swap the vault or its rollback counter). A relative
+`$XDG_DATA_HOME` or `$HOME` is ignored (XDG rule). The choice never depends on the current directory once a default vault exists; if a
+`./nerd-chat.vault` also exists it is named in a note and ignored. `--ram` now wins over `--vault` (before, `--ram --vault X` silently wrote to X).
+Not done: the purge leaves the (empty) directory; the counter file still defaults to sit beside the vault. Status: OPEN until reviewed.
