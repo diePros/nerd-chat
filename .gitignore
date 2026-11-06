@@ -2,3 +2,6 @@
 *.vault
 .claude/
 *.sbc
+fuzz/target
+fuzz/corpus
+fuzz/artifacts

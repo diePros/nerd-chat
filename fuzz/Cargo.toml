@@ -1,0 +1,40 @@
+[package]
+name = "nerd-chat-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nerd-chat-core = { path = "../crates/core" }
+nerd-chat-store = { path = "../crates/store" }
+nerd-chat-chat = { path = "../crates/chat" }
+nerd-chat-exchange = { path = "../crates/exchange" }
+nerd-chat-strip = { path = "../crates/strip" }
+
+# Not part of the main workspace (nightly toolchain, libFuzzer): run with `cargo +nightly fuzz run <target>` from the repository root.
+[workspace]
+
+[[bin]]
+name = "strip"
+path = "fuzz_targets/strip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "formats"
+path = "fuzz_targets/formats.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false

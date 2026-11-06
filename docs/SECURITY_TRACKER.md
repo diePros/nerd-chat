@@ -364,3 +364,8 @@ Verdict of the reviewer: the refactor preserves behaviour, security and privacy 
 | R21-L3 | default vault path changed (`seburity.vault` -> `nerd-chat.vault`) | FIXED | falls back to an existing `./seburity.vault` with a note; the legacy names are frozen labels |
 | R21-L4/L5 | weakened identity-rotation assertion, stale doc comments | FIXED | assertion restored, comments cleaned |
 | R21-I | `ConnEvent::Ev` outer/inner id are not tied | OPEN (info) | conn.rs always passes the same id |
+
+## Fuzzing (cycle 32)
+| ID | Item | Status | Notes |
+|---|---|---|---|
+| FZ-1 | libFuzzer targets for the cleaner, the bundle/contact-book decoders and the peer frame parsers (`fuzz/`, `docs/FUZZING.md`) | FIXED | the first runs (3.3 M executions of `strip`, ~175 k of `formats`, ~100 k of `frames`) found ONE bug: text consisting only of removable characters "cleaned" to an empty file that the receiver then refused with an integrity alert (now refused by the sender; regression test). OPEN: much longer runs before a release, targets for the vault opener, the Noise handshake and the Tor control-port parser |

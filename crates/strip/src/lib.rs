@@ -441,6 +441,8 @@ fn text(d: &[u8]) -> Result<Cleaned, StripError> {
         if combining { run += 1; if run > nerd_chat_core::text::MAX_COMBINING_RUN { removed += 1; continue; } } else { run = 0; }
         out.push(c);
     }
+    // a file made ONLY of removable characters would be sent as an empty file that the receiver's own cleaning refuses (found by fuzzing)
+    if out.is_empty() { return Err(StripError::Unsupported); }
     // the OUTPUT must not look like a structured document either (a leading invisible character used to hide it)
     if looks_structured(&out) { return Err(StripError::StructuredText); }
     let mut report = vec!["plain text: ONLY invisible/control characters are removed; any document metadata inside the text is NOT understood".to_string()];
@@ -648,6 +650,14 @@ mod tests {
         for _ in 0..100 { j.extend(seg(0xDB, &[3; 1].iter().chain([0x42u8; 64].iter()).copied().collect::<Vec<u8>>())); }
         j.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); j.extend(seg(0xC4, &[0; 17])); j.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0])); j.extend_from_slice(&[0x11, 0xFF, 0xD9]);
         assert!(clean(&j).is_err());
+    }
+
+    #[test]
+    fn text_with_nothing_left_after_cleaning_is_refused_not_sent_as_an_empty_file() {
+        for d in [&b"\x02\x02"[..], "\u{200B}\u{202E}".as_bytes(), b"\x1b[2J".as_slice()].iter().take(2) {
+            assert_eq!(text_clean(d).unwrap_err(), StripError::Unsupported, "{d:?}");
+        }
+        assert!(text_clean(b"a\x02").is_ok());
     }
 
     #[test]
