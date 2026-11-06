@@ -167,7 +167,7 @@ No Critical. Verified OK: only the pinned peer gets a session; no contact can im
 | R6-L7 | A crafted bundle can reuse another contact's onion address and overwrite our client-auth entry for it | FIXED | contacts whose onion key collides with any other contact's (peer or own) are refused |
 | R6-I1 | Stale Up/DialFailed after remove+re-add of the same id attaches an old connection to the new entry | FIXED | per-contact epoch checked on Up/DialFailed |
 | R6-I2 | Spawn-mode unix socket files never unlinked (re-add fails with EADDRINUSE) | FIXED | |
-| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | FIXED (branch `next`, docs/DELIVERY.md) | per-text id + confirmation frame, unconfirmed texts kept in RAM and resent on every new connection, receiver drops repeats by id; still RAM-only (lost on quit/offline, counted by the quit guard). NOT part of the audited v0.1.0 tag; needs an Opus review before it is merged |
+| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | FIXED on branch `next` (docs/DELIVERY.md), reviewed in review 24 (findings below) | per-text id + confirmation, unconfirmed texts kept in RAM and resent on every new connection, receiver drops repeats by id; still RAM-only (lost on quit/offline, both warn). NOT part of the audited v0.1.0 tag |
 
 ## PQ-auth stage notes (before review 7)
 - Wire change: msg2 = ct_e || ct_i || noise2 (2224 bytes); psk2 label v2. Old binaries cannot talk to new ones: restart both sides.
@@ -436,3 +436,19 @@ directory (no symlink), owned by us and not group/world-writable (other users co
 `$XDG_DATA_HOME` or `$HOME` is ignored (XDG rule). The choice never depends on the current directory once a default vault exists; if a
 `./nerd-chat.vault` also exists it is named in a note and ignored. `--ram` now wins over `--vault` (before, `--ram --vault X` silently wrote to X).
 Not done: the purge leaves the (empty) directory; the counter file still defaults to sit beside the vault. Status: OPEN until reviewed.
+
+## Review 24 (Opus, delivery confirmation, commit 9282b40) — integrated on branch `next`
+No critical/high. Nothing was re-reviewed after the fixes yet.
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R24-M1 | a v0.1.0 peer never confirms: after 50 texts every send says "outbox full", every reconnect resends all of them | OPEN | needs a per-connection capability frame (peer without it = old behaviour: written means done) or a protocol version break; decision pending |
+| R24-M2 | the ack was queued when the text entered the UI's event channel: going offline/quitting within ~200 ms confirmed a text the user never saw | FIXED | the UI calls `Engine::confirm` after the line is in its own state; the engine confirms nothing else; test `a_text_the_ui_never_saw_is_not_confirmed_and_arrives_after_the_restart` |
+| R24-M3 | the id was its own cell and the reply was immediate: message vs keepalive recognisable by cell count and reply (worsens C6-timing) | PARTIAL | FIXED: id inside the text frame (cell count of a text unchanged, test). OPEN: the immediate confirmation cell; ack frame already carries up to 64 ids for delayed/batched confirmations; policy decision pending |
+| R24-M4 | going offline marked possibly delivered texts "(NOT SENT)" without warning (conflicting instructions for high-risk users) | FIXED | `o` warns first (second `o` goes); marks say "(NOT CONFIRMED)"; "(NOT SENT)" only for engine refusals |
+| R24-L1 | `Delivered`/`Unsent` mapped to lines by position (out-of-order ack, 500-line trim, refusals without event, invalid re-add dropping carried texts) | FIXED | `Engine::send` returns the id, lines carry it, `Delivered`/`Unsent` name it; every refusal emits `Unsent`; `add()` validates the key material before taking `unacked`/`seen`. RESIDUAL: the 500-line trim can drop an unconfirmed line from view (warnings undercount) |
+| R24-L2 | both sides resending ~1.9 MB at once could deadlock their writers (no per-turn text budget) | OPEN | not reachable from the TUI (2 KiB draft cap); add a per-turn byte budget for texts before the engine API gets other users |
+| R24-I1 | malformed id/ack frames cut the connection, unknown kinds are ignored | ACCEPTED | only the authenticated contact can send them; the format is declared frozen in `proto.rs` |
+| R24-I2 | texts stay in RAM longer (until confirmed); if the engine misses the panic key's 400 ms, `unacked` lives until exit | ACCEPTED | every normal path wipes (verified by the reviewer); the UI holds the same text anyway |
+| R24-I3 | comments and DELIVERY.md out of date | FIXED | |
+| R24-T | test gaps: UI never saw the text, out-of-order/misc mapping, replaced connection | FIXED / PARTIAL | first and third added (the replaced connection by injecting a stale-generation event), mapping covered by real two-app tests; no UI test for an out-of-order ack from a hostile peer |

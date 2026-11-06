@@ -92,7 +92,7 @@ Using a Tor that is already running (Tails/Whonix/system):
 Good to know:
 - Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. A message says `(queued)` until the other
   person's app has confirmed it. Until then it is kept in RAM (max 50) and sent again on every new connection, so a message written into a dying
-  connection or typed while they are away is not lost; it IS lost if you quit or go offline first (see docs/DELIVERY.md).
+  connection or typed while they are away is not lost; it IS lost if you quit or go offline first (both ask first; lines left unconfirmed say `(NOT CONFIRMED)`: they may have arrived; see docs/DELIVERY.md).
 - Who dials: the contact whose signing key is smaller dials, the other one hosts, so normally only one of you publishes an onion service. If the hosting side cannot host (e.g. Tails refusing it) it switches to dialing and the other side starts hosting after about a minute of failed dials; you will see a notice.
 - An unverified contact shows a red warning in the chat header. Verify the safety number first (v).
 - There are no read receipts, typing indicators or timestamps (metadata); the only confirmation is "their app has it" (the `(queued)` mark goes away). A small keepalive cell is sent every 30 s while idle.

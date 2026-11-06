@@ -110,18 +110,17 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileCancelled { id } })).is_ok();
     let mut bad_frames = 0u32;
     let mut rot_frames = 0u32;
-    let mut cur_id: Option<proto::MsgId> = None; // id announced for the text that is being received
     'conn: loop {
         loop {
             match out_rx.try_recv() {
                 Ok(Out::Text { mid, text }) => {
-                    // the id frame goes right before the chunks of its text (the receiver confirms it with an ack)
-                    if !send_body(&mut stream, &mut sess, &me, &proto::encode_msg_id(&mid)) { break 'conn; }
-                    for body in proto::encode_text(&text) { if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; } }
+                    // every chunk carries the id (a short text stays ONE cell); the receiver confirms it once its UI has the text
+                    for body in proto::encode_text_with_id(&text, &mid) { if !send_body(&mut stream, &mut sess, &me, &body) { break 'conn; } }
                     last_tx = Instant::now();
                 }
                 Ok(Out::Ack(mid)) => {
-                    if !send_body(&mut stream, &mut sess, &me, &proto::encode_msg_ack(&mid)) { break 'conn; }
+                    let Some(frame) = proto::encode_msg_acks(&[mid]) else { continue };
+                    if !send_body(&mut stream, &mut sess, &me, &frame) { break 'conn; }
                     last_tx = Instant::now();
                 }
                 Ok(Out::File(f)) => {
@@ -255,13 +254,12 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         if rot_frames > 6 { break; }
                         if ev.send(In::Conn(ConnEvent::Rotate { id, kind: k, keys })).is_err() { break; }
                     }
-                    Some(proto::KIND_MSG_ID) => { let Some(mid) = proto::parse_mid(&m.body) else { break }; cur_id = Some(mid); }
                     Some(proto::KIND_MSG_ACK) => {
-                        let Some(mid) = proto::parse_mid(&m.body) else { break };
-                        if ev.send(In::Conn(ConnEvent::Acked { id, mid })).is_err() { break; }
+                        let Some(mids) = proto::parse_msg_acks(&m.body) else { break };
+                        if ev.send(In::Conn(ConnEvent::Acked { id, mids })).is_err() { break; }
                     }
                     _ => match asm.feed(&m.body) {
-                        Ok(Incoming::Text(text)) => { if ev.send(In::Conn(ConnEvent::Text { id, gen, mid: cur_id.take(), text })).is_err() { break; } }
+                        Ok(Incoming::Text(text, mid)) => { if ev.send(In::Conn(ConnEvent::Text { id, gen, mid, text })).is_err() { break; } }
                         Ok(_) => {}
                         Err(_) => break,
                     },

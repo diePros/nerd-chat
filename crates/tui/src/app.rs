@@ -89,9 +89,12 @@ enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
 
 /// One line of conversation. RAM only, wiped when dropped.
-pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool, /// the user saved this message into the vault
-    pub saved: bool, /// the message was queued but is GONE (we went offline or the engine's queue overflowed): it will never be sent
-    pub unsent: bool }
+pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, /// sent, not yet CONFIRMED by the contact's app (the engine resends it on every new connection)
+    pub queued: bool, /// the user saved this message into the vault
+    pub saved: bool, /// the engine REFUSED the text (outbox full, empty, too long): it was not sent and never will be
+    pub unsent: bool, /// we went offline while it was unconfirmed: it may or may not have arrived (the engine's copy is gone)
+    pub unconfirmed: bool, /// the id of one of OUR texts, so that `Delivered`/`Unsent` find exactly this line (None for received lines)
+    pub mid: Option<[u8; 8]> }
 /// A contact may rotate its keys (and so make us re-publish our service) at most this often.
 const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
@@ -211,7 +214,7 @@ pub struct App {
     /// Largest useful `scroll`, reported by the last frame (it knows the wrapped width); None before the first frame.
     pub max_scroll: std::cell::Cell<Option<usize>>,
     /// `q` pressed once with something that would be lost: a second `q` quits.
-    quit_armed: bool,
+    quit_armed: bool, offline_armed: bool,
     compose: ComposeBuf,
     /// pending incoming file offers (contact id -> (transfer id, size))
     offers: HashMap<[u8; 8], (nerd_chat_chat::file::Xid, u32)>,
@@ -244,7 +247,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -396,7 +399,7 @@ impl App {
         self.select = None;
         self.saved_sel = 0;
         self.del_armed = false;
-        self.quit_armed = false;
+        self.quit_armed = false; self.offline_armed = false;
         self.compose.clear();
         self.code_buf.clear();
         self.prep_rx = None;
@@ -620,6 +623,7 @@ impl App {
 
     fn key_normal(&mut self, k: Key) -> Action {
         if k != Key::Char('q') { self.quit_armed = false; }
+        if k != Key::Char('o') { self.offline_armed = false; }
         if self.pane == Pane::Saved { return self.key_saved(k); }
         if self.select.is_some() { self.key_select(k); return Action::None; }
         let chatting = self.pane == Pane::Chat;
@@ -1268,6 +1272,13 @@ impl App {
             Online::Starting(_) => self.err("Already starting; wait for it to finish."),
             Online::Stopping => self.err("Still shutting down; wait a moment."),
             Online::Online => {
+                // going offline throws away the engine's copies of texts the contact has not confirmed: say so first (second `o` goes)
+                let open: usize = self.chats.values().map(|l| l.iter().filter(|x| x.mine && x.queued).count()).sum();
+                if open > 0 && !self.offline_armed {
+                    self.offline_armed = true;
+                    return self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
+                }
+                self.offline_armed = false;
                 // tear down on a worker so the UI (and the panic key) stay responsive while onion services are removed
                 let (tx, rx) = channel();
                 if let Some(e) = self.engine.take() { thread::spawn(move || { e.shutdown(); let _ = tx.send(()); }); } else { let _ = tx.send(()); }
@@ -1356,9 +1367,9 @@ impl App {
         let linked = self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
-        if let Some(e) = &self.engine { e.send(id, text); }
+        let mid = self.engine.as_ref().map(|e| e.send(id, text));
         // "(queued)" = not yet CONFIRMED by the contact's app (connected or not): the engine resends it on every new connection
-        self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false });
+        self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false, unconfirmed: false, mid });
         self.scroll = 0; // sending jumps to the newest line
         if !linked { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
     }
@@ -1407,7 +1418,7 @@ impl App {
                 Err(TryRecvError::Empty) => self.stop_rx = Some(rx),
                 _ => {
                     self.online = Online::Offline;
-                    for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unsent = true; } // the engine's queue is gone with it
+                    for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unconfirmed = true; } // the engine's copy is gone: they may or may not have arrived
                     self.ok("Offline. Connections closed, onion services and credentials removed.");
                 }
             }
@@ -1428,20 +1439,22 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Delivered { id } | Event::Unsent { id } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Delivered { id, .. } | Event::Unsent { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
                 Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
-                Event::Message { id, text } => {
-                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false, unsent: false });
+                Event::Message { id, mid, text } => {
+                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
+                    // only NOW does the sender hear "received": this line is in our own state
+                    if let (Some(m), Some(e)) = (mid, &self.engine) { e.confirm(id, m); }
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
-                // the contact's app confirmed our OLDEST unconfirmed text (confirmations come in sending order)
-                Event::Delivered { id } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued)) { x.queued = false; },
-                // the engine refused a text (its outbox was full): it was NOT sent
-                Event::Unsent { id } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().rev().find(|x| x.mine && x.queued)) { x.queued = false; x.unsent = true; },
+                // the contact's app confirmed exactly this text (found by its id: order, trimming and refusals cannot mislead us)
+                Event::Delivered { id, mid } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; },
+                // the engine refused exactly this text: it was NOT sent
+                Event::Unsent { id, mid } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; x.unsent = true; },
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
                     let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
@@ -2376,8 +2389,8 @@ mod tests {
         let _ = id;
         a.pane = Pane::Chat;
         let msg: String = "漢".repeat(60);
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false, unsent: false });
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 30)).unwrap();
         term.draw(|f| crate::ui::draw(f, &a)).unwrap();
         let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
@@ -2508,7 +2521,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false, unsent: false }); }
+        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None }); }
         a.handle(Key::Enter);
         let s0 = screen_text(&a, 110, 24);
         assert!(s0.contains("line-59") && !s0.contains("line-00"), "starts at the newest line");
@@ -2571,7 +2584,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bobsecret");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.unread.insert(id, 4);
         a.record_alert(Some(id), "something bad happened with bobsecret");
         a.ok("Paired: Safety number 11111 22222 with bobsecret");
@@ -2645,7 +2658,7 @@ mod tests {
         assert!(a.error && a.status.contains("press P") && !a.pair_ctl.is_some(), "{}", a.status);
     }
 
-    /// A message typed while the contact was away is shown as "(queued)"; once the engine hands it to the new connection the label goes.
+    /// A message typed while the contact was away is shown as "(queued)"; once the contact's app has CONFIRMED it (not merely once it was written) the label goes.
     #[test]
     fn a_queued_line_stops_saying_queued_once_it_was_delivered_to_the_connection() {
         let d = tempfile::tempdir().unwrap();
@@ -2667,7 +2680,7 @@ mod tests {
     fn chat_with_lines(d: &std::path::Path, n: usize) -> App {
         let mut a = create_app(d, "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false, unsent: false }); }
+        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None }); }
         a.handle(Key::Enter);
         a
     }
@@ -2677,7 +2690,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = chat_with_lines(d.path(), 5);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         for k in [Key::Char('j'), Key::Char('k'), Key::Tab, Key::PageUp, Key::Char('G')] { a.handle(k); }
         assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "receiving, reading, scrolling and sending never save anything");
         // the message cursor: m, move to the 2nd newest, y
@@ -2726,7 +2739,7 @@ mod tests {
         add_peer(&mut a, "bob");
         a.handle(Key::Enter); a.handle(Key::Char('m')); assert!(a.error && a.select.is_none(), "{}", a.status);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.handle(Key::Char('m')); a.handle(Key::Char('y'));
         assert!(a.error && a.status.contains("RAM-only") && a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "{}", a.status);
     }
@@ -2856,6 +2869,7 @@ mod tests {
         a.handle(Key::Char('i')); type_str(&mut a, "from a"); a.handle(Key::Enter);            // sending
         b.handle(Key::Char('i')); type_str(&mut b, "from b"); b.handle(Key::Enter);            // receiving + replying
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 2 && x[1].chat_lines().len() == 2));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].at_risk().is_empty()), "bob's app confirmed alice's line");
         a.handle(Key::Esc); a.handle(Key::Char('o'));                                           // going offline
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline));
         assert_eq!(vault_bytes(d.path()), before, "sending, receiving and going offline must not rewrite the vault");
@@ -2871,7 +2885,7 @@ mod tests {
         let mut a = chat_with_lines(d.path(), 5);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Char('k'));           // on message-2
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("brand new".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("brand new".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.handle(Key::Char('y'));
         let c = &a.vf.as_ref().unwrap().store.contacts[0];
         assert_eq!(c.saved.len(), 1);
@@ -2885,7 +2899,7 @@ mod tests {
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         a.handle(Key::Char('m')); a.handle(Key::Char('g'));                                       // the OLDEST line
         assert_eq!(a.select, Some(MAX_CHAT_LINES - 1));
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         assert_eq!(a.select, None, "the chosen message was dropped by the cap: no cursor, nothing saved by accident");
     }
 
@@ -2899,7 +2913,7 @@ mod tests {
         let mut a = open_app(c);
         add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("keep".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("keep".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.handle(Key::Enter);
         std::fs::set_permissions(&cdir, std::fs::Permissions::from_mode(0o500)).unwrap();      // the counter can no longer be written; the vault can
         a.handle(Key::Char('m')); a.handle(Key::Char('y'));
@@ -2939,6 +2953,48 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "the confirmation clears the mark");
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "confirm me"))));
         assert!(a.at_risk().is_empty());
+    }
+
+    /// Going offline throws away the engine's copies of unconfirmed texts: the first `o` warns, the second goes, and the lines say
+    /// "(NOT CONFIRMED)" (they may have arrived), never "(NOT SENT)".
+    #[test]
+    fn going_offline_with_unconfirmed_lines_warns_first_and_then_says_not_confirmed() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Char('i')); type_str(&mut a, "maybe arrived"); a.handle(Key::Enter);
+        a.handle(Key::Esc);
+        a.handle(Key::Char('o'));
+        assert!(a.error && a.status.contains("not confirmed") && a.status.contains("o again"), "{}", a.status);
+        assert_eq!(a.online, Online::Online, "the first o only warns");
+        a.handle(Key::Char('j'));                                    // any other key disarms
+        a.handle(Key::Char('o'));
+        assert_eq!(a.online, Online::Online, "disarmed: warns again instead of going offline");
+        a.handle(Key::Char('o'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline), "the second o goes offline");
+        let l = &a.chat_lines()[0];
+        assert!(!l.queued && l.unconfirmed && !l.unsent);
+        let screen = screen_text(&a, 110, 24);
+        assert!(screen.contains("(NOT CONFIRMED)") && !screen.contains("(NOT SENT)"), "{screen}");
+    }
+
+    /// Several lines are confirmed by THEIR ids, each exactly once.
+    #[test]
+    fn each_line_is_confirmed_by_its_own_id() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        a.handle(Key::Char('i'));
+        for t in ["one", "two", "three"] { type_str(&mut a, t); a.handle(Key::Enter); }
+        let mids: Vec<_> = a.chat_lines().iter().map(|l| l.mid).collect();
+        assert!(mids.iter().all(Option::is_some) && mids[0] != mids[1] && mids[1] != mids[2], "every sent line has its own id");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().iter().all(|l| !l.queued)), "all three confirmed");
+        assert!(a.chat_lines().iter().all(|l| !l.unsent && !l.unconfirmed));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().flatten().count() == 3));
+        let got: Vec<String> = b.chats.values().flatten().map(|l| l.text.to_string()).collect();
+        assert_eq!(got, ["one", "two", "three"], "in order, each once");
     }
 
     /// A full outbox refuses BEFORE the draft is taken: nothing typed is lost.
@@ -3016,7 +3072,7 @@ mod tests {
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "nothing pending: quits at once");
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false, unsent: false, unconfirmed: false, mid: None });
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         assert!(a.error && a.status.contains("q again") && a.status.contains("1 unconfirmed"), "{}", a.status);
         a.handle(Key::Char('j'));                                    // any other key disarms

@@ -252,7 +252,7 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
     let n = app.chat_lines().len();
     let mut msgs: Vec<Vec<Line>> = app.chat_lines().iter().enumerate().map(|(i, l)| {
         let who = if l.mine { "me" } else { "them" };
-        let tag = format!("{who}{}{}> ", if l.saved { "★" } else { "" }, if l.queued { " (queued)" } else if l.unsent { " (NOT SENT)" } else { "" });
+        let tag = format!("{who}{}{}> ", if l.saved { "★" } else { "" }, if l.queued { " (queued)" } else if l.unsent { " (NOT SENT)" } else if l.unconfirmed { " (NOT CONFIRMED)" } else { "" });
         wrap_msg(&l.text, &tag, Style::default().fg(if l.mine { Color::Cyan } else { Color::Green }), w, app.select == Some(n - 1 - i))
     }).collect();
     let total: usize = msgs.iter().map(Vec::len).sum();
