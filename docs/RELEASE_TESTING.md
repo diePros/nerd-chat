@@ -10,7 +10,7 @@ Binary under test: the file `nerd-chat-<version>-x86_64-linux-musl` from the Git
 1. Put `nerd-chat-0.1.0-x86_64-linux-musl`, `SHA256SUMS` (and `SHA256SUMS.asc` if present) in a new empty folder.
 2. `sha256sum -c SHA256SUMS --ignore-missing` -> `OK`.   (If a signature exists: `gpg --verify SHA256SUMS.asc SHA256SUMS`.)
 3. `chmod +x nerd-chat-0.1.0-x86_64-linux-musl && ./nerd-chat-0.1.0-x86_64-linux-musl --version` -> `nerd-chat 0.1.0`.
-4. `file nerd-chat-0.1.0-x86_64-linux-musl` -> contains `static-pie linked` (or `statically linked`); `ldd` -> `not a dynamic executable`.
+4. `file nerd-chat-0.1.0-x86_64-linux-musl` -> contains `static-pie linked` (or `statically linked`); `ldd` -> `statically linked` (or `not a dynamic executable`).
 5. Reproducibility (the strongest check, 10 minutes, any second machine or WSL): `git clone https://github.com/diePros/nerd-chat && cd nerd-chat && git checkout v0.1.0 && scripts/release.sh`
    (needs a clean tree and rustup; the pinned toolchain installs itself). The printed SHA-256 of `nerd-chat-0.1.0-x86_64-linux-musl` must
    equal the one in the release. Different? Send me both hashes and `rustc -V` of each machine.

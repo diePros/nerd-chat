@@ -99,7 +99,7 @@ Good to know:
 rustup target add x86_64-unknown-linux-musl
 cd ~/Documents/Code/nerd-chat
 cargo build --release --target x86_64-unknown-linux-musl -p nerd-chat-tui
-ldd target/x86_64-unknown-linux-musl/release/nerd-chat     # want: "not a dynamic executable"
+ldd target/x86_64-unknown-linux-musl/release/nerd-chat     # want: "statically linked" (or "not a dynamic executable")
 ```
 
 ## 7. On a live USB system (checklist)

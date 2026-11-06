@@ -112,7 +112,7 @@ Honest limit: stripping cannot remove information that is in the content itself 
 
 ## Verification
 - `cargo test` + `cargo fuzz` on bundle/cell/handshake parsers; known-answer tests for KDF/AEAD.
-- `ldd bin/nerd-chat` → "not a dynamic executable"; run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).
+- `ldd bin/nerd-chat` → "statically linked" (or "not a dynamic executable"); run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).
 - End-to-end: two VMs, exchange bundles by file, chat over Tor; `tcpdump` confirms only Tor traffic leaves the host; confirm no plaintext/keys on disk (`strings`, entropy check of vault, RAM-only mode leaves nothing).
 - Wrong-password and tamper tests (vault must fail closed); reproducible-build hash match across two machines.
 

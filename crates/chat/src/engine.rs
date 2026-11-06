@@ -416,7 +416,7 @@ impl Core {
                 if let Some(k) = payload {
                     match rt.conn.as_ref() {
                         Some((_, tx)) => { let _ = tx.send(Out::Rotate { kind, keys: k }); }
-                        None => self.notice(Some(id), "key rotation needs a live connection to the contact"),
+                        None => self.notice(Some(id), "key rotation: no live connection at this moment; the step is repeated automatically when the contact connects"),
                     }
                 }
             }
