@@ -113,6 +113,9 @@ pub enum Event {
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
     File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
+    /// Messages that were queued while the contact was away have just been handed to the new connection (`count` of them).
+    /// (Hand-over to the live connection, not a read receipt: there are none, by design.)
+    Flushed { id: [u8; 8], count: usize },
     /// The contact sent a key-rotation frame (`kind` = proto::KIND_ROTATE_*) carrying its new (onion, auth) public keys.
     Rotate { id: [u8; 8], kind: u8, onion: [u8; 32], auth: [u8; 32] },
 }
@@ -423,7 +426,9 @@ impl Core {
                 let had = rt.conn.is_some();
                 if let Some((_, old)) = rt.conn.replace((gen, tx.clone())) { let _ = old.send(Out::Close); }
                 rt.backoff = self.t.min_backoff;
+                let count = rt.pending.len();
                 while let Some(m) = rt.pending.pop_front() { let _ = tx.send(Out::Text(m)); }
+                if count > 0 { let _ = self.ev.send(Event::Flushed { id, count }); }
                 // announce our current keys on every connection: a peer holding the NEW keys as pending learns the rotation is done
                 // even if the explicit DONE died with a replaced connection (it reveals nothing the peer does not already know)
                 let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_DONE, keys: rt.my_keys });
@@ -643,6 +648,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let el = start(&net, &l, &db, ID);              // listener comes online later
         for t in ["one", "two", "three"] { assert!(got(&el, t), "{t}"); }
+        assert!(wait(&ed, |e| matches!(e, Event::Flushed { count: 3, .. })), "the sender must be told that its queue was handed over");
         // and the other way round: listener-only queue
         drop(el);
         let el = start(&net, &l, &db, ID);

@@ -1243,7 +1243,7 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Flushed { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
@@ -1253,6 +1253,8 @@ impl App {
                     self.push_line(id, ChatLine { mine: false, text, queued: false });
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
+                // the queue was handed to the live connection: those lines are no longer "(queued)" (older ones were dropped with a notice)
+                Event::Flushed { id, .. } => { if let Some(l) = self.chats.get_mut(&id) { for x in l.iter_mut() { x.queued = false; } } }
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
                     let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
@@ -2453,6 +2455,23 @@ mod tests {
         a.pending_pair = Some(([0; 8], ImportedContact::from_file(Bundle::from_identity(&ContactIdentity::generate())), "123".into()));
         a.sel = 1; a.handle(Key::Char('l'));
         assert!(a.error && a.status.contains("press P") && !a.pair_ctl.is_some(), "{}", a.status);
+    }
+
+    /// A message typed while the contact was away is shown as "(queued)"; once the engine hands it to the new connection the label goes.
+    #[test]
+    fn a_queued_line_stops_saying_queued_once_it_was_delivered_to_the_connection() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Char('i')); type_str(&mut a, "while you were away"); a.handle(Key::Enter);
+        assert!(a.chat_lines()[0].queued && screen_text(&a, 110, 24).contains("(queued)"), "queued while bob is not connected");
+        assert!(a.status.contains("queued"));
+        go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "the label must change after delivery");
+        assert!(!screen_text(&a, 110, 24).contains("(queued)"));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "while you were away"))), "and bob really got it");
+        assert!(a.at_risk().is_empty(), "nothing is at risk any more");
     }
 
     #[test]

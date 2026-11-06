@@ -144,7 +144,7 @@ CONFIRMED CORRECT against real tor: ADD_ONION syntax (V3Auth + ClientAuthV3 + ED
 - New: `nerd-chat-chat` (proto, transport, conn, engine) + TUI chat screens, online/offline toggle, `--tor-*` flags.
 - C6-roles FIXED (see role-negotiation notes below): a designated host that cannot host flips to dialing; a dialer lazily hosts after repeated failed dials.
 - C6-timing OPEN: 30 s keepalives + reconnect backoff are observable timing patterns; no constant-rate cover traffic.
-- C6-queued-label OPEN (cosmetic): a line shown as "(queued)" is not updated when it is finally delivered; there are no delivery receipts by design.
+- C6-queued-label FIXED (cycle 33): when the engine hands the queue to a new connection it emits `Event::Flushed` and the UI drops the "(queued)" label. This means "handed to the live connection", NOT "read by the contact": there are still no delivery receipts, by design.
 - C6-flood OPEN (low): an authenticated peer can send messages as fast as the link allows; engine events channel is unbounded (UI drains every 200 ms; chat history capped at 500 lines; each message <= 32 KiB).
 - C6-copies PARTIAL: message text lives in `Zeroizing<String>` (engine events, chat lines, outbox) and a fixed-capacity compose buffer; the on-screen copy of a sent message is a second wiped-on-drop String. NOT covered: ratatui's cell buffers (blanked at panic, but live while a chat is open), crossterm input buffer (R4-M2), `snow`'s internal buffers (R2-M3).
 - Panic: engine shutdown is awaited for at most 400 ms; connection/acceptor threads end on their own afterwards; the process then exits.
