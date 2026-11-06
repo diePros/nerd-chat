@@ -23,10 +23,39 @@ pub struct OpenInfo {
 
 fn io<E: std::fmt::Display>(e: E) -> StoreError { StoreError::Io(e.to_string()) }
 
+/// Where the rollback counter of the vault at `p` lives unless `--counter-file` says otherwise.
+pub fn counter_path_for(p: &Path) -> PathBuf { default_counter_path(p) }
+
 fn default_counter_path(p: &Path) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
     s.push(".counter");
     PathBuf::from(s)
+}
+
+/// Overwrite a regular file with random bytes (synced), then delete it. A symlink is only unlinked, never followed. Best effort and
+/// honest about it: on flash media (SSD/USB stick) wear levelling may keep old blocks, so this is not a guarantee: the real protection
+/// of a vault is its password (and keyfile), which a purge destroys together with the vault and the counter.
+pub fn shred_file(path: &Path) -> Result<(), StoreError> {
+    let md = fs::symlink_metadata(path).map_err(io)?;
+    if !md.is_file() { return fs::remove_file(path).map_err(io); } // a symlink or special file: unlink only
+    let overwrite = (|| -> std::io::Result<()> {
+        let mut o = fs::OpenOptions::new();
+        o.write(true);
+        #[cfg(unix)]
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let mut f = o.open(path)?;
+        let mut left = md.len().min(1 << 30);
+        let mut buf = vec![0u8; 64 * 1024];
+        while left > 0 {
+            let n = left.min(buf.len() as u64) as usize;
+            getrandom::fill(&mut buf[..n]).map_err(|_| std::io::Error::other("no OS randomness"))?;
+            f.write_all(&buf[..n])?;
+            left -= n as u64;
+        }
+        f.sync_all()
+    })();
+    let removed = fs::remove_file(path).map_err(io); // delete even when the overwrite failed
+    overwrite.map_err(io).and(removed)
 }
 
 /// Read a REGULAR file safely: never follows a symlink, never blocks on a FIFO/device (so a hostile
@@ -188,6 +217,26 @@ mod tests {
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "no vault, counter or temp file");
         // and a later normal create is not blocked by a stray counter file
         VaultFile::create(Some(&p), None, b"pw", None, P).unwrap();
+    }
+
+    #[test]
+    fn shred_overwrites_the_data_then_deletes_and_never_follows_a_symlink() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, twin) = (d.path().join("secret"), d.path().join("twin"));
+        fs::write(&p, vec![0xAAu8; 200_000]).unwrap();
+        fs::hard_link(&p, &twin).unwrap();                 // a second name of the SAME data: shows what the overwrite left behind
+        shred_file(&p).unwrap();
+        assert!(!p.exists());
+        let left = fs::read(&twin).unwrap();
+        assert_eq!(left.len(), 200_000);
+        assert!(left.iter().filter(|&&b| b == 0xAA).count() < 2000, "the original bytes must be overwritten, not just unlinked");
+        // a symlink is only unlinked: its target is untouched
+        let (target, link) = (d.path().join("target"), d.path().join("link"));
+        fs::write(&target, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        shred_file(&link).unwrap();
+        assert!(!link.exists() && fs::read(&target).unwrap() == b"keep me");
+        assert!(shred_file(&d.path().join("missing")).is_err(), "a missing file is reported");
     }
 
     #[test]

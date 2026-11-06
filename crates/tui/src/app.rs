@@ -40,6 +40,8 @@ pub struct Config {
     pub path: Option<PathBuf>,
     pub counter: Option<PathBuf>,
     pub keyfile: Option<Zeroizing<Vec<u8>>>,
+    /// Where the keyfile came from (only needed so that a PURGE can delete it too).
+    pub keyfile_path: Option<PathBuf>,
     pub profile: Profile,
     pub tor: TorCfg,
     pub transport: Option<TransportFactory>,
@@ -53,7 +55,7 @@ pub struct Config {
 
 impl Config {
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, allow_swap: false }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, allow_swap: false }
     }
 }
 
@@ -97,10 +99,12 @@ const NO_CONTACT: &str = "No contact selected. Press n to add one.";
 const SCROLL_CAP: usize = 100_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, BackTab, PageUp, PageDown, Home, End, F12, CtrlBackslash }
+pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, BackTab, PageUp, PageDown, Home, End, F12, CtrlBackslash, /// Ctrl+] / Shift+F12: PURGE
+    Purge }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Action { None, Quit, Panic }
+pub enum Action { None, Quit, Panic, /// like `Panic`, and every file of this vault was overwritten and deleted
+    Purge }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
@@ -185,6 +189,10 @@ pub struct App {
     chats: HashMap<[u8; 8], Vec<ChatLine>>,
     linked: HashSet<[u8; 8]>,
     unread: HashMap<[u8; 8], u32>,
+    /// Files this session created on request (exported bundles, saved received files): a PURGE deletes them too.
+    created: Vec<PathBuf>,
+    /// (deleted, failed) after a purge, for the one-line report printed after the terminal was wiped.
+    pub purge_report: Option<(usize, usize)>,
     /// Right pane: details of the selected contact, or the conversation with it (the open chat is ALWAYS `sel_id()`).
     pub pane: Pane,
     pub mode: Mode,
@@ -233,7 +241,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -305,6 +313,35 @@ impl App {
     fn ok(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = false; }
     fn err(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = true; }
 
+    /// Every file on disk that belongs to this vault: the vault, its rollback counter, the keyfile, leftover temp files of the atomic
+    /// write, and the files this session created on request (exported bundles, saved received files).
+    fn purge_targets(&self) -> Vec<PathBuf> {
+        let mut v = Vec::new();
+        if let Some(p) = &self.cfg.path {
+            v.push(p.clone());
+            v.push(self.cfg.counter.clone().unwrap_or_else(|| nerd_chat_store::counter_path_for(p)));
+            let (dir, name) = (p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")), p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    if n.len() > name.len() + 1 && n.starts_with(&format!("{name}.")) && n.ends_with(".tmp") { v.push(e.path()); }
+                }
+            }
+        }
+        v.extend(self.cfg.keyfile_path.clone());
+        v.extend(self.created.iter().cloned());
+        v
+    }
+
+    /// PURGE (Ctrl+] / Shift+F12): everything `panic_wipe` does, and then every file of this vault is overwritten with random bytes and
+    /// deleted: contacts, keys, saved messages, the rollback counter, the keyfile. No confirmation: it is a panic key.
+    pub fn purge(&mut self) {
+        let targets = self.purge_targets();         // collected BEFORE the wipe forgets the session's paths
+        self.panic_wipe();
+        let failed = targets.iter().filter(|p| nerd_chat_store::shred_file(p).is_err()).count();
+        self.purge_report = Some((targets.len() - failed, failed));
+    }
+
     /// Everything wiped: vault dropped (secrets zeroize on drop), buffers cleared, screen -> Wiped.
     pub fn panic_wipe(&mut self) {
         // Stop pairing workers FIRST (they hold identity clones and the code), give them a moment to drop them.
@@ -339,6 +376,7 @@ impl App {
         self.cfg.keyfile = None; // Zeroizing: dropped now
         self.alerts.clear();
         self.alerts_dropped = 0;
+        self.created.clear();
         self.kdf_cancel.store(true, Ordering::SeqCst); // a creating worker stops before it writes anything (R8-L4)
         // A create worker past its key derivation may be inside the atomic write: give it a bounded moment to finish or
         // clean up its temp file before the process exits (R8-L4 residual window). Its result is dropped (zeroized).
@@ -358,6 +396,7 @@ impl App {
     }
 
     pub fn handle(&mut self, k: Key) -> Action {
+        if k == Key::Purge { self.purge(); return Action::Purge; }
         if matches!(k, Key::F12 | Key::CtrlBackslash) { self.panic_wipe(); return Action::Panic; }
         match &self.screen {
             Screen::Wiped => Action::Quit,
@@ -997,7 +1036,7 @@ impl App {
                     Err(e) => return self.err(format!("Cannot save (nothing was overwritten): {e}")),
                 };
                 match f.write_all(&r.data).and_then(|_| f.sync_all()) {
-                    Ok(()) => { self.inbox.remove(&id); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
+                    Ok(()) => { self.inbox.remove(&id); self.created.push(path.clone()); self.ok(format!("Saved to {} (mode 0600). It is no longer in RAM here.", path.display())); }
                     Err(e) => { drop(f); let _ = fs::remove_file(&path); self.err(format!("Cannot save: {e}")) }
                 }
             }
@@ -1016,7 +1055,7 @@ impl App {
                         let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
                         self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
                     }
-                    Ok(()) => self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())),
+                    Ok(()) => { self.created.push(path.clone()); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
                     Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
                 }
             }
@@ -2668,6 +2707,63 @@ mod tests {
         let mut e = App::new(cfg(Some(d.path().join("v"))));
         type_str(&mut e, "correct horse battery"); e.handle(Key::Enter);
         assert_eq!(e.contacts_len(), 0, "and are gone from the file after the contact was deleted");
+    }
+
+    // ---------- PURGE: panic + delete everything of the vault ----------
+
+    #[test]
+    fn purge_wipes_like_the_panic_key_and_also_overwrites_and_deletes_every_file_of_the_vault() {
+        let d = tempfile::tempdir().unwrap();
+        let (vault, counter, keyfile) = (d.path().join("v"), d.path().join("c.cnt"), d.path().join("key.bin"));
+        std::fs::write(&keyfile, [7u8; 64]).unwrap();
+        let mut c = Config::new(Some(vault.clone()), Some(counter.clone()), Some(Zeroizing::new(vec![7u8; 64])), Profile::InsecureTest);
+        c.keyfile_path = Some(keyfile.clone());
+        let mut a = open_app(c);
+        add_peer(&mut a, "bob");
+        let out = d.path().join("out.sbc");
+        a.handle(Key::Char('e')); a.input = out.to_str().unwrap().into(); a.handle(Key::Enter);
+        a.handle(Key::Enter); a.handle(Key::Char('m')); a.handle(Key::Char('y'));   // (nothing to save yet: harmless)
+        let (tmp, foreign) = (d.path().join("v.abc123.tmp"), d.path().join("other.vault"));
+        std::fs::write(&tmp, b"half written vault").unwrap();
+        std::fs::write(&foreign, b"somebody else's file").unwrap();
+        for f in [&vault, &counter, &keyfile, &out, &tmp] { assert!(f.exists(), "{f:?} must exist before the purge"); }
+        assert_eq!(a.handle(Key::Purge), Action::Purge);
+        for f in [&vault, &counter, &keyfile, &out, &tmp] { assert!(!f.exists(), "{f:?} must be deleted by the purge"); }
+        assert!(foreign.exists(), "files that do not belong to the vault are never touched");
+        assert_eq!(a.purge_report, Some((5, 0)));
+        assert!(a.vf.is_none() && a.screen == Screen::Wiped && a.created.is_empty(), "and everything is wiped from memory like with F12");
+    }
+
+    #[test]
+    fn the_plain_panic_key_keeps_the_files_and_purge_works_from_the_unlock_screen_too() {
+        let d = tempfile::tempdir().unwrap();
+        { let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob"); }
+        let vault = d.path().join("v");
+        let counter = nerd_chat_store::counter_path_for(&vault);
+        assert!(vault.exists() && counter.exists());
+        let mut a = App::new(cfg(Some(vault.clone())));                      // locked: the password prompt
+        assert_eq!(a.screen, Screen::Unlock);
+        assert_eq!(a.handle(Key::F12), Action::Panic);
+        assert!(vault.exists() && counter.exists() && a.purge_report.is_none(), "F12 is panic-LOCK: the vault stays, only the password opens it");
+        let mut b = App::new(cfg(Some(vault.clone())));
+        assert_eq!(b.handle(Key::Purge), Action::Purge, "also from the password prompt (e.g. under pressure)");
+        assert!(!vault.exists() && !counter.exists());
+        assert_eq!(b.purge_report, Some((2, 0)));
+        let mut r = App::new(cfg(None));                                     // RAM-only: nothing on disk, purge is just a panic
+        r.handle(Key::Enter);
+        assert_eq!(r.handle(Key::Purge), Action::Purge);
+        assert_eq!(r.purge_report, Some((0, 0)));
+    }
+
+    #[test]
+    fn purge_reports_files_it_could_not_remove_and_still_removes_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let vault = d.path().join("v"); let counter = nerd_chat_store::counter_path_for(&vault);
+        std::fs::remove_file(&counter).unwrap();                             // already gone: a failure to delete, reported, not fatal
+        assert_eq!(a.handle(Key::Purge), Action::Purge);
+        assert!(!vault.exists());
+        assert_eq!(a.purge_report, Some((1, 1)));
     }
 
     #[test]

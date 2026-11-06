@@ -6,7 +6,7 @@ mod book;
 mod file;
 
 pub use book::{Contact, SavedMsg, Store, MAX_CONTACTS, MAX_NAME, MAX_SAVED, MAX_SAVED_TOTAL};
-pub use file::{read_regular_file, OpenInfo, VaultFile};
+pub use file::{counter_path_for, read_regular_file, shred_file, OpenInfo, VaultFile};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

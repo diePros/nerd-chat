@@ -98,7 +98,7 @@ fn parse_args() -> Config {
     let legacy = !std::path::Path::new("nerd-chat.vault").exists() && std::path::Path::new("seburity.vault").exists();
     if legacy { eprintln!("note: using the existing ./seburity.vault (the default file name is now nerd-chat.vault)"); }
     let mut path = Some(PathBuf::from(if legacy { "seburity.vault" } else { "nerd-chat.vault" }));
-    let (mut counter, mut keyfile, mut profile) = (None, None, Profile::Strong);
+    let (mut counter, mut keyfile, mut keyfile_path, mut profile) = (None, None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
     let mut allow_swap = false;
     let mut cannot_host = false;
@@ -120,7 +120,7 @@ fn parse_args() -> Config {
             "--keyfile" => {
                 let p = it.next().unwrap_or_else(|| usage());
                 match std::fs::read(&p) {
-                    Ok(b) => keyfile = Some(Zeroizing::new(b)),
+                    Ok(b) => { keyfile = Some(Zeroizing::new(b)); keyfile_path = Some(PathBuf::from(&p)); }
                     Err(e) => { eprintln!("cannot read keyfile {p}: {e}"); std::process::exit(2) }
                 }
             }
@@ -128,6 +128,7 @@ fn parse_args() -> Config {
         }
     }
     let mut cfg = Config::new(path, counter, keyfile, profile);
+    cfg.keyfile_path = keyfile_path;
     cfg.tor = tor;
     cfg.allow_swap = allow_swap;
     cfg.can_host = !cannot_host;
@@ -137,7 +138,10 @@ fn parse_args() -> Config {
 fn map_key(k: event::KeyEvent) -> Option<Key> {
     if k.kind != KeyEventKind::Press { return None; }
     Some(match k.code {
+        KeyCode::F(12) if k.modifiers.contains(KeyModifiers::SHIFT) => Key::Purge,
         KeyCode::F(12) => Key::F12,
+        // Ctrl+] is byte 0x1d, right next to Ctrl+\\ (0x1c, panic-lock): works on every terminal; Ctrl+5 sends the same byte
+        KeyCode::Char(']') | KeyCode::Char('5') if k.modifiers.contains(KeyModifiers::CONTROL) => Key::Purge,
         KeyCode::Char('\\') if k.modifiers.contains(KeyModifiers::CONTROL) => Key::CtrlBackslash,
         // Ctrl+4 is the same byte as Ctrl+\ on many terminals
         KeyCode::Char('4') if k.modifiers.contains(KeyModifiers::CONTROL) => Key::CtrlBackslash,
@@ -185,6 +189,8 @@ fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
     for _ in 0..2 { let _ = term.draw(|f| ui::draw(f, app)); }
     let _ = term.clear();
     wipe_terminal();
+    // after the wipe, counts only (a path printed here would stay in the scrollback)
+    if let Some((ok, failed)) = app.purge_report { eprintln!("purge: {ok} file(s) overwritten and deleted{}", if failed > 0 { format!(", {failed} could NOT be removed (delete them yourself)") } else { String::new() }); }
     std::process::exit(0)
 }
 
@@ -241,6 +247,7 @@ fn main() {
                         Action::None => {}
                         Action::Quit => break Ok(()),
                         Action::Panic => panic_exit(&mut app, &mut term),
+                        Action::Purge => panic_exit(&mut app, &mut term),
                     }
                 },
                 Ok(_) => {}
@@ -259,6 +266,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panic_lock_and_purge_have_different_keys() {
+        use ratatui::crossterm::event::{KeyEvent, KeyEventState};
+        let key = |code, mods| map_key(KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE });
+        assert_eq!(key(KeyCode::F(12), KeyModifiers::NONE), Some(Key::F12));
+        assert_eq!(key(KeyCode::Char('\\'), KeyModifiers::CONTROL), Some(Key::CtrlBackslash));
+        assert_eq!(key(KeyCode::F(12), KeyModifiers::SHIFT), Some(Key::Purge));
+        assert_eq!(key(KeyCode::Char(']'), KeyModifiers::CONTROL), Some(Key::Purge));
+        assert_eq!(key(KeyCode::Char('5'), KeyModifiers::CONTROL), Some(Key::Purge), "Ctrl+5 is the same byte as Ctrl+] on terminals");
+        assert_eq!(key(KeyCode::Char(']'), KeyModifiers::NONE), Some(Key::Char(']')), "a plain ] is just text");
+    }
 
     #[test]
     fn swaps_are_parsed_from_proc_text() {

@@ -16,7 +16,8 @@ key pair and its own onion service, and everything runs from a **single static L
 - **Vault:** keys live in one password-locked vault (Argon2id, XChaCha20-Poly1305, padded, rollback counter); optional keyfile on another device.
 - **Files:** JPEG/PNG (and explicit plain text) are cleaned of metadata by allowlist, in a sandboxed helper process (seccomp), padded to size buckets,
   accepted only by explicit consent, re-cleaned by the receiver and saved under a neutral name.
-- **Panic:** F12 or Ctrl+\ wipes memory and screen and exits immediately. No logs, no history, no clipboard.
+- **Panic:** F12 or Ctrl+\ (panic-lock) wipes memory and screen and exits immediately; Ctrl+] (purge) additionally overwrites and deletes the vault, counter, keyfile and exported files. No logs, no automatic history, no clipboard.
+- **Keeping messages is manual:** nothing is ever saved by itself; you can save a chosen message into the encrypted vault (message cursor `m`, `y`) and delete it again.
 - **Key rotation:** you can replace the onion address and auth key of a contact so that old copies of your bundle stop revealing when you are online.
 - **UI:** terminal UI with a permanent contact list, a vim-style Normal/Insert input and a privacy screen (3rd Esc). A GUI is planned (`docs/ROADMAP.md`).
 

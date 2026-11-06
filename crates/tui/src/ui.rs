@@ -79,13 +79,13 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// Only keys that really work in the current state (mode / pane), most important first; the terminal clips the rest.
 fn footer_hint(app: &App) -> &'static str {
     match (&app.screen, app.pane, app.mode) {
-        (Screen::Prompt(_), _, _) => " Enter ok  Esc cancel   F12 / Ctrl+\\ = PANIC WIPE",
-        (Screen::Main, Pane::Chat, Mode::Insert) => " -- INSERT --  Enter send  Esc normal mode   F12 / Ctrl+\\ = PANIC WIPE",
-        (Screen::Main, Pane::Saved, _) => " SAVED  j/k move  d d delete  Esc back   F12 / Ctrl+\\ = PANIC WIPE",
+        (Screen::Prompt(_), _, _) => " Enter ok  Esc cancel   F12 PANIC-LOCK  Ctrl+] PURGE",
+        (Screen::Main, Pane::Chat, Mode::Insert) => " -- INSERT --  Enter send  Esc normal mode   F12 PANIC-LOCK  Ctrl+] PURGE",
+        (Screen::Main, Pane::Saved, _) => " SAVED  j/k move  d d delete  Esc back   F12 PANIC-LOCK  Ctrl+] PURGE",
         (Screen::Main, Pane::Chat, Mode::Normal) if app.select.is_some() => " SELECT  j/k choose a message  y / Enter save it  Esc cancel   F12 PANIC",
-        (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  m select+save  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC",
-        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC",
-        _ => " F12 / Ctrl+\\ = PANIC WIPE",
+        (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  m select+save  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC  Ctrl+] PURGE",
+        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC  Ctrl+] PURGE",
+        _ => " F12 PANIC-LOCK  Ctrl+] PURGE",
     }
 }
 
@@ -108,7 +108,7 @@ fn lock_view(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(rows), area);
     let mut lines = vec![Line::from(Span::styled("LOCKED", Style::default().add_modifier(Modifier::BOLD))), Line::from("Enter = unlock    q = quit")];
     lines.push(Line::from(if app.quit_pending() { "quitting may lose something: press q again to quit" } else if app.alerts.is_empty() { "" } else { "! a security alert is waiting: unlock to read it" }));
-    lines.push(Line::from(Span::styled("privacy screen only: the vault stays open, F12 = panic wipe", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled("privacy screen only: the vault stays open. F12 = panic-lock  Ctrl+] = purge all", Style::default().fg(Color::DarkGray))));
     let r = centered(area, 56, 6);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(Block::bordered()), r);
@@ -331,11 +331,15 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "",
         "Esc, Esc, Esc: typing -> normal -> details -> PRIVACY SCREEN (Enter unlocks, q quits).",
         "  The privacy screen only hides the screen: the vault stays open, anyone can press Enter.",
+        "Keeping messages: NOTHING is saved automatically. In a chat: m = message cursor, j/k choose, y or Enter saves THAT message into the",
+        "  vault (encrypted, no timestamp). H = saved messages of this contact (d d deletes one). Whoever gets vault + password can read them.",
         "q quits (wipes RAM; asks again if queued messages or unsaved files would be lost).",
         "",
-        "PANIC: F12 or Ctrl+\\  locks, wipes the screen+scrollback and exits at once. Press any key.",
+        "PANIC-LOCK: F12 or Ctrl+\\  wipes memory, screen and scrollback and exits at once; the vault stays (the password opens it again).",
+        "PURGE: Ctrl+] (or Shift+F12) does the same AND overwrites + deletes the vault, rollback counter, keyfile and the files exported/saved",
+        "  this session: contacts, keys, saved messages gone for good. No confirmation. Press any key to close this help.",
     ];
-    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 100, 21);
+    popup(f, area, "Help", t.iter().map(|s| Line::from(*s)).collect(), 100, 26);
     let _ = Alignment::Left;
 }
 
