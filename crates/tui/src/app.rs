@@ -1369,8 +1369,9 @@ mod tests {
         Config::new(path, None, None, Profile::InsecureTest)
     }
 
-    fn create_app(dir: &std::path::Path, name: &str) -> App {
-        let mut a = App::new(cfg(Some(dir.join(name))));
+    /// Create a NEW vault with the standard test password (typed twice).
+    fn open_app(c: Config) -> App {
+        let mut a = App::new(c);
         assert_eq!(a.screen, Screen::CreatePw);
         type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
         assert_eq!(a.screen, Screen::CreateConfirm);
@@ -1379,7 +1380,23 @@ mod tests {
         a
     }
 
+    fn create_app(dir: &std::path::Path, name: &str) -> App { open_app(cfg(Some(dir.join(name)))) }
+
     fn add(a: &mut App, name: &str) { a.handle(Key::Char('n')); type_str(a, name); a.handle(Key::Enter); }
+
+    /// `a` listens (for its selected contact) and returns what `b` needs: the address and the one-time code.
+    fn listen(a: &mut App) -> (String, String) {
+        a.handle(Key::Char('l')); a.handle(Key::Enter);
+        let info = a.pair_info.clone().expect("listening");
+        (info.split_whitespace().nth(2).unwrap().to_string(), info.split("CODE: ").nth(1).unwrap().split_whitespace().next().unwrap().to_string())
+    }
+
+    /// `b` joins `a`'s listener with `code`, then both apps are polled until the pairing workers are done.
+    fn join_and_wait(a: &mut App, b: &mut App, addr: &str, code: &str) {
+        b.handle(Key::Char('c')); type_str(b, addr); b.handle(Key::Enter); type_str(b, code); b.handle(Key::Enter);
+        let t = Instant::now();
+        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+    }
 
     #[test]
     fn security_alerts_are_sticky_until_acknowledged() {
@@ -1598,18 +1615,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
         let mut b = create_app(d.path(), "b.vault"); add(&mut b, "alice");
-        // A listens
-        a.handle(Key::Char('l')); a.handle(Key::Enter);
-        let info = a.pair_info.clone().expect("listening");
-        let addr = info.split_whitespace().nth(2).unwrap().to_string();
-        let code = info.split("CODE: ").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
-        // B joins
-        b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter);
-        type_str(&mut b, &code); b.handle(Key::Enter);
-        let t = Instant::now();
-        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) {
-            a.poll(); b.poll(); thread::sleep(Duration::from_millis(50));
-        }
+        let (addr, code) = listen(&mut a);
+        join_and_wait(&mut a, &mut b, &addr, &code);
         assert!(a.screen == Screen::Main && b.screen == Screen::Main, "a finished pairing must NOT open a prompt by itself");
         assert!(a.pending_pair.is_some() && b.pending_pair.is_some(), "{} / {}", a.status, b.status);
         assert!(a.alerts.iter().any(|(t, _)| t.contains("press P")), "a sticky alert tells the user to press P");
@@ -1668,13 +1675,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
         let mut b = create_app(d.path(), "b.vault"); add(&mut b, "alice");
-        a.handle(Key::Char('l')); a.handle(Key::Enter);
-        let info = a.pair_info.clone().unwrap();
-        let addr = info.split_whitespace().nth(2).unwrap().to_string();
-        let code = info.split("CODE: ").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
-        b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter); type_str(&mut b, &code); b.handle(Key::Enter);
-        let t = Instant::now();
-        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        let (addr, code) = listen(&mut a);
+        join_and_wait(&mut a, &mut b, &addr, &code);
         a.handle(Key::Char('P'));
         a.handle(Key::Esc);
         assert_eq!(a.screen, Screen::Main);
@@ -1717,11 +1719,7 @@ mod tests {
         let net = net.clone();
         c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(net.transport()) as Box<dyn Transport>)));
         c.timing = fast_timing();
-        let mut a = App::new(c);
-        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
-        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
-        assert_eq!(a.screen, Screen::Main, "{}", a.status);
-        a
+        open_app(c)
     }
 
     /// Exchange bundle files between the selected contacts of a and b (the offline path).
@@ -1747,6 +1745,15 @@ mod tests {
         false
     }
 
+    /// Two apps with one contact each, bundles exchanged by file (the offline path), both on the same in-memory network.
+    fn linked_pair(dir: &std::path::Path) -> (nerd_chat_chat::MemNet, App, App) {
+        let net = nerd_chat_chat::MemNet::new();
+        let mut a = net_app(dir, "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(dir, "b.vault", &net); add(&mut b, "alice");
+        link_apps(&mut a, &mut b, dir);
+        (net, a, b)
+    }
+
     fn go_online(a: &mut App) { a.handle(Key::Char('o')); }
     fn is_linked(a: &App) -> bool { a.contact_rows().first().is_some_and(|r| r.3) }
 
@@ -1756,10 +1763,7 @@ mod tests {
     #[test]
     fn key_rotation_through_the_screens_in_both_directions() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (net, mut a, mut b) = linked_pair(d.path());
         // not online yet: refused, nothing changes
         a.handle(Key::Char('K'));
         assert!(a.error && a.status.contains("online"), "{}", a.status);
@@ -1798,10 +1802,7 @@ mod tests {
     #[test]
     fn hostile_rotation_proposals_are_refused_without_changing_anything() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, _b) = linked_pair(d.path());
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         let before = peer_onion_of(&a);
         let offer = nerd_chat_chat::proto::KIND_ROTATE_OFFER;
@@ -1833,10 +1834,7 @@ mod tests {
     #[test]
     fn a_contact_cannot_force_repeated_rotations_or_block_ours() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, _b) = linked_pair(d.path());
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         let (offer, done) = (nerd_chat_chat::proto::KIND_ROTATE_OFFER, nerd_chat_chat::proto::KIND_ROTATE_DONE);
         let k1 = nerd_chat_core::identity::ContactIdentity::generate();
@@ -1863,10 +1861,7 @@ mod tests {
     #[test]
     fn two_users_chat_through_the_screens() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, mut b) = linked_pair(d.path());
         assert_eq!(a.online, Online::Offline);
         go_online(&mut a); go_online(&mut b);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online), "{:?}", a.status);
@@ -1900,10 +1895,7 @@ mod tests {
     #[test]
     fn file_send_accept_save_with_neutral_name_and_panic_wipes_received_files() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, mut b) = linked_pair(d.path());
         go_online(&mut a); go_online(&mut b);
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
         // a JPEG with planted metadata, named after something sensitive
@@ -1974,10 +1966,7 @@ mod tests {
     #[test]
     fn unsaved_files_are_never_silently_replaced_and_can_be_discarded() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, mut b) = linked_pair(d.path());
         go_online(&mut a); go_online(&mut b);
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
         let seg = |m: u8, body: &[u8]| { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v };
@@ -2092,10 +2081,7 @@ mod tests {
     #[test]
     fn delete_while_online_and_panic_wipe_everything_in_the_chat() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, mut b) = linked_pair(d.path());
         go_online(&mut a); go_online(&mut b);
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
         a.handle(Key::Char('i')); type_str(&mut a, "secret words"); a.handle(Key::Enter);
@@ -2209,12 +2195,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
         let mut b = create_app(d.path(), "b.vault"); add(&mut b, "alice");
-        a.handle(Key::Char('l')); a.handle(Key::Enter);
-        let addr = a.pair_info.clone().unwrap().split_whitespace().nth(2).unwrap().to_string();
-        b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter);
-        type_str(&mut b, "0000000000"); b.handle(Key::Enter);
-        let t = Instant::now();
-        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        let (addr, _code) = listen(&mut a);
+        join_and_wait(&mut a, &mut b, &addr, "0000000000");
         assert!(a.error && b.error, "{} / {}", a.status, b.status);
         assert!(a.selected_detail().unwrap().2.is_none() && b.selected_detail().unwrap().2.is_none());
     }
@@ -2412,10 +2394,7 @@ mod tests {
     #[test]
     fn the_app_keeps_running_underneath_the_privacy_screen() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
-        let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
-        let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
-        link_apps(&mut a, &mut b, d.path());
+        let (_net, mut a, mut b) = linked_pair(d.path());
         go_online(&mut a); go_online(&mut b);
         assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
         a.handle(Key::Esc); assert!(a.locked);
@@ -2437,14 +2416,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob"); add_peer(&mut a, "carol");
         let mut b = create_app(d.path(), "b.vault"); add(&mut b, "alice");
-        a.sel = 0; a.handle(Key::Char('l')); a.handle(Key::Enter);                 // listen for bob's pairing
-        let info = a.pair_info.clone().unwrap();
-        let addr = info.split_whitespace().nth(2).unwrap().to_string();
-        let code = info.split("CODE: ").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+        a.sel = 0; let (addr, code) = listen(&mut a);                              // listen for bob's pairing
         a.sel = 1; a.handle(Key::Char('i')); type_str(&mut a, "he");               // typing a message to carol
-        b.handle(Key::Char('c')); type_str(&mut b, &addr); b.handle(Key::Enter); type_str(&mut b, &code); b.handle(Key::Enter);
-        let t = Instant::now();
-        while (a.pair_ctl.is_some() || b.pair_ctl.is_some()) && t.elapsed() < Duration::from_secs(20) { a.poll(); b.poll(); thread::sleep(Duration::from_millis(50)); }
+        join_and_wait(&mut a, &mut b, &addr, &code);
         assert!(a.pending_pair.is_some(), "{}", a.status);
         assert_eq!((a.screen == Screen::Main, a.pane, a.mode), (true, Pane::Chat, Mode::Insert), "still typing, no prompt, mode untouched");
         // the keys the user types now are TEXT: a `y` and Enter must not answer anything
