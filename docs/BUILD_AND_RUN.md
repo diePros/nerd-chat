@@ -7,7 +7,7 @@ Honest status first. "Verified" means somebody actually ran it.
 | `cargo test --workspace` (100+ tests) | verified, green |
 | Static musl build (`x86_64-unknown-linux-musl`), runs, panic key works | verified (dev machine) |
 | Live Tor test (spawn tor, host onion + client auth, dial, full handshake) | **verified by the project owner on their machine (Tor 0.4.9.11)** |
-| Reproducible build (same hash on two machines) | **NOT verified** — procedure in §4 |
+| Reproducible build | verified on the dev machine and by the project owner on WSL Ubuntu (`scripts/repro-check.sh`); a hash comparison between two machines is still open, procedure in §4 |
 | Running on a generic live USB distro | **NOT verified** — checklist in §7 |
 | Running on Tails | **NOT verified, deferred** — plan in §8 |
 | Chat screens | built: contact sidebar + details/conversation pane, vim-style normal/insert modes, privacy screen (3rd Esc), history scrolling; tests in `crates/tui` (the screens have not been tried on Tails) |
@@ -139,9 +139,8 @@ the session; Nerd-chat's panic key cleans its own process, not RAM remanence or 
 
 ## 8. Tails (deferred; this is the plan so the later test is quick)
 What exists today vs what will be tested:
-- Today you can: start the app, create/unlock the vault, add contacts, export/import bundles, pair over the LAN, verify
-  safety numbers, and **probe Tor**. The chat screens do not exist yet, so a Tails test now can only answer the
-  *environment* questions below.
+- Everything works on a normal Linux machine (chat, files, rotation, panic). What is unknown is only how it behaves on Tails;
+  the complete step-by-step test is `docs/RELEASE_TESTING.md` (part B). The probe below is its first step.
 - Tails facts (from Tails' own design page): all Internet traffic except Tor is blocked; LAN and loopback are open; applications
   must use Tor explicitly. Not documented there, and therefore **unknown until tested**: whether the `amnesia` user may
   use Tor's control port and `ADD_ONION`; whether the Persistent Storage allows executing programs.

@@ -18,7 +18,7 @@ use std::{io::stdout, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc}
 use zeroize::Zeroizing;
 
 fn usage() -> ! {
-    eprintln!("usage: nerd-chat [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
+    eprintln!("usage: nerd-chat [--version] [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
   --vault PATH         vault file (default ./nerd-chat.vault). Put it on your USB stick.\n\
   --ram                RAM-only: never write anything to disk\n\
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
@@ -92,6 +92,11 @@ fn strip_cmd(args: &[String]) -> ! {
 
 fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|a| a == "--version" || a == "-V") {
+        println!("nerd-chat {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0)
+    }
+    if raw.first().is_some_and(|a| a == "--help" || a == "-h") { usage() }
     if raw.first().is_some_and(|a| a == "--strip") { strip_cmd(&raw[1..]); }
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
     // before the rename the default file was ./seburity.vault: keep using it instead of silently offering to create a new vault

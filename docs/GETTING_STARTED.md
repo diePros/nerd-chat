@@ -8,14 +8,14 @@ panic wipe. Layout: contact list always on the left, the right side shows the se
 ```bash
 cd ~/Documents/Code/nerd-chat
 cargo test --workspace            # ~1 min first time; expect all green (60+ tests)
-cargo build --release -p nerd-chat-tui
-ls -la target/release/nerd-chat
+cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui
+ls -la target/x86_64-unknown-linux-musl/release/nerd-chat
 ```
 
 ## 2. First run (creates a vault)
 ```bash
 mkdir -p ~/nerd-chat-demo && cd ~/nerd-chat-demo
-~/Documents/Code/nerd-chat/target/release/nerd-chat --vault ./alice.vault
+~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./alice.vault
 ```
 Type a passphrase of at least 12 characters, Enter, repeat it, Enter (takes ~4 s: that is the memory-hard KDF).
 Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode (keys are text only, nothing typed there can trigger a command).
@@ -43,13 +43,13 @@ followed for the purge (the real file is destroyed, then the link). Files you ex
 ## 3. Try the file exchange with yourself (two terminals)
 Terminal 1 (Alice):
 ```bash
-cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/release/nerd-chat --vault ./alice.vault
+cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./alice.vault
 ```
 `n` -> type `bob` -> Enter.  `e` -> the default file name is a neutral random `bundle-xxxxxxxx.sbc` (your contact's name is never put in a file name); Backspace it away and type `alice-for-bob.sbc` for this demo.
 
 Terminal 2 (Bob):
 ```bash
-cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/release/nerd-chat --vault ./bob.vault
+cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./bob.vault
 ```
 `n` -> `alice` -> Enter. `e` -> file name `bob-for-alice.sbc`.
 
@@ -92,7 +92,7 @@ Good to know:
 
 ## 5. RAM-only mode (nothing ever written)
 ```bash
-~/Documents/Code/nerd-chat/target/release/nerd-chat --ram
+~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --ram
 ```
 
 ## 6. Static binary for live systems (built and checked by me on one machine; the full recipe with checksums is docs/BUILD_AND_RUN.md section 3)
