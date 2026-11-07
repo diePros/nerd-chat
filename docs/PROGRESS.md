@@ -50,3 +50,8 @@ unfixed Medium+; workspace tests, static musl build, repro check and live Tor te
 3. cargo-fuzz target (new tool).
 4. Tails test and professional audit (human).
 Work that needs none of these is continuing: ADD_ONION retry (R15-L1), R8-I7 wasted dials, R12-5 probe at export, random virtual port.
+
+## Cycle 37 (after the Tails success)
+Tails test passed (user). `.deb` added to `scripts/release.sh` (deterministic: two builds give the same sha256; contents checked with `dpkg-deb -c`,
+`--version` works from the extracted binary; not installed, no lintian available). Next: Opus review of the delivery-confirmation work is done (review 24);
+remaining candidates are the fuzz targets, R8-I7, R12-5 and the GUI-core extraction (0.2).
