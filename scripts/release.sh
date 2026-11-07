@@ -51,9 +51,10 @@ Description: serverless chat over Tor onion services (terminal UI)
  It needs a tor binary for the default (spawn) mode; on Tails or Whonix use
  the system Tor.
 CTL
+find "$debroot" -type d -exec chmod 0755 {} +
 find "$debroot" -exec touch -h -d @1700000000 {} +
 deb="nerd-chat_${ver}_amd64.deb"
-fakeroot dpkg-deb --root-owner-group -Zgzip -z9 --build "$debroot" "$out/$deb" >/dev/null
+SOURCE_DATE_EPOCH=1700000000 fakeroot dpkg-deb --root-owner-group -Zgzip -z9 --build "$debroot" "$out/$deb" >/dev/null
 ( cd "$out" && sha256sum "$asset.tar.gz" "$asset" "$deb" > SHA256SUMS )
 [ -z "${SIGN_KEY:-}" ] || gpg --local-user "$SIGN_KEY" --detach-sign --armor "$out/SHA256SUMS"
 echo; cat "$out/SHA256SUMS"; echo "commit $commit"; ls -la "$out"
