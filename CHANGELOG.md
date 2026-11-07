@@ -7,6 +7,7 @@
   instead of dropping an old one; going offline with unconfirmed messages asks first and marks them "(NOT CONFIRMED)". The id travels inside the text frame; a peer
   announces its capabilities first, and a peer that does not (v0.1.0) gets the old plain frames, so the two versions interoperate (tested
   with the real 0.1.0 binary over Tor). Confirmations wait 1-5 s and are batched, so a reply cannot be timed. Tracker: review 24.
+- `.deb` package: `scripts/release.sh` also builds `nerd-chat_<version>_amd64.deb` (same static binary, deterministic, no maintainer scripts, `Recommends: tor`), listed in SHA256SUMS.
 - Default vault location: without `--vault`, an existing `~/.local/share/nerd-chat/nerd-chat.vault` ($XDG_DATA_HOME) is used from any
   directory, else an existing `./nerd-chat.vault`; a new vault is created there only after the user confirms the shown path (Tails gets a
   warning, directory mode 0700, unsafe directories refused, scripts must pass `--vault`). `--ram` now always wins over `--vault`.

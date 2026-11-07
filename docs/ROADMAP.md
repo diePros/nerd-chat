@@ -7,6 +7,8 @@
   security-critical code is not rewritten while it is being audited. Every feature lands in the core first and then in BOTH front ends.
 - **Toolkit recommendation:** a native Rust toolkit (egui/eframe or iced) in a second binary `nerd-chat-gui`: still one static-ish executable, no web
   view, no JavaScript, no IPC to a separate backend. Tauri/Electron are rejected for the memory-wiping and attack-surface reasons below.
+- **Installable program:** DONE for the `.deb` (`scripts/release.sh` builds `nerd-chat_<version>_amd64.deb` next to the tarball). Later: signed apt repository, other packaging formats.
+- **Default vault:** DONE (`~/.local/share/nerd-chat`, see CHANGELOG).
 
 ## Real GUI (future)
 Goal: usability for people who do not live in a terminal, without hiding anything from the people who do.

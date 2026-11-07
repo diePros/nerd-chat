@@ -28,6 +28,32 @@ printf 'nerd-chat %s\ncommit %s\nbuilt with: scripts/release.sh (see docs/BUILD_
 # deterministic tarball: sorted names, fixed owner and mtime, no gzip timestamp
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 -C "$out" -cf - "$name" | gzip -9n > "$out/$asset.tar.gz"
 cp "$bin" "$out/$asset"
-( cd "$out" && sha256sum "$asset.tar.gz" "$asset" > SHA256SUMS )
+# .deb (amd64): the same static binary, no maintainer scripts, deterministic (fixed mtimes, root owner, gzip -n)
+debroot="$work/deb"; docdir="$debroot/usr/share/doc/nerd-chat"
+mkdir -p "$debroot/DEBIAN" "$debroot/usr/bin" "$docdir"
+install -m 0755 "$bin" "$debroot/usr/bin/nerd-chat"
+install -m 0644 LICENSE "$docdir/copyright"
+install -m 0644 README.md SECURITY.md docs/GETTING_STARTED.md docs/BUILD_AND_RUN.md "$docdir/"
+gzip -9n < CHANGELOG.md > "$docdir/changelog.gz"; chmod 0644 "$docdir/changelog.gz"
+size=$(du -sk "$debroot/usr" | cut -f1)
+cat > "$debroot/DEBIAN/control" <<CTL
+Package: nerd-chat
+Version: $ver
+Section: net
+Priority: optional
+Architecture: amd64
+Installed-Size: $size
+Maintainer: nerd-chat maintainers <noreply@invalid>
+Recommends: tor
+Description: serverless chat over Tor onion services (terminal UI)
+ Static binary, messages in RAM only, encrypted vault. Unaudited software:
+ read SECURITY.md in /usr/share/doc/nerd-chat before relying on it.
+ It needs a tor binary for the default (spawn) mode; on Tails or Whonix use
+ the system Tor.
+CTL
+find "$debroot" -exec touch -h -d @1700000000 {} +
+deb="nerd-chat_${ver}_amd64.deb"
+fakeroot dpkg-deb --root-owner-group -Zgzip -z9 --build "$debroot" "$out/$deb" >/dev/null
+( cd "$out" && sha256sum "$asset.tar.gz" "$asset" "$deb" > SHA256SUMS )
 [ -z "${SIGN_KEY:-}" ] || gpg --local-user "$SIGN_KEY" --detach-sign --armor "$out/SHA256SUMS"
 echo; cat "$out/SHA256SUMS"; echo "commit $commit"; ls -la "$out"
