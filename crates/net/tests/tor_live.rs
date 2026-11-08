@@ -24,9 +24,16 @@ fn two_contacts_chat_over_real_onion_service_with_client_auth() {
     let a2 = ContactIdentity::from_secret_bytes(&a.secret_bytes()).unwrap();
     let bb2 = bb.clone();
     let server = thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-        let (mut sess, first) = link::accept(&mut s, &a2, &bb2, &mut HandshakeGuard::new(0), 0).expect("accept");
+        // Tor may open (and drop) a connection before the real dialer arrives: keep listening until one completes the handshake
+        let mut guard = HandshakeGuard::new(0);
+        let (mut s, mut sess, first) = loop {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+            match link::accept(&mut s, &a2, &bb2, &mut guard, 0) {
+                Ok((sess, first)) => break (s, sess, first),
+                Err(e) => eprintln!("early/failed inbound connection ignored: {e:?}"),
+            }
+        };
         assert_eq!(&first.body[..], b"hello from B");
         use std::io::Write;
         s.write_all(&sess.send(&a2, b"hello from A").unwrap()).unwrap();
