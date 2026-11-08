@@ -6,3 +6,6 @@ fuzz/target
 fuzz/corpus
 fuzz/artifacts
 /dist
+
+# brainstorming mockups (local only)
+.superpowers/
