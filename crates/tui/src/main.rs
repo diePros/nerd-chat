@@ -94,19 +94,24 @@ fn strip_cmd(args: &[String]) -> ! {
 
 /// The vault to use when there is no `--vault`: an existing one (see `vault_path`), or a NEW one at the default place after the user
 /// confirmed that place (it is on this computer's disk, and on Tails it would be erased at shutdown).
-fn default_vault() -> PathBuf {
+fn default_vault(allow_swap: bool) -> PathBuf {
     use std::io::IsTerminal;
     let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match vault_path::resolve(env("XDG_DATA_HOME").as_deref(), env("HOME").as_deref(), &cwd, &|p| std::fs::symlink_metadata(p).is_ok()) {
-        vault_path::Choice::Existing { path, note } => { if let Some(n) = note { eprintln!("{n}"); } path }
+    match vault_path::resolve(env("XDG_DATA_HOME").as_deref(), env("HOME").as_deref(), &cwd, &|p| match std::fs::symlink_metadata(p) { Err(e) => e.kind() != std::io::ErrorKind::NotFound, Ok(_) => true }) {
+        vault_path::Choice::Existing { path, note } => {
+            if let Err(e) = vault_path::check_existing(&path) { eprintln!("{e}"); std::process::exit(2) }
+            if let Some(n) = note { eprintln!("{n}"); }
+            path
+        }
         vault_path::Choice::Unusable(why) => { eprintln!("{why}"); std::process::exit(2) }
         vault_path::Choice::New { dir, path } => {
+            if !allow_swap { refuse_if_swap(); } // before anything is created on disk
             let tails = std::fs::read_to_string("/etc/os-release").is_ok_and(|s| vault_path::is_tails(&s));
             eprintln!("{}", vault_path::confirm_text(&path, tails));
             if !std::io::stdin().is_terminal() { eprintln!("not interactive: pass --vault PATH to say where the new vault goes"); std::process::exit(2) }
             let mut line = String::new();
-            if std::io::stdin().read_line(&mut line).is_err() { std::process::exit(2) }
+            if std::io::stdin().read_line(&mut line).is_err() || !line.trim().is_empty() { eprintln!("cancelled: nothing was created"); std::process::exit(2) } // EOF or any text = cancel
             if let Err(e) = vault_path::prepare_dir(&dir) { eprintln!("{e}"); std::process::exit(2) }
             path
         }
@@ -153,7 +158,7 @@ fn parse_args() -> Config {
         }
     }
     // --ram always wins (it promises that nothing is written); without --vault the default location applies (see vault_path.rs)
-    let path = if ram { None } else { Some(path.unwrap_or_else(default_vault)) };
+    let path = if ram { None } else { Some(path.unwrap_or_else(|| default_vault(allow_swap))) };
     let mut cfg = Config::new(path, counter, keyfile, profile);
     cfg.keyfile_path = keyfile_path;
     cfg.tor = tor;
@@ -293,7 +298,7 @@ fn main() {
     for w in harden() { eprintln!("warning: {w}"); }
     let cfg = parse_args();
     if !cfg.allow_swap { refuse_if_swap(); }
-    if cfg.path.as_ref().is_some_and(|p| !p.exists()) {
+    if cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_err()) {
         eprintln!("No vault at {:?}: a NEW one will be created.", cfg.path.as_ref().unwrap());
     }
     // SIGTERM / SIGHUP (terminal closed) / SIGINT trigger the same wipe as the panic key.

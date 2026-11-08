@@ -15,6 +15,9 @@ Binary under test: the file `nerd-chat-<version>-x86_64-linux-musl` from the Git
    (needs a clean tree and rustup; the pinned toolchain installs itself). The printed SHA-256 of `nerd-chat-0.1.0-x86_64-linux-musl` must
    equal the one in the release. Different? Send me both hashes and `rustc -V` of each machine.
 
+## A2. Default vault location
+Run `./nerd-chat` WITHOUT `--vault` in a fresh `HOME` (e.g. `HOME=$(mktemp -d) ./nerd-chat`): the text names `~/.local/share/nerd-chat/nerd-chat.vault`, an empty line continues, EOF (`</dev/null`) or any text cancels with nothing created. A dangling `./nerd-chat.vault` symlink is refused. On Tails the WARNING about the erased home appears.
+
 ## B. Tails (the open question: can Tails' Tor host onion services for us?)
 Use a fresh Tails session with Persistent Storage ON for the vault only, network connected (Tor ready). Do not use `sudo`.
 1. Copy the binary to the Tails home (`/home/amnesia/`), `chmod +x`. If "Permission denied" when running from a stick, copy it to `~` first.

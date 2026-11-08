@@ -28,6 +28,8 @@ cargo test --workspace                                              # expect all
 cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui   # static binary (pinned toolchain, see rust-toolchain.toml)
 ```
 Details, checksums, the reproducible-build check (also on WSL) and live-USB notes: `docs/BUILD_AND_RUN.md`; first steps and the key map: `docs/GETTING_STARTED.md`.
+Without `--vault` the vault lives in `~/.local/share/nerd-chat/` on this computer's disk (home backups and sync tools copy it); use `--vault PATH` for a USB stick or Tails Persistent Storage.
+
 Needs `tor` installed for chat (or an existing Tor via `--tor-control`). x86_64 Linux only; the file-cleaning sandbox needs seccomp.
 
 ## Honest limits

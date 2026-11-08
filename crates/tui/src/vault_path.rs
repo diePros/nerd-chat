@@ -63,14 +63,15 @@ pub fn is_tails(os_release: &str) -> bool { os_release.lines().any(|l| l.trim_st
 pub fn confirm_text(path: &Path, tails: bool) -> String {
     let mut s = format!("No vault found. A NEW one will be created at:\n  {}\nThat is on THIS computer's disk. To keep it elsewhere (a USB stick) use --vault PATH.\n", path.display());
     if tails { s.push_str("WARNING: this looks like Tails: your home directory is ERASED at shutdown, so this vault would be gone after the next restart.\nUse the Persistent Storage instead: --vault ~/Persistent/nerd-chat.vault\n"); }
-    s.push_str("Press Enter to continue, Ctrl+C to cancel.");
+    s.push_str("Home-directory backups and sync tools copy this folder too, and a restored backup brings back an old vault (rollback goes unnoticed).\n");
+    s.push_str("Press Enter (an empty line) to continue; anything else cancels.");
     s
 }
 
 /// Create the vault directory (mode 0700) or check an existing one: it must be a real directory (not a symlink), owned by us and not
 /// writable by anyone else, because other users could otherwise swap or watch the vault and its rollback counter.
 pub fn prepare_dir(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::DirBuilderExt;
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
@@ -79,11 +80,31 @@ pub fn prepare_dir(dir: &Path) -> Result<(), String> {
             std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))
         }
         Err(e) => Err(format!("cannot inspect {}: {e}", dir.display())),
-        Ok(m) if !m.is_dir() => Err(format!("{} exists but is not a real directory (a symlink or a file): refusing to put the vault there", dir.display())),
-        Ok(m) if m.uid() != rustix::process::getuid().as_raw() => Err(format!("{} is not owned by you: refusing to put the vault there", dir.display())),
-        Ok(m) if m.mode() & 0o022 != 0 => Err(format!("{} is writable by other users (mode {:o}): run chmod 700 on it or pass --vault", dir.display(), m.mode() & 0o7777)),
-        Ok(_) => Ok(()),
+        Ok(m) => check_dir_meta(dir, &m),
     }
+}
+
+fn check_dir_meta(dir: &Path, m: &std::fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    if !m.is_dir() { Err(format!("{} exists but is not a real directory (a symlink or a file): refusing to use it for the vault", dir.display())) }
+    else if m.uid() != rustix::process::getuid().as_raw() { Err(format!("{} is not owned by you: refusing to use it for the vault", dir.display())) }
+    else if m.mode() & 0o022 != 0 { Err(format!("{} is writable by other users (mode {:o}): run chmod 700 on it or pass --vault", dir.display(), m.mode() & 0o7777)) }
+    else { Ok(()) }
+}
+
+/// An EXISTING vault chosen without `--vault` (R26-M1/L1/L7/I3): it must be a regular file (never a symlink, FIFO, directory or a path we
+/// cannot inspect: such a path would be treated as "absent" later and replaced by a new vault), owned by us, and when it lies in an
+/// absolute directory (the default data dir) that directory gets the same checks as for a new vault.
+pub fn check_existing(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+    if !m.is_file() { return Err(format!("{} exists but is not a regular file (a symlink, directory or device): refusing to use or replace it; pass --vault PATH", path.display())); }
+    if m.uid() != rustix::process::getuid().as_raw() { return Err(format!("{} is not owned by you: refusing to use it", path.display())); }
+    if let Some(dir) = path.parent().filter(|d| d.is_absolute()) {
+        let dm = std::fs::symlink_metadata(dir).map_err(|e| format!("cannot inspect {}: {e}", dir.display()))?;
+        check_dir_meta(dir, &dm)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -159,7 +180,7 @@ mod tests {
         assert!(is_tails("NAME=\"Debian\"\nTAILS_PRODUCT_NAME=\"Tails\"\n"));
         assert!(!is_tails("NAME=\"Ubuntu\"\nID=ubuntu\n"));
         let t = confirm_text(&p("/home/amnesia/.local/share/nerd-chat/nerd-chat.vault"), true);
-        assert!(t.contains("ERASED") && t.contains("Persistent") && t.contains("Ctrl+C"));
+        assert!(t.contains("ERASED") && t.contains("Persistent") && t.contains("cancels"));
         assert!(!confirm_text(&p("/x/nerd-chat.vault"), false).contains("ERASED"));
     }
 
@@ -188,5 +209,27 @@ mod tests {
         assert!(prepare_dir(&link).unwrap_err().contains("not a real directory"));
         let file = t.path().join("f"); std::fs::write(&file, b"x").unwrap();
         assert!(prepare_dir(&file).unwrap_err().contains("not a real directory"));
+    }
+
+    #[test]
+    fn an_existing_vault_must_be_a_regular_file_in_a_private_directory() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("nerd-chat");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let v = dir.join(FILE);
+        std::fs::write(&v, b"x").unwrap();
+        assert!(check_existing(&v).is_ok());
+        // a dangling symlink must be refused, never treated as "absent" (it would be replaced by a new vault elsewhere)
+        let link = dir.join("link.vault");
+        symlink(d.path().join("nowhere"), &link).unwrap();
+        assert!(check_existing(&link).unwrap_err().contains("not a regular file"));
+        // a directory, and a missing path
+        assert!(check_existing(&dir).is_err());
+        assert!(check_existing(&dir.join("missing")).is_err());
+        // a group-writable directory
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(check_existing(&v).unwrap_err().contains("writable by other users"));
     }
 }

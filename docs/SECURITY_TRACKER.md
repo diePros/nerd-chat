@@ -426,7 +426,7 @@ Adds `KIND_MSG_ID`/`KIND_MSG_ACK` and resend (docs/DELIVERY.md). For the reviewe
 confirm one (dedup window 256, replaced connections, re-add carrying `seen`)? (2) can ack/id frames be abused for resource use or as a
 side channel (ack for unknown ids is a no-op; malformed ones cut the connection; one extra fixed-size cell each)? (3) is anything now
 kept longer in RAM than before (up to 50 x 32 KiB per contact until confirmed, wiped on drop/shutdown)? (4) does the quit guard
-and going offline still account for every unconfirmed line? Status: OPEN until reviewed.
+and going offline still account for every unconfirmed line? Status: reviewed in review 26 (below).
 
 ## Default vault location (branch `next`) — self-notes, review PENDING
 `crates/tui/src/vault_path.rs`, `main.rs::default_vault`. Trade-off accepted and visible: the default vault now sits on the computer's disk
@@ -466,3 +466,20 @@ No critical. Test coverage: probe classification, a scripted tor end to end (510
 | R25-L3 | local controllers of a shared tor see a short ADD_ONION/DEL_ONION at export/pairing time | ACCEPTED | random key, not linkable; documented in TRANSPORT.md |
 | R25-L4 | probe used port 9, real hosting a random high port | FIXED | random high port |
 | R25-I | TRANSPORT.md said "nobody publishes a service just to find out" | FIXED | reworded |
+
+## Review 26 (Opus, default vault location) — fixed in the commit after d33ed03
+No critical/high. All vault_path tests pass; new tests: dangling symlink / directory / group-writable directory for `check_existing`, `create` never replaces a dangling symlink.
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R26-M1 | a dangling symlink at `./nerd-chat.vault` (or the default path) counted as "existing", then as "absent" in the UI/store (`Path::exists` follows links): the vault was created in the current directory without confirmation, directory checks or Tails warning | FIXED | `check_existing` refuses anything but a regular file; store/app/main use `symlink_metadata`; any inspect error other than NotFound = refuse |
+| R26-L1 | an existing default vault: no check of directory mode/owner or file owner | FIXED | `check_existing` (regular file, ours, absolute parent dir private and ours) |
+| R26-L2 | parents not checked, `create_dir_all` follows a symlinked `~/.local`; confirmation shows the unresolved path; window between `prepare_dir` and write | OPEN (low) | idea: show the canonical path, `O_NOFOLLOW` dirfd |
+| R26-L3 | any input (also EOF) at the confirmation created the directory | FIXED | only an empty line continues |
+| R26-L4 | the directory was created before the password / swap check | PARTIAL | swap is checked before anything is created; an empty directory is still left if the user then quits at the password prompt (stated in the confirmation) |
+| R26-L5 | purge leaves the empty directory; names stay in the journal/free blocks | OPEN | rmdir after purge when it is the empty default directory; document remanence |
+| R26-L6 | backups/sync copy `~/.local/share`; a restore defeats rollback protection | FIXED (text) | stated in the confirmation; GETTING_STARTED/README updated |
+| R26-L7 | running as root with the user's HOME takes over the user's vault | FIXED | `check_existing` requires file and directory to be owned by the effective user |
+| R26-L8 | Tails detection fails open; Whonix/other live systems get no warning | OPEN (optional) | statfs tmpfs/overlay or `boot=live` heuristic |
+| R26-I1 | the "ignoring ./nerd-chat.vault" notes go to stderr right before the alternate screen and are practically never seen | OPEN | the header shows the path; show the note in the first status line |
+| R26-I3 | an inspect error other than NotFound was treated as "no vault" | FIXED | refused |

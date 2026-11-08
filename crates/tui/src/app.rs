@@ -250,7 +250,7 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config) -> Self {
-        let exists = cfg.path.as_ref().is_some_and(|p| p.exists());
+        let exists = cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok());
         let ram = cfg.path.is_none();
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
