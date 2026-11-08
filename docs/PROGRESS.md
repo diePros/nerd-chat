@@ -29,6 +29,7 @@ spelled `Bash` (capital B).
 | 30-31 | (this commit) | review 20 fixes, AGPL LICENSE, README/SECURITY.md, rename to nerd-chat with tooling, cleanup (-90 lines + dead API), review 21 fixes | yes (reviews 20, 21) | yes (static, sandbox-check) | yes, 3/3 live |
 | 33-34 | (this commit) | queued-label fix, manual message saving (SBS5), purge panic, review 22 fixes | yes (review 22) | yes | yes |
 | 35-36 | (this commit) | terminal-loss fix, release prep (--version, scripts/release.sh, RELEASE_TESTING), review 23 fixes (purge never follows links, read-only keyfile, blank-before-shred, bracketed paste) | yes (review 23), fixes applied | yes | yes (net test now uses the tor RAM dir: Ubuntu AppArmor system_tor blocks sockets elsewhere) |
+| 38-39 | ff0f8fc | R12-5 automatic hosting probe at export/pairing (worker thread, 510-only, sticky alert, export blocked during pairing), review 25 fixes, tor_live test made robust (d33ed03) | yes (review 25), fixes applied | yes (static-pie) | chat 3/3 pass; net test passed 6 of 7 runs after the test fix (it failed 5/5 before it, also on the commit before this work: Tor can open and drop an early connection; the one failure left was not captured, suspected slow bootstrap) |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
@@ -55,3 +56,9 @@ Work that needs none of these is continuing: ADD_ONION retry (R15-L1), R8-I7 was
 Tails test passed (user). `.deb` added to `scripts/release.sh` (deterministic: two builds give the same sha256; contents checked with `dpkg-deb -c`,
 `--version` works from the extracted binary; not installed, no lintian available). Next: Opus review of the delivery-confirmation work is done (review 24);
 remaining candidates are the fuzz targets, R8-I7, R12-5 and the GUI-core extraction (0.2).
+
+## Cycle 38-39 (2026-11-08/09)
+Done: R12-5 (see tracker review 25), live Tor tests re-run, `docs/REVIEW_PROMPT_VAULT_PATH.md` written and the Opus review of the default vault
+location started (findings go into the tracker as review 26; not yet integrated). Open: re-test R12-5 on Tails (user), review 26 fixes,
+R24-L2 (per-turn text budget, not reachable from the TUI), cross-machine reproducible build, CI, cargo-vet audits, professional audit.
+Next big item: the GUI (0.2). It needs the UI-agnostic core extracted from `crates/tui/src/app.rs` first (see docs/ROADMAP.md and the GUI plan).
