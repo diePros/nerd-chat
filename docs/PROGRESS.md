@@ -33,7 +33,7 @@ spelled `Bash` (capital B).
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
 2. (done) rotation retry; counter rejected; random port accepted as unneeded.
-3. (done, cycle 38) R12-5: hosting probed automatically at export/pairing when --tor-control is set.
+3. (done, cycles 38-39) R12-5: hosting probed automatically at export/pairing when --tor-control is set; review 25 fixed (worker thread, 510 only, export blocked during pairing).
 4. (sandbox done) cargo-fuzz is installed (nightly toolchain added with the user's OK): write fuzz targets for nerd-chat-strip (jpeg/png/text), the bundle/cell/handshake decoders and the vault/store decoders; run them for a while.
 5. (done, cycles 19-20) snow wiping, ml-kem key wipe verified. mlock stays deferred: RLIMIT_MEMLOCK (usually 8 MiB) is far below Argon2's 512 MiB, swap is refused anyway.
 6. cargo-deny (ask first), cargo-vet, CI, cross-machine reproducible build.

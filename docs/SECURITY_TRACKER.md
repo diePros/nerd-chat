@@ -259,7 +259,7 @@ Round 4 not run: remaining items are minor; run one before wider use.
 | R12-2 | Capability excluded from the fingerprint/safety number (so both sides compute the same number from keys only); authenticated only by the bundle self-signature + the pairing proof | ACCEPTED | |
 | R12-3 | A malicious contact can claim "cannot host" to make us host for them (presence visible to holders of their bundle). Inherent (no other way to connect); visible in the UI | ACCEPTED/documented | |
 | R12-4 | A wrong bit (claims can host, Tor refuses): the other side must switch on `h`; not automatic by design | ACCEPTED | |
-| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | FIXED | with `--tor-control`, export/pairing runs a throwaway ADD_ONION test while nothing was told to that contact yet; refusal -> bit false, inconclusive -> no export (never guess; the bit is permanent); `--cannot-host` still wins. Not yet re-reviewed |
+| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | FIXED (review 25) | with `--tor-control`, the first export/pairing runs a throwaway ADD_ONION probe on a worker thread; see review 25 for the hardening |
 
 ## Review 12 — capability/host-anyway change (commit 8f85714); fixes
 No Critical/High. Integrated:
@@ -452,3 +452,17 @@ No critical/high. Nothing was re-reviewed after the fixes yet.
 | R24-I2 | texts stay in RAM longer (until confirmed); if the engine misses the panic key's 400 ms, `unacked` lives until exit | ACCEPTED | every normal path wipes (verified by the reviewer); the UI holds the same text anyway |
 | R24-I3 | comments and DELIVERY.md out of date | FIXED | |
 | R24-T | test gaps: UI never saw the text, out-of-order/misc mapping, replaced connection | FIXED / PARTIAL | first and third added (the replaced connection by injecting a stale-generation event), mapping covered by real two-app tests; no UI test for an out-of-order ack from a hostile peer |
+
+## Review 25 (Opus, R12-5 automatic hosting probe, commits db70077 + 1c20cca) — fixed in the next commit
+No critical. Test coverage: probe classification, a scripted tor end to end (510 / 451 / wrong ServiceID / unreachable), the real probe through the app (stalled tor, keys ignored, Esc, 510 -> alert + bit false).
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R25-H1 | the probe blocked the UI thread (up to ~35 s honest, unbounded with a hostile endpoint): F12 / purge / signal wipe delayed; it also sent PROTOCOLINFO to an unverified owner before refusing | FIXED | worker thread; while it runs only F12/purge/Esc act; 15 s overall deadline; unverified owner -> `Unknown` before any byte is sent |
+| R25-M1 | every non-2xx reply (451 transient, 55x, odd codes) became a permanent `Cannot` | FIXED | only `510` is `Cannot`; the rest is `Unknown` (the action is cancelled). Not done: asking the user to confirm a `Cannot` (a sticky alert tells them instead) |
+| R25-M2 | export during a running/waiting pairing could store a different bit than the one told to the peer | FIXED | export refused while a pairing runs or waits for P; `finish_pair` discards the pairing if stored and told bits differ |
+| R25-L1 | the `Cannot` notice was overwritten by the next status line | FIXED | sticky alert (`z` acknowledges) |
+| R25-L2 | with `--tor-trust-control` a short-lived squatter at export time fixes the bit forever | ACCEPTED | inside the documented trust model; 510-only and the alert limit it; delete + re-pair undoes it (R13-M1) |
+| R25-L3 | local controllers of a shared tor see a short ADD_ONION/DEL_ONION at export/pairing time | ACCEPTED | random key, not linkable; documented in TRANSPORT.md |
+| R25-L4 | probe used port 9, real hosting a random high port | FIXED | random high port |
+| R25-I | TRANSPORT.md said "nobody publishes a service just to find out" | FIXED | reworded |

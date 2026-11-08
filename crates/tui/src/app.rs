@@ -78,6 +78,12 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
     TorTransport::start(setup, progress).map(|t| Box::new(t) as Box<dyn Transport>)
 }
 
+/// What continues once the hosting probe answered. All variants carry the contact id: nothing may be applied to another contact.
+enum Then { Export([u8; 8], String), Listen([u8; 8], SocketAddr), Join([u8; 8], SocketAddr, Result<PairingJoin, ExchangeError>) }
+
+/// How long the worker may take before the answer counts as inconclusive (a hostile or hung control port must not hold us).
+const PROBE_DEADLINE: Duration = Duration::from_secs(15);
+
 /// Where the engine is. (UI reads this.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Online { Offline, Starting(u8), Online, Stopping, Failed(String) }
@@ -175,6 +181,8 @@ pub struct App {
     vf: Option<VaultFile>,
     view: Option<SafetyView>,
     pair_rx: Option<Receiver<PairMsg>>,
+    /// The automatic hosting probe (R12-5) running on a worker thread, what to do when it answers, and when it started.
+    probe_rx: Option<Receiver<HostProbe>>, probe_then: Option<(Then, Instant)>,
     pub pair_info: Option<Zeroizing<String>>,
     pair_ctl: Option<PairCtl>,
     code_buf: SecretBuf,
@@ -247,7 +255,7 @@ impl App {
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
-            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
+            pair_rx: None, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
@@ -420,6 +428,7 @@ impl App {
         self.view = None;
         self.pending_pair = None;
         self.pair_rx = None;
+        self.probe_rx = None; self.probe_then = None;
         self.pair_info = None;
         self.pw.clear();
         self.pw2.clear();
@@ -433,6 +442,10 @@ impl App {
     pub fn handle(&mut self, k: Key) -> Action {
         if k == Key::Purge { self.purge_prepare(); return Action::Purge; }
         if matches!(k, Key::F12 | Key::CtrlBackslash) { self.panic_wipe(); return Action::Panic; }
+        if self.probe_rx.is_some() { // the hosting probe runs: the only key is Esc (cancel); panic/purge were handled above
+            if k == Key::Esc { self.probe_rx = None; self.probe_then = None; self.ok("Cancelled."); }
+            return Action::None;
+        }
         match &self.screen {
             Screen::Wiped => Action::Quit,
             // the privacy screen swallows every key (even for a prompt an engine event raised underneath it)
@@ -657,6 +670,7 @@ impl App {
             Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } else { self.alerts_dropped = 0; } }
             Key::Char('n') => self.open_prompt(Prompt::NewContact, ""),
             // Neutral random default: the contact's name must not leak into filesystem metadata.
+            Key::Char('e') if self.pair_rx.is_some() || self.pending_pair.is_some() => self.err("A pairing is running or waiting for your answer (P): export after it finished, so the capability told to the contact stays the same."),
             Key::Char('e') => if self.sel_name().is_some() {
                 let mut r = [0u8; 4];
                 getrandom::fill(&mut r).expect("OS RNG unavailable");
@@ -862,22 +876,57 @@ impl App {
     }
 
     /// `advertised`, plus the automatic probe (R12-5): while nothing was told to this contact yet, `--cannot-host` wins; otherwise, with
-    /// an EXTERNAL tor (Tails/Whonix) we ask that tor whether it lets us host (throwaway ADD_ONION) and say what it answered. With our
-    /// own tor hosting always works. An inconclusive probe is an error: the bit becomes permanent for this contact, so never guess.
-    fn advertised_probed(&mut self, idx: usize) -> Result<bool, String> {
-        if self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).is_some_and(|c| c.adv_can_host.is_some()) || !self.cfg.can_host { return Ok(self.advertised(idx)); }
-        let r = match (&self.cfg.host_probe_test, &self.cfg.tor.control) {
-            (Some(t), _) => t.clone(),
-            (None, Some(ctl)) if self.cfg.transport.is_none() => {
-                let auth = AuthPref { password: None, cookie_path: self.cfg.tor.cookie.clone(), peer_verified: false };
-                probe_hosting(ctl, &auth, self.cfg.tor.trust_control)
-            }
-            _ => HostProbe::Can,
+    /// an EXTERNAL tor (Tails/Whonix) we ask that tor on a worker thread whether it lets us host (throwaway ADD_ONION) and continue
+    /// with `then` when it answers (the UI stays responsive: F12/purge work, Esc cancels). With our own tor hosting always works.
+    /// An inconclusive probe cancels the action: the bit becomes permanent for this contact, so never guess.
+    fn with_adv(&mut self, then: Then) {
+        let idx = self.sel;
+        if self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).is_some_and(|c| c.adv_can_host.is_some()) || !self.cfg.can_host {
+            let v = self.advertised(idx);
+            return self.resume(then, v);
+        }
+        if let Some(t) = self.cfg.host_probe_test.clone() { return self.probe_done(then, t); }
+        let Some(ctl) = self.cfg.tor.control.clone().filter(|_| self.cfg.transport.is_none()) else { return self.resume(then, true) };
+        let auth = AuthPref { password: None, cookie_path: self.cfg.tor.cookie.clone(), peer_verified: false };
+        let trust = self.cfg.tor.trust_control;
+        let (tx, rx) = channel();
+        thread::spawn(move || { let _ = tx.send(probe_hosting(&ctl, &auth, trust)); });
+        self.probe_rx = Some(rx);
+        self.probe_then = Some((then, Instant::now()));
+        self.ok("Checking whether your Tor can host onion services ... (Esc = cancel)");
+    }
+
+    fn poll_probe(&mut self) {
+        let Some(rx) = &self.probe_rx else { return };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) if self.probe_then.as_ref().is_some_and(|(_, t)| t.elapsed() < PROBE_DEADLINE) => return,
+            Err(TryRecvError::Empty) => HostProbe::Unknown("no answer in time".into()),
+            Err(TryRecvError::Disconnected) => HostProbe::Unknown("probe thread died".into()),
         };
+        self.probe_rx = None;
+        if let Some((then, _)) = self.probe_then.take() { self.probe_done(then, r); }
+    }
+
+    fn probe_done(&mut self, then: Then, r: HostProbe) {
+        let id = match &then { Then::Export(i, _) | Then::Listen(i, _) | Then::Join(i, _, _) => *i };
+        if self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) != Some(id) { return self.err("The selected contact changed: nothing was done."); }
         match r {
-            HostProbe::Can => Ok(true),
-            HostProbe::Cannot(why) => { self.ok(format!("Your Tor cannot host onion services ({why}): this contact will be told, so it hosts for you.")); Ok(false) }
-            HostProbe::Unknown(why) => Err(format!("Cannot tell whether your Tor can host onion services ({why}). Start Tor / fix --tor-control, or pass --cannot-host if you know it cannot.")),
+            HostProbe::Can => self.resume(then, true),
+            HostProbe::Cannot(why) => {
+                // a permanent, privacy-relevant decision for this contact: a sticky alert, not a status line the next message replaces
+                self.record_alert(Some(id), &format!("your Tor cannot host onion services ({why}): this contact is told so and will host for you"));
+                self.resume(then, false)
+            }
+            HostProbe::Unknown(why) => self.err(format!("Cannot tell whether your Tor can host onion services ({why}). Start Tor / fix --tor-control, or pass --cannot-host if you know it cannot.")),
+        }
+    }
+
+    fn resume(&mut self, then: Then, can_host: bool) {
+        match then {
+            Then::Export(_, path) => self.do_export(path, can_host),
+            Then::Listen(_, addr) => self.do_listen(addr, can_host),
+            Then::Join(_, sock, join) => self.do_join(sock, join, can_host),
         }
     }
 
@@ -1120,19 +1169,8 @@ impl App {
                 if self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)).is_some_and(|c| c.next_transport.is_some()) {
                     return self.err("A key rotation for this contact is still waiting for its answer: export after it finished (the bundle would carry the address about to be retired).");
                 }
-                let can_host = match self.advertised_probed(sel) { Ok(v) => v, Err(e) => return self.err(e) };
-                let Some(c) = self.cur() else { return };
-                let id = &c.identity;
-                let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
-                let path = PathBuf::from(&text);
-                match fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(armored.as_bytes())) {
-                    Ok(()) if !self.commit_advertised(sel, can_host) => {
-                        let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
-                        self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
-                    }
-                    Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
-                    Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
-                }
+                let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)).map(|c| c.id) else { return };
+                self.with_adv(Then::Export(id, text));
             }
             Prompt::Import => {
                 // Never follows symlinks, never blocks on FIFOs/devices, size-capped.
@@ -1234,10 +1272,30 @@ impl App {
         self.pair_info = Some(info);
     }
 
+    fn do_export(&mut self, text: String, can_host: bool) {
+        let sel = self.sel;
+        let Some(c) = self.cur() else { return };
+        let id = &c.identity;
+        let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
+        let path = PathBuf::from(&text);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(armored.as_bytes())) {
+            Ok(()) if !self.commit_advertised(sel, can_host) => {
+                let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
+                self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
+            }
+            Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
+            Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
+        }
+    }
+
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
         if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let adv = match self.advertised_probed(self.sel) { Ok(v) => v, Err(e) => { self.err(e); return } };
+        let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+        self.with_adv(Then::Listen(id, addr));
+    }
+
+    fn do_listen(&mut self, addr: SocketAddr, adv: bool) {
         self.pair_adv = Some(adv);
         let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok((o, c)) => (o.with_can_host(adv), c), Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
@@ -1273,7 +1331,11 @@ impl App {
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let adv = match self.advertised_probed(self.sel) { Ok(v) => v, Err(e) => { self.err(e); return } };
+        let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+        self.with_adv(Then::Join(id, sock, parsed));
+    }
+
+    fn do_join(&mut self, sock: SocketAddr, parsed: Result<PairingJoin, ExchangeError>, adv: bool) {
         self.pair_adv = Some(adv);
         let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
         self.spawn_pair(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")), move |cancel, slot, ident| {
@@ -1538,6 +1600,7 @@ impl App {
         if let Some(m) = self.max_scroll.get() { self.scroll = self.scroll.min(m); } // 'g' before the first frame must not leave a huge offset
         self.poll_prep();
         self.poll_kdf();
+        self.poll_probe();
         self.poll_online();
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
@@ -1567,6 +1630,7 @@ impl App {
         let told = self.pair_adv.take();
         let Some(c) = self.vf().store.contacts.iter_mut().find(|c| c.id == id) else { self.err("Contact vanished during pairing."); return };
         if c.peer.is_some() { self.err("Contact already has a peer key; discarded the paired one."); return; }
+        if told.is_some() && c.adv_can_host.is_some() && c.adv_can_host != told { self.err("Pairing discarded: the capability stored for this contact differs from the one just told to the peer (roles would disagree). Pair again."); return; }
         c.peer = Some(peer);
         c.trust = trust;
         let set_adv = c.adv_can_host.is_none() && told.is_some();
@@ -1694,6 +1758,48 @@ mod tests {
         add(&mut a, "dave"); a.sel = 2; a.cfg.can_host = false; a.cfg.host_probe_test = Some(HostProbe::Unknown("x".into()));
         export(&mut a, "5.sbc");
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[2].adv_can_host, Some(false));
+    }
+
+    #[test]
+    fn the_real_probe_runs_off_the_ui_thread_keys_are_ignored_and_esc_cancels() {
+        use std::os::unix::net::UnixListener;
+        let d = tempfile::tempdir().unwrap();
+        let sock = d.path().join("ctl");
+        let l = UnixListener::bind(&sock).unwrap();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || for mut s in l.incoming().flatten() {
+            go_rx.recv().ok(); // the "tor" stalls until the test lets it answer
+            let mut rd = std::io::BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            while { line.clear(); std::io::BufRead::read_line(&mut rd, &mut line).unwrap_or(0) > 0 } {
+                let r = if line.starts_with("PROTOCOLINFO") { "250-PROTOCOLINFO 1\r\n250-AUTH METHODS=NULL\r\n250 OK\r\n" } else if line.starts_with("AUTHENTICATE") { "250 OK\r\n" } else { "510 Command filtered\r\n" };
+                if s.write_all(r.as_bytes()).is_err() { break; }
+            }
+        });
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        a.cfg.tor.control = Some(Addr::Unix(sock));
+        let f = d.path().join("b.sbc");
+        a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
+        assert!(a.probe_rx.is_some(), "{}", a.status);
+        assert!(a.handle(Key::Char('d')) == Action::None && a.probe_rx.is_some(), "other keys are ignored while probing");
+        a.handle(Key::Esc);
+        assert!(a.probe_rx.is_none() && !f.exists() && a.vf.as_ref().unwrap().store.contacts[0].adv_can_host.is_none(), "Esc cancels without exporting");
+        // again, this time let tor answer: 510 -> told "cannot host", with a sticky alert
+        a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
+        go_tx.send(()).ok(); go_tx.send(()).ok();
+        for _ in 0..200 { a.poll(); if a.probe_rx.is_none() { break; } thread::sleep(Duration::from_millis(25)); }
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false), "{}", a.status);
+        assert!(f.exists() && a.alerts.iter().any(|(t, _)| t.contains("cannot host")), "{:?}", a.alerts);
+    }
+
+    #[test]
+    fn export_is_refused_while_a_pairing_waits_so_the_told_bit_cannot_diverge() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        a.pending_pair = Some(([0; 8], ImportedContact::from_file(Bundle::from_identity(&ContactIdentity::generate())), "1".into()));
+        a.handle(Key::Char('e'));
+        assert!(a.error && a.status.contains("pairing"), "{}", a.status);
+        assert!(!matches!(a.screen, Screen::Prompt(_)));
     }
 
     #[test]
