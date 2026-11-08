@@ -38,7 +38,7 @@ The privacy screen only hides the screen (the vault stays open). `docs/SECURITY_
 
 ## Documents
 `docs/GETTING_STARTED.md`, `docs/BUILD_AND_RUN.md`, `docs/TRANSPORT.md`, `docs/FILE_SHARING.md`, `docs/KEY_ROTATION.md`, `docs/SECURITY_TRACKER.md`,
-`docs/ROADMAP.md`, `docs/NAMES.md` (project name and how to change it), `SECURITY.md` (reporting vulnerabilities).
+`docs/EXCHANGING_CONTACTS.md` (how to hand over a contact file safely), `docs/ROADMAP.md`, `docs/NAMES.md` (project name and how to change it), `SECURITY.md` (reporting vulnerabilities).
 
 ## License
 GNU Affero General Public License v3.0 or later (`LICENSE`). Vendored third-party code keeps its own license (`vendor/`).

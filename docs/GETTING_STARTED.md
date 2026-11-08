@@ -61,7 +61,7 @@ cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-mu
 
 Then in Terminal 1: `I` -> `bob-for-alice.sbc`. In Terminal 2: `I` -> `alice-for-bob.sbc`.
 Both now show **UNVERIFIED** and the SAME safety number. Press `v` on both, compare the digits, press `y`.
-Status turns **● verified**. (Real use: send the .sbc over any channel; compare the number by voice/in person.)
+Status turns **● verified**. (Real use: do NOT send the .sbc over just any channel: read docs/EXCHANGING_CONTACTS.md; compare the number by voice/in person.)
 
 ## 4. Try local one-time-code pairing (no files)
 Add a fresh contact on each side (`n`), then:

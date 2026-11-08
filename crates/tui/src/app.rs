@@ -1283,7 +1283,7 @@ impl App {
                 let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
                 self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
             }
-            Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
+            Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your contact file to {}. It is NOT public (it shows when you are online): hand it over in person or use a channel you trust (not Discord, e-mail...), then compare the safety number by voice (v). See docs/EXCHANGING_CONTACTS.md.", path.display())) }
             Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
         }
     }
