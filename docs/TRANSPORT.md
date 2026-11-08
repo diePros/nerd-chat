@@ -78,8 +78,7 @@ The report states for every control port whether its owner check passed (`owner 
   onion service for that contact). Only listeners publish a service, so you are not visible online for contacts that never dial you.
   A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).
 - **Roles come from the bundles (decided: capability bit + explicit opt-in, no timers).** Every bundle (v4, `SBC4`) carries a
-  SIGNED `can_host` bit, set by `--cannot-host` (use it when `--probe-tor --probe-onion` shows that your Tor refuses to host,
-  e.g. a Tails with a restricted control port). The bit WE advertise to a contact is fixed at the first export/pairing with that contact and stored in the vault: roles always use what we told them, whatever flags we run with later. If exactly ONE side can host, that side hosts and the other dials; if both or
+  SIGNED `can_host` bit. With `--tor-control` it is probed automatically at the first export/pairing with a contact (a throwaway `ADD_ONION`; a refusal says "cannot host", an inconclusive probe cancels the export instead of guessing). `--cannot-host` forces "cannot" without probing. Our own spawned tor can always host. The bit WE advertise to a contact is fixed at the first export/pairing with that contact and stored in the vault: roles always use what we told them, whatever flags we run with later. If exactly ONE side can host, that side hosts and the other dials; if both or
   neither can, the smaller signing key dials. Nobody publishes a service just to find out, and nothing is published after a number
   of failed dials any more. The bit is not part of the safety number (it is operational; both sides must compute the same number
   from key material).

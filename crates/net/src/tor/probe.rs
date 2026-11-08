@@ -72,13 +72,45 @@ pub fn probe(c: &Candidates, try_onion: bool, auth: &AuthPref, trust_control: bo
     out
 }
 
-/// Create one throwaway onion service (with a dummy authorized client) and remove it again.
-fn onion_test<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> String {
+/// What a quiet hosting probe found out (used automatically at export/pairing, R12-5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostProbe {
+    /// tor accepted and removed a throwaway onion service: we can host.
+    Can,
+    /// tor answered but refused to host (filtered control port): we cannot host, say so in the bundle.
+    Cannot(String),
+    /// no answer we can rely on (tor not running, auth failed, owner not verified...): do NOT fix a capability on this.
+    Unknown(String),
+}
+
+/// Ask the tor behind `control` whether it lets us host onion services, by creating and removing one throwaway service.
+/// Only a clear "REFUSED by tor" counts as `Cannot`; anything else that goes wrong is `Unknown` (the bit is permanent per contact).
+pub fn probe_hosting(control: &Addr, auth: &AuthPref, trust_control: bool) -> HostProbe {
+    let unknown = |what: &str, e: &dyn std::fmt::Display| HostProbe::Unknown(format!("{what}: {}", sanitize(&e.to_string())));
+    let (s, check) = match open_control(control, Duration::from_secs(5)) { Ok(x) => x, Err(e) => return unknown("tor control port not reachable", &e) };
+    let mut ctl = Controller::new(s);
+    let pref = AuthPref { password: auth.password.clone(), cookie_path: auth.cookie_path.clone(), peer_verified: auth.peer_verified || check.verified || trust_control };
+    if let Err(e) = ctl.authenticate(&pref) { return unknown("cannot authenticate to the tor control port", &e); }
+    match onion_attempt(&mut ctl) {
+        Ok(()) => HostProbe::Can,
+        Err(TorError::Rejected { code, msg }) => HostProbe::Cannot(format!("tor refused to host ({code} {})", sanitize(&msg))),
+        Err(e) => unknown("hosting test failed", &e),
+    }
+}
+
+fn onion_attempt<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> Result<(), TorError> {
     let id = ContactIdentity::generate();
     let dummy = Bundle::from_identity(&ContactIdentity::generate());
     let target = Target::Tcp(SocketAddr::from(([127, 0, 0, 1], 9)));
-    match ctl.add_onion(&id.onion_expanded_secret(), super::VIRT_PORT, &target, &[dummy.auth_pub], &id.onion_public()) {
-        Ok(sid) => { let _ = ctl.del_onion(&sid); "  ADD_ONION (hosting onion services): ALLOWED".into() }
+    let sid = ctl.add_onion(&id.onion_expanded_secret(), super::VIRT_PORT, &target, &[dummy.auth_pub], &id.onion_public())?;
+    let _ = ctl.del_onion(&sid);
+    Ok(())
+}
+
+/// Create one throwaway onion service (with a dummy authorized client) and remove it again.
+fn onion_test<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> String {
+    match onion_attempt(ctl) {
+        Ok(()) => "  ADD_ONION (hosting onion services): ALLOWED".into(),
         Err(TorError::Rejected { code, msg }) => format!("  ADD_ONION: REFUSED by tor ({code} {}) - hosting not possible through this control port", sanitize(&msg)),
         Err(e) => format!("  ADD_ONION: failed ({})", sanitize(&e.to_string())),
     }
@@ -100,5 +132,15 @@ mod tests {
         assert!(r.contains("not reachable"), "{r}");
         assert!(r.contains("not a tor control port") || r.contains("reachable but"), "{r}");
         assert!(r.contains("RESULT: no authenticated control port"), "{r}");
+    }
+
+    #[test]
+    fn a_refusing_tor_is_cannot_and_an_unreachable_one_is_unknown_never_cannot() {
+        let (mut c, h) = super::super::control::tests::fake(vec![("ADD_ONION", "510 Command filtered\r\n".into()), ("ADD_ONION", "510 Command filtered\r\n".into())]);
+        assert!(matches!(onion_attempt(&mut c), Err(TorError::Rejected { code: 510, .. })));
+        h.join().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let r = probe_hosting(&Addr::Unix(d.path().join("nothing")), &AuthPref::default(), false);
+        assert!(matches!(r, HostProbe::Unknown(_)), "{r:?}");
     }
 }

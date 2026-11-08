@@ -259,7 +259,7 @@ Round 4 not run: remaining items are minor; run one before wider use.
 | R12-2 | Capability excluded from the fingerprint/safety number (so both sides compute the same number from keys only); authenticated only by the bundle self-signature + the pairing proof | ACCEPTED | |
 | R12-3 | A malicious contact can claim "cannot host" to make us host for them (presence visible to holders of their bundle). Inherent (no other way to connect); visible in the UI | ACCEPTED/documented | |
 | R12-4 | A wrong bit (claims can host, Tor refuses): the other side must switch on `h`; not automatic by design | ACCEPTED | |
-| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | OPEN | could run the probe at export time when a control port is configured |
+| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | FIXED | with `--tor-control`, export/pairing runs a throwaway ADD_ONION test while nothing was told to that contact yet; refusal -> bit false, inconclusive -> no export (never guess; the bit is permanent); `--cannot-host` still wins. Not yet re-reviewed |
 
 ## Review 12 — capability/host-anyway change (commit 8f85714); fixes
 No Critical/High. Integrated:

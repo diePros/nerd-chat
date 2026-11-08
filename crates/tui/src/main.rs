@@ -29,8 +29,8 @@ fn usage() -> ! {
   --tor-path PATH      tor binary to start when going online (default: `tor` from PATH)\n\
   --tor-control ADDR   use an already running tor (127.0.0.1:9051 or unix:/run/tor/control) instead of starting one;\n\
                        with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
-  --cannot-host        our Tor cannot host onion services (Tails with a restricted control port): bundles you export/pair say so,\n\
-                       so the contact hosts for you (check with --probe-tor --probe-onion)\n\
+  --cannot-host        say "cannot host onion services" in the bundles you export/pair (with --tor-control this is probed\n\
+                       automatically at export; check by hand with --probe-tor --probe-onion)\n\
   --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n  --no-sandbox         clean received/sent files in this process instead of the resource-limited helper process\n\
 \
   --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit (same swap rule, --allow-swap)\n\

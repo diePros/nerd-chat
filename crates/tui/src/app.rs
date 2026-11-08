@@ -1,7 +1,7 @@
 //! UI state machine (no rendering, no terminal): driven by key events, fully testable.
 use crate::secret::{ComposeBuf, SecretBuf};
 use nerd_chat_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
-use nerd_chat_net::tor::{control::AuthPref, spawn::{find_tor, SpawnConfig}, Addr};
+use nerd_chat_net::tor::{control::AuthPref, probe::{probe_hosting, HostProbe}, spawn::{find_tor, SpawnConfig}, Addr};
 use nerd_chat_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
 use nerd_chat_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
 use nerd_chat_store::{read_regular_file, OpenInfo, StoreError, VaultFile};
@@ -49,13 +49,15 @@ pub struct Config {
     /// Our Tor cannot host onion services (e.g. a Tails with a restricted control port): said in our exported bundles, so the
     /// contact hosts for us and nothing needs to be published speculatively. (`--cannot-host`; `--probe-tor --probe-onion` tells you.)
     pub can_host: bool,
+    /// Tests only: the answer of the automatic hosting probe (None = really probe, when an external tor is configured).
+    pub host_probe_test: Option<HostProbe>,
     /// Start even though swap is active (secrets could be written to the disk by the OS). Default: refuse.
     pub allow_swap: bool,
 }
 
 impl Config {
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, allow_swap: false }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false }
     }
 }
 
@@ -859,6 +861,26 @@ impl App {
         self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).and_then(|c| c.adv_can_host).unwrap_or(self.cfg.can_host)
     }
 
+    /// `advertised`, plus the automatic probe (R12-5): while nothing was told to this contact yet, `--cannot-host` wins; otherwise, with
+    /// an EXTERNAL tor (Tails/Whonix) we ask that tor whether it lets us host (throwaway ADD_ONION) and say what it answered. With our
+    /// own tor hosting always works. An inconclusive probe is an error: the bit becomes permanent for this contact, so never guess.
+    fn advertised_probed(&mut self, idx: usize) -> Result<bool, String> {
+        if self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).is_some_and(|c| c.adv_can_host.is_some()) || !self.cfg.can_host { return Ok(self.advertised(idx)); }
+        let r = match (&self.cfg.host_probe_test, &self.cfg.tor.control) {
+            (Some(t), _) => t.clone(),
+            (None, Some(ctl)) if self.cfg.transport.is_none() => {
+                let auth = AuthPref { password: None, cookie_path: self.cfg.tor.cookie.clone(), peer_verified: false };
+                probe_hosting(ctl, &auth, self.cfg.tor.trust_control)
+            }
+            _ => HostProbe::Can,
+        };
+        match r {
+            HostProbe::Can => Ok(true),
+            HostProbe::Cannot(why) => { self.ok(format!("Your Tor cannot host onion services ({why}): this contact will be told, so it hosts for you.")); Ok(false) }
+            HostProbe::Unknown(why) => Err(format!("Cannot tell whether your Tor can host onion services ({why}). Start Tor / fix --tor-control, or pass --cannot-host if you know it cannot.")),
+        }
+    }
+
     /// Fix (and save) what we told this contact, but ONLY after the bundle really left (file written / pairing succeeded) and
     /// only if the vault could be saved: otherwise memory and vault would disagree and later roles would too (review 13: L2/L3).
     fn commit_advertised(&mut self, idx: usize, value: bool) -> bool {
@@ -1098,7 +1120,7 @@ impl App {
                 if self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)).is_some_and(|c| c.next_transport.is_some()) {
                     return self.err("A key rotation for this contact is still waiting for its answer: export after it finished (the bundle would carry the address about to be retired).");
                 }
-                let can_host = self.advertised(sel);
+                let can_host = match self.advertised_probed(sel) { Ok(v) => v, Err(e) => return self.err(e) };
                 let Some(c) = self.cur() else { return };
                 let id = &c.identity;
                 let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
@@ -1215,7 +1237,7 @@ impl App {
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
         if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let adv = self.advertised(self.sel);
+        let adv = match self.advertised_probed(self.sel) { Ok(v) => v, Err(e) => { self.err(e); return } };
         self.pair_adv = Some(adv);
         let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok((o, c)) => (o.with_can_host(adv), c), Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
@@ -1251,7 +1273,7 @@ impl App {
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let adv = self.advertised(self.sel);
+        let adv = match self.advertised_probed(self.sel) { Ok(v) => v, Err(e) => { self.err(e); return } };
         self.pair_adv = Some(adv);
         let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
         self.spawn_pair(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")), move |cancel, slot, ident| {
@@ -1644,6 +1666,34 @@ mod tests {
         a.online = Online::Stopping;
         a.handle(Key::Char('h'));
         assert!(a.error && a.status.contains("settles"));
+    }
+
+    #[test]
+    fn export_probes_hosting_automatically_and_never_guesses() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        let export = |a: &mut App, name: &str| { a.handle(Key::Char('e')); a.input = d.path().join(name).to_str().unwrap().into(); a.handle(Key::Enter); };
+        a.cfg.host_probe_test = Some(HostProbe::Unknown("no tor".into()));
+        export(&mut a, "1.sbc");
+        assert!(a.error && a.status.contains("Cannot tell"), "{}", a.status);
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, None);
+        assert!(!d.path().join("1.sbc").exists(), "no bundle without a capability answer");
+        a.cfg.host_probe_test = Some(HostProbe::Cannot("510".into()));
+        export(&mut a, "2.sbc");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
+        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("2.sbc")).unwrap()).unwrap().can_host);
+        // fixed once told: a later, different probe answer changes nothing
+        a.cfg.host_probe_test = Some(HostProbe::Can);
+        export(&mut a, "3.sbc");
+        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("3.sbc")).unwrap()).unwrap().can_host);
+        // another contact, tor can host
+        add(&mut a, "carol"); a.sel = 1;
+        export(&mut a, "4.sbc");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[1].adv_can_host, Some(true));
+        // --cannot-host wins without asking the probe
+        add(&mut a, "dave"); a.sel = 2; a.cfg.can_host = false; a.cfg.host_probe_test = Some(HostProbe::Unknown("x".into()));
+        export(&mut a, "5.sbc");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[2].adv_can_host, Some(false));
     }
 
     #[test]
