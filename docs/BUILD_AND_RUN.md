@@ -109,7 +109,7 @@ Use **two** sticks if you can; their roles must be different devices:
 STICK-A (the program + vault)            STICK-B (the second factor)
   nerd-chat            (the static file)    key.bin           (keyfile, 64 random bytes)
   nerd-chat.sha256 + .sig                   nerd-chat.counter  (rollback counter)
-  nerd-chat.vault      (created on 1st run)
+  nerd-chat.vault      (created on 1st run with --vault as below; without it: ~/.local/share/nerd-chat/)
 ```
 ```bash
 head -c 64 /dev/urandom > /media/$USER/STICK-B/key.bin            # create once; losing it = losing the vault
