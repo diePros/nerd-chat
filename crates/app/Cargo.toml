@@ -1,0 +1,30 @@
+[package]
+publish = false
+name = "nerd-chat-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "UI-agnostic application core: the state machine (vault, contacts, pairing, chat engine glue, panic/purge), shared by the terminal and the GUI front ends"
+
+[features]
+# the ratatui renderer (the terminal front end turns it on; the GUI does not)
+terminal-ui = ["dep:ratatui"]
+
+[dependencies]
+nerd-chat-core = { path = "../core" }
+nerd-chat-vault = { path = "../vault" }
+nerd-chat-store = { path = "../store" }
+nerd-chat-exchange = { path = "../exchange" }
+nerd-chat-net = { path = "../net" }
+nerd-chat-chat = { path = "../chat" }
+nerd-chat-strip = { path = "../strip" }
+nerd-chat-sandbox = { path = "../sandbox" }
+ratatui = { version = "0.30", optional = true }
+zeroize = "1"
+getrandom = "0.3"
+rustix = { version = "1", features = ["process", "thread", "event"] }
+
+[dev-dependencies]
+ratatui = "0.30"  # the renderer is compiled in the tests so that every screen test runs with and without the `terminal-ui` feature
+nerd-chat-vault = { path = "../vault", features = ["insecure-test-kdf"] }
+tempfile = "3"

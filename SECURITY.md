@@ -10,8 +10,8 @@ real contact data. We aim to acknowledge within 7 days and to fix or document th
 
 ## What is in scope
 The cryptography and protocol (`crates/core`, `crates/exchange`), the vault (`crates/vault`, `crates/store`), the Tor transport
-(`crates/net`, `crates/chat`), the file cleaner and its sandbox (`crates/strip`, `crates/sandbox`, `crates/tui/src/cleaner.rs`),
-the UI's handling of keys, prompts, the panic key and the privacy screen (`crates/tui`), and the build (`scripts/`, `Cargo.lock`, `vendor/`).
+(`crates/net`, `crates/chat`), the file cleaner and its sandbox (`crates/strip`, `crates/sandbox`, `crates/app/src/cleaner.rs`),
+the UI's handling of keys, prompts, the panic key and the privacy screen (`crates/app`, `crates/tui`), and the build (`scripts/`, `Cargo.lock`, `vendor/`).
 Particularly interesting: anything that makes the app write plaintext or keys to disk, leak when you are online, accept an
 unauthenticated peer or file, survive the panic key, or escape the cleaning helper's sandbox.
 

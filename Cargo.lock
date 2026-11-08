@@ -1017,6 +1017,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nerd-chat-app"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "nerd-chat-chat",
+ "nerd-chat-core",
+ "nerd-chat-exchange",
+ "nerd-chat-net",
+ "nerd-chat-sandbox",
+ "nerd-chat-store",
+ "nerd-chat-strip",
+ "nerd-chat-vault",
+ "ratatui",
+ "rustix",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "nerd-chat-chat"
 version = "0.1.0"
 dependencies = [
@@ -1111,12 +1130,9 @@ dependencies = [
 name = "nerd-chat-tui"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
- "nerd-chat-chat",
+ "nerd-chat-app",
  "nerd-chat-core",
- "nerd-chat-exchange",
  "nerd-chat-net",
- "nerd-chat-sandbox",
  "nerd-chat-store",
  "nerd-chat-strip",
  "nerd-chat-vault",

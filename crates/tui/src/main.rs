@@ -2,13 +2,8 @@
 //!   nerd-chat [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]
 #![forbid(unsafe_code)]
 
-mod app;
-mod cleaner;
-mod secret;
-mod ui;
-mod vault_path;
 
-use app::{Action, App, Config, Key};
+use nerd_chat_app::{app::{self, Action, App, Config, Key}, cleaner, hardening::{harden, swap_problem}, ui, vault_path};
 use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -200,22 +195,6 @@ fn wipe_terminal() {
     let _ = execute!(stdout(), Clear(ClearType::All), Clear(ClearType::Purge), ratatui::crossterm::cursor::MoveTo(0, 0));
 }
 
-/// Process hardening that needs no `unsafe`: no core dumps (a dump of the unlocked heap would put
-/// keys on disk), and not ptrace/proc-mem readable by same-user processes.
-/// Returns human-readable warnings for anything that could not be applied.
-fn harden() -> Vec<String> {
-    use rustix::process::{setrlimit, Resource, Rlimit};
-    let mut w = Vec::new();
-    if setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) }).is_err() {
-        w.push("could not disable core dumps".to_string());
-    }
-    #[cfg(target_os = "linux")]
-    if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).is_err() {
-        w.push("could not mark the process non-dumpable".to_string());
-    }
-    w
-}
-
 /// Wait up to `timeout` for input on `fd`. `Err(UnexpectedEof)` = the terminal is GONE (window closed, ssh dropped, tmux killed: hangup, error or
 /// end-of-file). We look ourselves because crossterm's event reader spins forever inside `event::poll` once its tty returns EOF (observed: a
 /// process at 100% CPU for hours that never reaches our SIGHUP check), so it must never be asked to read from a dead terminal.
@@ -264,18 +243,6 @@ fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
     // after the wipe, counts only (a path printed here would stay in the scrollback)
     if let Some((ok, failed)) = app.purge_report { eprintln!("purge: {ok} file(s) overwritten and deleted{}", if failed > 0 { format!(", {failed} could NOT be removed (delete them yourself)") } else { String::new() }); }
     std::process::exit(0)
-}
-
-/// Active swap devices/files from `/proc/swaps` text (everything after the header line).
-fn parse_swaps(text: &str) -> Vec<String> {
-    text.lines().skip(1).filter_map(|l| l.split_whitespace().next()).map(str::to_string).collect()
-}
-
-/// Refuse to run with swap active: the kernel may write our memory (keys, plaintext) to disk, where it survives power-off.
-/// (Without swap there is also no hibernation image.) `None` = unknown (can't read /proc/swaps): treated as OK.
-fn swap_problem() -> Option<Vec<String>> {
-    let active = parse_swaps(&std::fs::read_to_string("/proc/swaps").ok()?);
-    if active.is_empty() { None } else { Some(active) }
 }
 
 fn refuse_if_swap() {
@@ -373,12 +340,4 @@ mod tests {
         assert_eq!(key(KeyCode::Char(']'), KeyModifiers::NONE), Some(Key::Char(']')), "a plain ] is just text");
     }
 
-    #[test]
-    fn swaps_are_parsed_from_proc_text() {
-        let none = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n";
-        assert!(parse_swaps(none).is_empty());
-        let some = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile                               file\t\t524284\t\t524280\t\t-1\n/dev/zram0                              partition\t1024\t0\t100\n";
-        assert_eq!(parse_swaps(some), vec!["/swapfile", "/dev/zram0"]);
-        assert!(parse_swaps("").is_empty());
-    }
 }

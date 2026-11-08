@@ -19,7 +19,7 @@ Goal: usability for people who do not live in a terminal, without hiding anythin
 - **Same invariants as the TUI:** messages in RAM only, a panic key that wipes and exits, only sanitised text rendered, no clipboard by default,
   no per-frame copies of secrets, the privacy screen is documented as "hides the screen", not as a lock.
 - **Toolkit:** open decision. Prefer a native Rust toolkit; avoid embedding a web view (large attack surface, hard to reason about memory wiping).
-- **Prerequisite:** extract the UI-agnostic state machine out of `crates/tui/src/app.rs` (screens/modes, key handling as commands, events from
+- **Prerequisite (DONE in phase 1 of the GUI plan: crate `crates/app`, `nerd-chat-app`):** the UI-agnostic state machine was extracted out of `crates/tui/src/app.rs` (screens/modes, key handling as commands, events from
   the engine, vault access) into its own crate, so the TUI and a GUI are two front ends over the same tested core. `App::handle(Key)` is already
   shaped like that; the work is mostly moving code and separating `Key` from rendering concerns.
 

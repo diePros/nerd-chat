@@ -1,4 +1,4 @@
-# Review prompt: the default vault location (`crates/tui/src/vault_path.rs`, `main.rs::default_vault`)
+# Review prompt: the default vault location (`crates/app/src/vault_path.rs`, `main.rs::default_vault`)
 
 You are an adversarial reviewer with deep knowledge of Linux filesystem semantics (symlinks, TOCTOU, permissions, XDG), forensic
 recovery, and the threat model of this project. Repository: `/home/sebi/Documents/Code/seburity` (branch `next`; a serverless,

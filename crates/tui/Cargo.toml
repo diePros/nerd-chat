@@ -10,17 +10,14 @@ name = "nerd-chat"
 path = "src/main.rs"
 
 [dependencies]
+nerd-chat-app = { path = "../app", features = ["terminal-ui"] }
 nerd-chat-core = { path = "../core" }
 nerd-chat-vault = { path = "../vault" }
-nerd-chat-store = { path = "../store" }
-nerd-chat-exchange = { path = "../exchange" }
-nerd-chat-net = { path = "../net" }
-nerd-chat-chat = { path = "../chat" }
 nerd-chat-strip = { path = "../strip" }
-nerd-chat-sandbox = { path = "../sandbox" }
+nerd-chat-net = { path = "../net" }
+nerd-chat-store = { path = "../store" }
 ratatui = "0.30"
 zeroize = "1"
-getrandom = "0.3"
 rustix = { version = "1", features = ["process", "thread", "event"] }
 signal-hook = "0.3"
 

@@ -429,7 +429,7 @@ kept longer in RAM than before (up to 50 x 32 KiB per contact until confirmed, w
 and going offline still account for every unconfirmed line? Status: reviewed in review 26 (below).
 
 ## Default vault location (branch `next`) — self-notes, review PENDING
-`crates/tui/src/vault_path.rs`, `main.rs::default_vault`. Trade-off accepted and visible: the default vault now sits on the computer's disk
+`crates/app/src/vault_path.rs`, `main.rs::default_vault`. Trade-off accepted and visible: the default vault now sits on the computer's disk
 at a predictable path (easier to find in a forensic look than a vault on a USB stick the user chose); the first run says so and waits for
 Enter, and Tails gets an explicit warning (home is erased at shutdown). Checks: the directory is created 0700, an existing one must be a real
 directory (no symlink), owned by us and not group/world-writable (other users could swap the vault or its rollback counter). A relative
