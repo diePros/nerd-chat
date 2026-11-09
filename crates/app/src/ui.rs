@@ -68,7 +68,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match &app.screen {
         Screen::Prompt(p) => {
             let shown = if matches!(p, Prompt::JoinCode(_)) { "•".repeat(app.code_chars().min(40)) } else { app.input.clone() };
-            prompt_popup(f, area, p, &shown)
+            prompt_popup(f, area, p, &shown, app.pair_remote())
         }
         Screen::Verify => verify_popup(f, area, app.view_number().unwrap_or("")),
         Screen::Help => help_popup(f, area),
@@ -84,7 +84,7 @@ fn footer_hint(app: &App) -> &'static str {
         (Screen::Main, Pane::Saved, _) => " SAVED  j/k move  d d delete  Esc back   F12 PANIC-LOCK  Ctrl+] PURGE",
         (Screen::Main, Pane::Chat, Mode::Normal) if app.select.is_some() => " SELECT  j/k choose a message  y save it  Esc cancel   F12 PANIC",
         (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  m select+save  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC  Ctrl+] PURGE",
-        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC  Ctrl+] PURGE",
+        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  T/J pair over Tor  v verify  o online  ? help  Esc lock  q quit  F12 PANIC  Ctrl+] PURGE",
         _ => " F12 PANIC-LOCK  Ctrl+] PURGE",
     }
 }
@@ -290,18 +290,21 @@ fn popup(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, w: u16, h: u1
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(title)).wrap(Wrap { trim: false }), r);
 }
 
-fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str) {
+fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str, remote: bool) {
     let (title, hint) = match p {
         Prompt::NewContact => ("New contact", "Name (a new keypair is generated):".to_string()),
         Prompt::Export => ("Export your public bundle", "Write to file (never overwrites):".into()),
         Prompt::Import => ("Import their bundle", "Path of their .sbc file:".into()),
         Prompt::Listen => ("Pair: listen", "Listen address (use your LAN IP and a port, e.g. 192.168.1.5:4000):".into()),
         Prompt::JoinAddr => ("Pair: connect", "Their address ip:port:".into()),
+        Prompt::JoinLink => ("Pair over Tor: link", "Paste the link your partner sent you (56 characters):".into()),
+        Prompt::JoinCode(a) if a.starts_with("tor:") => ("Pair over Tor: code", "The code your partner told you by voice (hidden as you type):".into()),
         Prompt::JoinCode(a) => ("Pair: connect", format!("One-time code shown on their screen (hidden as you type; connecting to {a}):")),
         Prompt::ConfirmDelete => ("Delete contact", "Type yes to delete this contact AND its keys:".into()),
         Prompt::SendFile => ("Send a file", "Path of a JPEG or PNG (metadata is stripped; every other format is refused):".into()),
         Prompt::SendText => ("Send plain text", "Path of a text file (ONLY invisible/control characters removed; document metadata is NOT understood; RTF/PDF/XML/HTML refused):".into()),
         Prompt::SaveFile => ("Save received file", "Write to (never overwrites; neutral name suggested):".into()),
+        Prompt::InPerson if remote => ("Pairing succeeded", "Did you HEAR the code by voice from this person (not as text)? y/n  (n = stays UNVERIFIED):".into()),
         Prompt::InPerson => ("Pairing succeeded", "Was the code exchanged IN PERSON (same room)? y/n  (n = stays UNVERIFIED):".into()),
     };
     popup(f, area, title, vec![Line::from(hint), Line::from(""), Line::from(Span::styled(format!("{input}_"), Style::default().add_modifier(Modifier::BOLD))), Line::from(""), Line::from("Enter = ok   Esc = cancel")], 76, 9);

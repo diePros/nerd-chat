@@ -228,6 +228,7 @@ fn status_bar(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
                 if ui.button("Got it").clicked() { cmds.push(Cmd::Command('z')); }
             });
         }
+        if !app.status.is_empty() { ui.add(egui::Label::new(RichText::new(&app.status).color(if app.error { RED } else { MUTED })).wrap()); }
         ui.horizontal(|ui| {
             let (word, col) = match &app.online { Online::Online => ("Online", GREEN), Online::Starting(p) if *p > 0 => ("Connecting\u{2026}", AMBER), Online::Starting(_) => ("Connecting\u{2026}", AMBER), Online::Stopping => ("Going offline\u{2026}", AMBER), Online::Failed(_) => ("Could not connect, trying again", RED), Online::Offline => ("Offline", MUTED) };
             dot(ui, col, true);
@@ -236,7 +237,6 @@ fn status_bar(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
             if ui.checkbox(&mut on, "Connected").changed() { cmds.push(Cmd::SetOnline(on)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("Panic: wipe and exit").color(Color32::WHITE)).fill(Color32::from_rgb(140, 40, 40))).clicked() { cmds.panic = true; }
-                ui.label(RichText::new(&app.status).color(if app.error { RED } else { MUTED }));
             });
         });
     });
@@ -277,8 +277,14 @@ fn details(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
         ui.label(format!("{name} is not connected to you yet. Pick a way to add them:"));
         ui.add_space(6.0);
         ui.group(|ui| {
-            ui.label(RichText::new("Over the internet").strong());
-            ui.label(RichText::new("Coming soon: works anywhere, with a short code.").color(MUTED));
+            ui.label(RichText::new("Over the internet").strong().color(GREEN));
+            ui.label("Works anywhere, in the same room or far apart. One of you creates a link and a code, the other types them in. Both of you need to be online.");
+            if let Some(o) = &app.tor_offer { offer_card(ui, name, o, cmds); } else {
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Create a link and code").strong().color(Color32::WHITE)).fill(Color32::from_rgb(40, 100, 170))).clicked() { cmds.push(Cmd::Command('T')); }
+                    if ui.button("I have a link").clicked() { cmds.push(Cmd::Command('J')); }
+                });
+            }
         });
         ui.group(|ui| {
             ui.label(RichText::new("On the same Wi-Fi").strong());
@@ -364,8 +370,11 @@ fn popups(ui: &mut egui::Ui, app: &App, text: &mut String, prompt_for: &mut Opti
                 Prompt::Export => ("Save my contact file", "Where to save it (a file name; an existing file is never overwritten). It is NOT public: it shows when you are online."),
                 Prompt::Listen => ("Show a code on this Wi-Fi", "Your local address (use your Wi-Fi IP like 192.168.1.5:4000, or 127.0.0.1:0 to try on one machine):"),
                 Prompt::JoinAddr => ("Enter a code", "The address the other person sees:"),
+                Prompt::JoinLink => ("Add someone over the internet", "Paste the link they sent you (56 letters and numbers, exactly as received):"),
+                Prompt::JoinCode(a) if a.starts_with("tor:") => ("Add someone over the internet", "The code they told you by voice (hidden while you type):"),
                 Prompt::JoinCode(_) => ("Enter a code", "The code the other person sees (hidden while you type):"),
                 Prompt::ConfirmDelete => ("Delete this contact?", "Their keys and saved messages are deleted for good."),
+                Prompt::InPerson if app.pair_remote() => ("Did you hear the code by voice?", "Answer yes only if this person told you the code by voice or in person, not as a text message. If yes, the contact counts as verified."),
                 Prompt::InPerson => ("Did you exchange the code in person?", "If yes, the contact counts as verified."),
                 Prompt::SendFile => ("Send a file", "Path of the file:"),
                 Prompt::SendText => ("Send a text", "Text:"),
@@ -442,4 +451,18 @@ fn unverified_notice(ui: &mut egui::Ui, name: &str) -> NoticeChoice {
         });
     });
     c
+}
+
+/// The open offer over Tor: the link goes to ONE person over any channel, the code only by voice. (No clipboard: the link is shown in groups to read or retype.)
+fn offer_card(ui: &mut egui::Ui, name: &str, o: &nerd_chat_app::app::TorLink, cmds: &mut Cmds) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(format!("1. Send this link to {name} only (any way you like, but not to a group):")).strong());
+    let l: &str = &o.link;
+    let grouped: Vec<&str> = (0..l.len()).step_by(14).map(|i| &l[i..(i + 14).min(l.len())]).collect();
+    ui.label(RichText::new(grouped.join(" ")).monospace().size(15.0));
+    ui.label(RichText::new(format!("2. Tell {name} this code by voice or in person, NOT in the same message:")).strong());
+    ui.label(RichText::new(o.code.as_str()).monospace().size(28.0).strong().color(AMBER));
+    let left = o.expires.saturating_duration_since(std::time::Instant::now()).as_secs();
+    ui.label(RichText::new(format!("Works once, for {} more minutes. Anyone holding the link could see that you are online, so keep it private.", left / 60 + 1)).color(MUTED));
+    if ui.button("Cancel").clicked() { cmds.push(Cmd::Command('x')); }
 }

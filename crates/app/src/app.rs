@@ -1,9 +1,10 @@
 //! UI state machine (no rendering, no terminal): driven by key events, fully testable.
 use crate::secret::{ComposeBuf, SecretBuf};
-use nerd_chat_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use nerd_chat_chat::{transport::{BoxStream, PairDialError, PairDialFn, PairHostFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use nerd_chat_net::tor::CancelToken;
 use nerd_chat_net::tor::{control::AuthPref, probe::{probe_hosting, HostProbe}, spawn::{find_tor, SpawnConfig}, Addr};
 use nerd_chat_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
-use nerd_chat_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
+use nerd_chat_exchange::{file, pair::{Lockout, PairStream, PairingJoin, PairingOffer, REMOTE_OFFER_MAX_TTL}, ExchangeError, ImportedContact, SafetyView};
 use nerd_chat_store::{read_regular_file, OpenInfo, StoreError, VaultFile};
 use nerd_chat_vault::Profile;
 use std::{
@@ -83,7 +84,7 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
 }
 
 /// What continues once the hosting probe answered. All variants carry the contact id: nothing may be applied to another contact.
-enum Then { Export([u8; 8], String), Listen([u8; 8], SocketAddr), Join([u8; 8], SocketAddr, Result<PairingJoin, ExchangeError>) }
+enum Then { Export([u8; 8], String), Listen([u8; 8], SocketAddr), Join([u8; 8], SocketAddr, Result<PairingJoin, ExchangeError>), TorOffer([u8; 8]), TorJoin([u8; 8], String, Result<PairingJoin, ExchangeError>) }
 
 /// How long the worker may take before the answer counts as inconclusive (a hostile or hung control port must not hold us).
 const PROBE_DEADLINE: Duration = Duration::from_secs(15);
@@ -124,7 +125,8 @@ pub enum Action { None, Quit, Panic, /// like `Panic`, and every file of this va
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
-    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson, SendFile, SendText, SaveFile,
+    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), /// the pairing link pasted for a pairing over Tor
+    JoinLink, ConfirmDelete, InPerson, SendFile, SendText, SaveFile,
 }
 
 /// What the right-hand pane shows (the contact list sidebar is always there).
@@ -155,13 +157,81 @@ pub enum Screen {
 type PairMsg = ([u8; 8], Result<(ImportedContact, String), ExchangeError>);
 
 /// Handle on a running pairing worker so it can be cancelled (user `x`, or panic).
-struct PairCtl { cancel: Arc<AtomicBool>, stream: Arc<Mutex<Option<TcpStream>>>, handle: JoinHandle<()> }
+/// What the pairing-over-Tor worker reports besides the final result.
+enum LinkMsg { Ready { link: Zeroizing<String>, code: Zeroizing<String>, expires: Instant }, Failed(String), UsedAndFailed }
+
+/// The link and code of an open offer over Tor, for the front end to show (the link goes to the partner only, the code by voice).
+pub struct TorLink { pub link: Zeroizing<String>, pub code: Zeroizing<String>, pub expires: Instant }
+
+/// A stream that came through Tor, as a pairing stream.
+struct TorPairStream(BoxStream);
+impl std::io::Read for TorPairStream { fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.0.read(b) } }
+impl std::io::Write for TorPairStream { fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.write(b) } fn flush(&mut self) -> std::io::Result<()> { self.0.flush() } }
+impl PairStream for TorPairStream { fn set_timeout(&mut self, d: Duration) -> std::io::Result<()> { self.0.set_timeout(Some(d)) } }
+
+/// The offer side over Tor (worker thread): host the one-shot service, wait until it is published, show link + code, wait for ONE
+/// connection, then pair. Everything it owns (service, listener) is dropped on every path.
+fn tor_offer_job(host_fn: PairHostFn, tok: &CancelToken, ident: &ContactIdentity, adv: bool, lockout: Arc<Lockout>, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> {
+    let mut host = match host_fn() {
+        Ok(h) => h,
+        Err(e) => { let _ = ltx.send(LinkMsg::Failed(if e.contains("510") { "Your Tor cannot create the pairing service here. Ask the OTHER person to create the code, and join with their link.".into() } else { format!("Could not create the pairing service: {e}") })); return Err(ExchangeError::Io); }
+    };
+    match host.wait_published(tok) {
+        Ok(true) => {}
+        Ok(false) => return Err(ExchangeError::Io),
+        Err(e) => { let _ = ltx.send(LinkMsg::Failed(format!("The pairing service did not come up in time ({e}). Try again."))); return Err(ExchangeError::Io); }
+    }
+    let (offer, code) = PairingOffer::generate_remote(lockout, REMOTE_OFFER_MAX_TTL)?;
+    let offer = offer.with_can_host(adv);
+    let expires = Instant::now() + offer.expires_in();
+    let _ = ltx.send(LinkMsg::Ready { link: Zeroizing::new(host.id.clone()), code, expires });
+    let stream = loop {
+        if tok.is_cancelled() { return Err(ExchangeError::Io); }
+        match host.incoming.recv_timeout(Duration::from_millis(200)) {
+            Ok(s) => break s,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if Instant::now() >= expires { return Err(ExchangeError::Expired); },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(ExchangeError::Io),
+        }
+    };
+    drop(host); // the service is removed as soon as the one connection arrived
+    tok.register(&*stream);
+    if tok.is_cancelled() { return Err(ExchangeError::Io); }
+    let mut s = TorPairStream(stream);
+    match offer.accept_remote(&mut s, ident) {
+        Ok(p) => Ok(p),
+        Err((e, guessed)) => { if guessed { let _ = ltx.send(LinkMsg::UsedAndFailed); } Err(e) }
+    }
+}
+
+/// The join side over Tor (worker thread): dial the link (bounded retry while the descriptor is not found), then pair.
+fn tor_join_job(dial: PairDialFn, tok: &CancelToken, id: &str, join: PairingJoin, ident: &ContactIdentity) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> {
+    let start = Instant::now();
+    let stream = loop {
+        let mut iso = [0u8; 16];
+        getrandom::fill(&mut iso).map_err(|_| ExchangeError::Io)?;
+        match dial(id, &iso, tok) {
+            Ok(s) => break s,
+            Err(PairDialError::NotFound) if start.elapsed() < Duration::from_secs(60) => {
+                for _ in 0..30 { if tok.is_cancelled() { return Err(ExchangeError::Io); } thread::sleep(Duration::from_millis(100)); }
+            }
+            Err(PairDialError::NotFound) => return Err(ExchangeError::Expired), // not ready or expired: ask for a new link
+            Err(_) => return Err(ExchangeError::Io),
+        }
+    };
+    tok.register(&*stream);
+    if tok.is_cancelled() { return Err(ExchangeError::Io); }
+    let mut s = TorPairStream(stream);
+    join.with_deadline(nerd_chat_exchange::pair::REMOTE_PAIR_DEADLINE).join(&mut s, ident)
+}
+
+struct PairCtl { cancel: Arc<AtomicBool>, stream: Arc<Mutex<Option<TcpStream>>>, handle: JoinHandle<()>, tor: Option<Arc<CancelToken>> }
 
 impl PairCtl {
     /// Ask the worker to stop and cut its socket so blocked reads return immediately.
     fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
         if let Some(s) = self.stream.lock().unwrap().as_ref() { let _ = s.shutdown(Shutdown::Both); }
+        if let Some(t) = &self.tor { t.cancel(); } // closes the SOCKS/onion stream and ends a wait for the service
     }
 }
 
@@ -185,6 +255,11 @@ pub struct App {
     vf: Option<VaultFile>,
     view: Option<SafetyView>,
     pair_rx: Option<Receiver<PairMsg>>,
+    /// pairing over Tor: progress of the worker (link ready, failures), the shown link, the lockout that only counts real guesses, and whether the running pairing came through Tor
+    link_rx: Option<Receiver<LinkMsg>>,
+    pub tor_offer: Option<TorLink>,
+    remote_lockout: std::sync::Arc<Lockout>,
+    pair_remote: bool,
     /// The automatic hosting probe (R12-5) running on a worker thread, what to do when it answers, and when it started.
     probe_rx: Option<Receiver<HostProbe>>, probe_then: Option<(Then, Instant)>,
     pub pair_info: Option<Zeroizing<String>>,
@@ -260,7 +335,7 @@ impl App {
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
-            pair_rx: None, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
+            pair_rx: None, link_rx: None, tor_offer: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
@@ -435,6 +510,7 @@ impl App {
         self.view = None;
         self.pending_pair = None;
         self.pair_rx = None;
+        self.link_rx = None; self.tor_offer = None; // the link and the code of an open offer (zeroizing, dropped now)
         self.probe_rx = None; self.probe_then = None;
         self.pair_info = None;
         self.pw.clear();
@@ -687,6 +763,8 @@ impl App {
             Key::Char('I') => if self.require_no_peer() { self.open_prompt(Prompt::Import, "") },
             Key::Char('l') => if self.require_no_peer() { self.open_prompt(Prompt::Listen, "127.0.0.1:0") },
             Key::Char('c') => if self.require_no_peer() { self.open_prompt(Prompt::JoinAddr, "") },
+            Key::Char('T') => if self.require_no_peer() { self.start_tor_offer() },
+            Key::Char('J') => if self.require_no_peer() { self.open_prompt(Prompt::JoinLink, "") },
             Key::Char('x') => self.cancel_pairing(),
             Key::Char('o') => self.toggle_online(),
             Key::Char('f') => if self.sel_linked() { self.open_prompt(Prompt::SendFile, "") },
@@ -916,7 +994,7 @@ impl App {
     }
 
     fn probe_done(&mut self, then: Then, r: HostProbe) {
-        let id = match &then { Then::Export(i, _) | Then::Listen(i, _) | Then::Join(i, _, _) => *i };
+        let id = match &then { Then::Export(i, _) | Then::Listen(i, _) | Then::Join(i, _, _) | Then::TorOffer(i) | Then::TorJoin(i, _, _) => *i };
         if self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) != Some(id) { return self.err("The selected contact changed: nothing was done."); }
         match r {
             HostProbe::Can => self.resume(then, true),
@@ -934,6 +1012,8 @@ impl App {
             Then::Export(_, path) => self.do_export(path, can_host),
             Then::Listen(_, addr) => self.do_listen(addr, can_host),
             Then::Join(_, sock, join) => self.do_join(sock, join, can_host),
+            Then::TorOffer(_) => self.do_tor_offer(can_host),
+            Then::TorJoin(_, id, join) => self.do_tor_join(id, join, can_host),
         }
     }
 
@@ -1220,6 +1300,10 @@ impl App {
             }
             Prompt::Listen => self.start_listen(text),
             Prompt::JoinAddr => self.open_prompt(Prompt::JoinCode(text.trim().to_string()), ""),
+            Prompt::JoinLink => match nerd_chat_net::tor::parse_pairing_link(&text) {
+                Ok(id) => self.open_prompt(Prompt::JoinCode(format!("tor:{id}")), ""),
+                Err(_) => self.err("That is not a valid pairing link: paste the 56 characters exactly as you received them."),
+            },
             Prompt::JoinCode(addr) => { let _ = text; self.start_join(addr) }
             Prompt::InPerson => {
                 let Some((id, contact, sn)) = self.pending_pair.take() else { return };
@@ -1275,8 +1359,55 @@ impl App {
             let _ = tx.send((id, result));
         });
         self.pair_rx = Some(rx);
-        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
+        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle, tor: None });
         self.pair_info = Some(info);
+    }
+
+    /// `T`: create the pairing service over Tor and show a link + code (needs the app online).
+    fn start_tor_offer(&mut self) {
+        if self.engine.is_none() || !matches!(self.online, Online::Online) { return self.err("Go online first (o): pairing over Tor needs your Tor to be ready. (Being online makes you visible online to your contacts meanwhile.)"); }
+        if self.engine.as_ref().and_then(|e| e.pair_host_fn()).is_none() { return self.err("This Tor connection cannot host a pairing service. Ask the other person to create the code."); }
+        let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+        self.with_adv(Then::TorOffer(id));
+    }
+
+    fn do_tor_offer(&mut self, adv: bool) {
+        let Some(host_fn) = self.engine.as_ref().and_then(|e| e.pair_host_fn()) else { return self.err("Go online first (o).") };
+        self.pair_adv = Some(adv);
+        self.pair_remote = true;
+        let (ident, id) = self.identity_clone();
+        let (tx, rx) = channel();
+        let (ltx, lrx) = channel();
+        let tok = CancelToken::new();
+        let (tok2, lockout) = (tok.clone(), self.remote_lockout.clone());
+        let handle = thread::spawn(move || {
+            let result = tor_offer_job(host_fn, &tok2, &ident, adv, lockout, &ltx).map(|p| (p.contact, p.safety_number));
+            let _ = tx.send((id, result));
+        });
+        self.pair_rx = Some(rx);
+        self.link_rx = Some(lrx);
+        self.pair_ctl = Some(PairCtl { cancel: Arc::new(AtomicBool::new(false)), stream: Arc::new(Mutex::new(None)), handle, tor: Some(tok) });
+        self.pair_info = Some(Zeroizing::new("Getting your link ready (this can take up to a minute) ... (x = cancel)".into()));
+        self.ok("Creating the pairing service ...");
+    }
+
+    fn do_tor_join(&mut self, link: String, parsed: Result<PairingJoin, ExchangeError>, adv: bool) {
+        let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
+        let Some(dial) = self.engine.as_ref().and_then(|e| e.pair_dial_fn()) else { return self.err("Go online first (o).") };
+        self.pair_adv = Some(adv);
+        self.pair_remote = true;
+        let (ident, id) = self.identity_clone();
+        let (tx, rx) = channel();
+        let tok = CancelToken::new();
+        let tok2 = tok.clone();
+        let handle = thread::spawn(move || {
+            let result = tor_join_job(dial, &tok2, &link, join, &ident).map(|p| (p.contact, p.safety_number));
+            let _ = tx.send((id, result));
+        });
+        self.pair_rx = Some(rx);
+        self.pair_ctl = Some(PairCtl { cancel: Arc::new(AtomicBool::new(false)), stream: Arc::new(Mutex::new(None)), handle, tor: Some(tok) });
+        self.pair_info = Some(Zeroizing::new("Connecting through Tor (this can take a minute) ... (x = cancel)".into()));
+        self.ok("Pairing over Tor ...");
     }
 
     fn do_export(&mut self, text: String, can_host: bool) {
@@ -1304,6 +1435,7 @@ impl App {
 
     fn do_listen(&mut self, addr: SocketAddr, adv: bool) {
         self.pair_adv = Some(adv);
+        self.pair_remote = false;
         let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok((o, c)) => (o.with_can_host(adv), c), Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
@@ -1334,6 +1466,14 @@ impl App {
     }
 
     fn start_join(&mut self, addr: String) {
+        if let Some(id) = addr.strip_prefix("tor:") {
+            let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode).and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
+            self.code_buf.clear();
+            if self.engine.is_none() || !matches!(self.online, Online::Online) { return self.err("Go online first (o): pairing over Tor needs your Tor to be ready."); }
+            let Some(cid) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+            self.with_adv(Then::TorJoin(cid, id.to_string(), parsed));
+            return;
+        }
         let sock: SocketAddr = match addr.parse() { Ok(a) => a, Err(_) => { self.code_buf.clear(); self.err("Bad address, expected ip:port"); return } };
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
@@ -1344,6 +1484,7 @@ impl App {
 
     fn do_join(&mut self, sock: SocketAddr, parsed: Result<PairingJoin, ExchangeError>, adv: bool) {
         self.pair_adv = Some(adv);
+        self.pair_remote = false;
         let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
         self.spawn_pair(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")), move |cancel, slot, ident| {
             match TcpStream::connect_timeout(&sock, Duration::from_secs(10)) {
@@ -1370,6 +1511,7 @@ impl App {
                     return self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
                 }
                 self.offline_armed = false;
+                if self.pair_ctl.as_ref().is_some_and(|c| c.tor.is_some()) { self.cancel_pairing(); } // the pairing service lives in the engine's Tor: it goes with it
                 // tear down on a worker so the UI (and the panic key) stay responsive while onion services are removed
                 let (tx, rx) = channel();
                 if let Some(e) = self.engine.take() { thread::spawn(move || { e.shutdown(); let _ = tx.send(()); }); } else { let _ = tx.send(()); }
@@ -1573,14 +1715,35 @@ impl App {
     }
 
     /// The worker is done (or gone): forget its handles and the code/address line.
-    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; }
+    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; }
 
     fn cancel_pairing(&mut self) {
         match self.pair_ctl.take() {
-            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.ok("Pairing cancelled."); }
+            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.ok("Pairing cancelled."); }
             None => self.ok("No pairing in progress."),
         }
     }
+
+    /// Messages of a pairing-over-Tor worker: the link is ready, it failed, or somebody used the link and failed.
+    fn poll_link(&mut self) {
+        let Some(rx) = &self.link_rx else { return };
+        let mut msgs = vec![];
+        while let Ok(m) = rx.try_recv() { msgs.push(m); }
+        for m in msgs {
+            match m {
+                LinkMsg::Ready { link, code, expires } => {
+                    self.pair_info = Some(Zeroizing::new(format!("Link (for your partner only): {}   CODE (tell it by voice): {}   x = cancel", &*link, &*code)));
+                    self.tor_offer = Some(TorLink { link, code, expires });
+                    self.ok("Ready. Send the link to your partner and tell them the code by voice or in person. It works for 10 minutes and only once.");
+                }
+                LinkMsg::Failed(why) => { if let Some(c) = self.pair_ctl.take() { c.cancel(); } self.end_pairing(); self.err(why); }
+                LinkMsg::UsedAndFailed => { self.record_alert(None, "Someone used your pairing link and did not know the code. If your partner did not just type a wrong code, the link was seen by someone else: make a new one and send it another way."); }
+            }
+        }
+    }
+
+    /// Was the pairing that just finished (or is waiting for the answer) made through Tor? Then the question is whether the code was HEARD by voice.
+    pub fn pair_remote(&self) -> bool { self.pair_remote }
 
     /// Call every UI tick: collects a finished pairing.
     fn poll_prep(&mut self) {
@@ -1609,6 +1772,7 @@ impl App {
         self.poll_kdf();
         self.poll_probe();
         self.poll_online();
+        self.poll_link();
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {}
@@ -3292,5 +3456,111 @@ mod tests {
         a.vf().store.contacts[0].next_transport = Some(Zeroizing::new([1u8; 64]));
         a.handle(Key::Esc); a.handle(Key::Esc);
         assert!(screen_text(&a, 200, 30).contains("key rotation pending"));
+    }
+
+    // ---------------------------------------------------------------- pairing over Tor (spec 2026-11-09-tor-pairing-spec.md), on the in-memory network
+    fn tor_pair_apps(dir: &std::path::Path) -> (nerd_chat_chat::MemNet, App, App) {
+        let net = nerd_chat_chat::MemNet::new();
+        let mut a = net_app(dir, "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(dir, "b.vault", &net); add(&mut b, "alice");
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online), "{} / {}", a.status, b.status);
+        (net, a, b)
+    }
+
+    /// `a` creates the offer; returns (link, code) once it is published.
+    fn tor_offer(a: &mut App, b: &mut App) -> (String, String) {
+        a.handle(Key::Char('T'));
+        assert!(pump_until(&mut [&mut *a, &mut *b], |x| x[0].tor_offer.is_some() || x[0].error), "{}", a.status);
+        let o = a.tor_offer.as_ref().expect("the offer must be ready");
+        (o.link.to_string(), o.code.to_string())
+    }
+
+    fn tor_join(b: &mut App, link: &str, code: &str) {
+        b.handle(Key::Char('J')); type_str(b, link); b.handle(Key::Enter);
+        if matches!(b.screen, Screen::Prompt(Prompt::JoinCode(_))) { type_str(b, code); b.handle(Key::Enter); }
+    }
+
+    #[test]
+    fn pairing_over_tor_between_two_apps_through_the_screens() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        net.set_pair_publish_delay(Duration::from_millis(200));
+        let (link, code) = tor_offer(&mut a, &mut b);
+        assert!(net.pair_open(&link) && link.len() == 56 && !link.contains(':'), "the link is the bare onion id");
+        tor_join(&mut b, &format!("  {}\n", link.to_uppercase()), &code); // paste noise and capitals are tolerated
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pending_pair.is_some() && x[1].pending_pair.is_some()), "{} / {}", a.status, b.status);
+        assert!(a.tor_offer.is_none() && a.pair_ctl.is_none(), "the offer ends with the pairing");
+        assert!(pump_until(&mut [&mut a, &mut b], |_| !net.pair_open(&link)), "the service is removed after use");
+        assert!(a.pair_remote() && b.pair_remote(), "the in-person question becomes the voice question");
+        a.handle(Key::Char('P')); b.handle(Key::Char('P'));
+        type_str(&mut a, "y"); a.handle(Key::Enter);
+        type_str(&mut b, "y"); b.handle(Key::Enter);
+        assert_eq!(a.selected_detail().unwrap().1, Trust::CodeAuthenticated);
+        assert_eq!(a.selected_detail().unwrap().2, b.selected_detail().unwrap().2, "same safety number on both sides");
+    }
+
+    #[test]
+    fn over_tor_needs_the_app_online_and_a_valid_link() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        a.handle(Key::Char('T'));
+        assert!(a.error && a.status.contains("online"), "{}", a.status);
+        a.handle(Key::Char('J')); type_str(&mut a, "not a link"); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("not a valid pairing link"), "{}", a.status);
+        assert!(a.pair_ctl.is_none() && a.screen == Screen::Main);
+    }
+
+    #[test]
+    fn connect_then_close_burns_the_offer_without_a_guess_and_a_wrong_code_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        // an attacker who only has the link connects and hangs up
+        let (link, _code) = tor_offer(&mut a, &mut b);
+        let dial = net.transport().pair_dial_fn().unwrap();
+        drop(dial(&link, &[9; 16], &nerd_chat_net::tor::CancelToken::new()).unwrap());
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pair_ctl.is_none()), "{}", a.status);
+        assert!(a.error && a.remote_lockout.remaining() == 0 && !a.alerts.iter().any(|(t, _)| t.contains("Someone used your pairing link")), "no guess, no accusation: {} {:?}", a.status, a.alerts);
+        // a joiner who types a wrong code
+        let (link, _code) = tor_offer(&mut a, &mut b);
+        tor_join(&mut b, &link, "00000-00000");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pair_ctl.is_none() && x[1].pair_ctl.is_none()), "{} / {}", a.status, b.status);
+        assert!(a.alerts.iter().any(|(t, _)| t.contains("Someone used your pairing link")), "{:?}", a.alerts);
+        assert!(a.pending_pair.is_none() && b.pending_pair.is_none());
+    }
+
+    #[test]
+    fn cancel_going_offline_and_panic_remove_the_pairing_service() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        let (link, _) = tor_offer(&mut a, &mut b);
+        a.handle(Key::Char('x')); // cancel
+        assert!(pump_until(&mut [&mut a, &mut b], |_| !net.pair_open(&link)), "cancel must remove the service");
+        assert!(a.tor_offer.is_none() && a.pair_ctl.is_none());
+        // going offline with an offer open
+        let (link, _) = tor_offer(&mut a, &mut b);
+        a.handle(Key::Char('o'));
+        assert!(pump_until(&mut [&mut a, &mut b], |_| !net.pair_open(&link)), "going offline must remove the service");
+        assert!(a.pair_ctl.is_none() && a.tor_offer.is_none());
+        // panic wipe with an offer open
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        let (link, _) = tor_offer(&mut a, &mut b);
+        a.panic_wipe();
+        assert!(pump_until(&mut [&mut b], |_| !net.pair_open(&link)), "panic must remove the service");
+        assert!(a.tor_offer.is_none() && a.pair_ctl.is_none());
+    }
+
+    #[test]
+    fn a_joiner_gives_up_on_a_link_that_never_gets_published_and_can_cancel() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        net.set_pair_publish_delay(Duration::from_secs(3600)); // never reachable
+        a.handle(Key::Char('T'));
+        // the link is only shown after publication: nothing to show yet
+        for _ in 0..10 { a.poll(); b.poll(); thread::sleep(Duration::from_millis(20)); }
+        assert!(a.tor_offer.is_none(), "no link before the service is published");
+        a.handle(Key::Char('x'));
+        assert!(a.pair_ctl.is_none());
     }
 }

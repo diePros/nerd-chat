@@ -81,6 +81,13 @@ impl Demo {
                     self.stage = 8;
                 }
             }
+            8 if std::env::args().any(|a| a == "--demo-offer") => {
+                // show the offer card: leave the chat, pick Robin (no key yet) and create a link over Tor (MemNet stands in for Tor)
+                me.handle(Key::Esc); me.handle(Key::Esc);
+                select(me, 2);
+                me.handle(Key::Char('T'));
+                self.stage = 9;
+            }
             _ => {}
         }
     }
