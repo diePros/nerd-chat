@@ -12,6 +12,15 @@ Static page plus one small Worker, for Cloudflare Workers.
     npm run check      # wrangler types + tsc
     npm run deploy     # first deploy creates the STATS KV namespace
 
+## Automatic deployment
+
+- **Cloudflare (sineloco.dev):** `.github/workflows/site-deploy.yml` checks every change under `site/` and, on a push
+  to `main`, runs `wrangler deploy`. One-time setup: create an API token (Cloudflare dashboard → My Profile → API Tokens →
+  template **Edit Cloudflare Workers**, limited to this account and the `sineloco.dev` zone), then store it with
+  `gh secret set CLOUDFLARE_API_TOKEN` and `gh secret set CLOUDFLARE_ACCOUNT_ID` (paste the value when asked; never
+  put it in a file or a chat). Without the secrets the checks still run and the deploy step is skipped.
+- **Onion server:** updates itself from signed commits; see `onion/README.md`.
+
 ## Before going live
 
 - `REPO` in `wrangler.jsonc` and the GitHub links in `public/index.html` and `public/app.js` point at `diePros/nerd-chat`. Change them after the repository rename (GitHub redirects the API, but the links should be final).

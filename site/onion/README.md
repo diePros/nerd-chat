@@ -84,6 +84,31 @@ If the tunnel does not come up inside an unprivileged container, check on the ho
 shows the module, and read `journalctl -u wg-quick@wg0` in the container. Some providers' configs need
 `PostUp` lines that an unprivileged container may refuse; a minimal config (Interface + one Peer) always works.
 
+## Automatic updates
+
+| What | How | Needs you? |
+|---|---|---|
+| New **releases** | `sineloco-mirror-sync.timer`, every 15 minutes. Only files that match `SHA256SUMS` go live. | No |
+| The **website itself** | `sineloco-site-update.timer`, every 30 minutes. Fetches the newest commit of the branch, deploys it **only if it is signed by your key**. | One-time key setup |
+
+Why the signature rule: this server's visitors are Tor users, and the site's JavaScript runs in their browser.
+An update that anyone with push access could alter on their own is not safe enough. Your commits are already
+signed, so the server just needs your public key:
+
+    # on your computer
+    gpg --export --armor $(git config user.signingkey) > site-signing.asc
+    gpg --fingerprint $(git config user.signingkey)          # note the long fingerprint
+
+    # on the Proxmox host
+    pct exec 210 -- install -d -m 755 /etc/sineloco-mirror
+    pct push 210 site-signing.asc /etc/sineloco-mirror/site-signing.asc --perms 644
+    pct exec 210 -- systemctl start sineloco-site-update       # first run now
+    pct exec 210 -- journalctl -u sineloco-site-update -e --no-pager | tail
+
+Optional: put the fingerprint in `/etc/sineloco-mirror.conf` as `SITE_SIGNER_FPR=...` to accept only that exact key.
+A commit that is unsigned, signed by another key, or contains links/special files in `site/public` is refused,
+and the old site keeps being served. Without the key file the updater does nothing and says so in its log.
+
 ## Day to day
 
 | Task | Command |
@@ -91,7 +116,7 @@ shows the module, and read `journalctl -u wg-quick@wg0` in the container. Some p
 | Sync now | `sudo systemctl start sineloco-mirror-sync` |
 | See what happened | `journalctl -u sineloco-mirror-sync -e` |
 | Next run | `systemctl list-timers sineloco-mirror-sync.timer` |
-| Update the website itself | `git pull`, then `sudo ROOT=/srv/sineloco /usr/local/lib/sineloco-mirror/deploy-site.sh site/public` |
+| Update the website now | `sudo systemctl start sineloco-site-update` (otherwise it happens within 30 minutes of a signed push) |
 | Settings | `/etc/sineloco-mirror.conf` (repo name, how many releases to keep, optional token) |
 | Verify releases with a signature | save the signer's public key as `/etc/sineloco-mirror/signing.asc` |
 | Onion address | `cat /var/lib/tor/sineloco/hostname` |
@@ -114,7 +139,9 @@ tampered download. The page says so next to the hashes.
 
 ## Tested and not tested
 
-Tested here: the sync script against a fake GitHub (good release, tampered file refused, signatures
+Tested here: the site updater against a local repository with real signing keys (trusted signature deploys;
+another key, no signature, wrong pinned fingerprint and a symlink in the site folder are refused; the same
+commit is a no-op), the sync script against a fake GitHub (good release, tampered file refused, signatures
 valid / unknown / wrong key / wrong pinned fingerprint), the site build, the generated downloads page,
 and the Tor config (`tor --verify-config`). The firewall rules and endpoint pinning were generated and
 read back for sample configs. **Not tested here:** `install.sh` and `vpn-setup.sh --install` on a real

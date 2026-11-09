@@ -37,7 +37,7 @@ export DEBIAN_FRONTEND=noninteractive
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d
 trap 'rm -f /usr/sbin/policy-rc.d' EXIT
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends tor nginx curl jq gnupg ca-certificates wireguard-tools nftables iproute2 openresolv
+apt-get install -y -qq --no-install-recommends tor nginx curl jq gnupg ca-certificates wireguard-tools nftables iproute2 openresolv git
 systemctl stop tor@default tor nginx 2>/dev/null || true
 rm -f /usr/sbin/policy-rc.d
 
@@ -47,7 +47,7 @@ if [ "$VPN" = 1 ]; then
   mv /usr/local/sbin/vpn-check.sh /usr/local/sbin/sineloco-vpn-check
   /usr/local/sbin/vpn-setup.sh --install "$WG_CONF"
   # nothing network-facing may run unless the tunnel is up; if it drops, they stop
-  for u in tor@default nginx sineloco-mirror-sync; do
+  for u in tor@default nginx sineloco-mirror-sync sineloco-site-update; do
     install -d "/etc/systemd/system/$u.service.d"
     printf '[Unit]\nBindsTo=wg-quick@wg0.service\nAfter=wg-quick@wg0.service nftables.service\n' > "/etc/systemd/system/$u.service.d/vpn.conf"
   done
@@ -57,8 +57,9 @@ fi
 echo "== user and folders"
 id sineloco-mirror >/dev/null 2>&1 || useradd --system --home-dir "$ROOT" --shell /usr/sbin/nologin sineloco-mirror
 install -d -m 755 -o sineloco-mirror "$ROOT" "$ROOT/dl" "$ROOT/data" "$ROOT/data/downloads"
-install -d -m 755 "$ROOT/builds" "$LIB" /etc/sineloco-mirror
-install -m 755 "$here/sync-releases.sh" "$here/deploy-site.sh" "$LIB/"
+install -d -m 755 -o sineloco-mirror "$ROOT/builds"
+install -d -m 755 "$LIB" /etc/sineloco-mirror
+install -m 755 "$here/sync-releases.sh" "$here/deploy-site.sh" "$here/update-site.sh" "$LIB/"
 if [ ! -f /etc/sineloco-mirror.conf ]; then
   cat > /etc/sineloco-mirror.conf <<'CONF'
 # Which GitHub repository to mirror. Change after the repository rename.
@@ -70,12 +71,20 @@ KEEP=3
 # Optional: save the release signer's public key as /etc/sineloco-mirror/signing.asc and the mirror
 # will verify SHA256SUMS.asc. To also pin the exact key, put its full fingerprint here.
 #SIGNER_FPR=
+# Automatic website updates: the server deploys a new commit of the repository ONLY if it is signed by
+# the key saved as /etc/sineloco-mirror/site-signing.asc. Optionally pin the key's fingerprint.
+#SITE_SIGNER_FPR=
+# Branch to follow (default main). Do not set SITE_ALLOW_UNSIGNED=1 unless you accept that anyone who can
+# push to that branch can change the code Tor users run.
+#SITE_REF=main
+#SITE_ALLOW_UNSIGNED=0
 CONF
   chmod 640 /etc/sineloco-mirror.conf; chgrp sineloco-mirror /etc/sineloco-mirror.conf
 fi
 
 echo "== website"
 ROOT=$ROOT "$LIB/deploy-site.sh" "$SRC"
+chown -R sineloco-mirror: "$ROOT/builds"; chown -h sineloco-mirror: "$ROOT/site"   # so the updater can replace and prune builds
 
 echo "== nginx"
 rm -f /etc/nginx/sites-enabled/default       # the stock site listens on every interface
@@ -104,14 +113,20 @@ for _ in $(seq 1 60); do [ -s /var/lib/tor/sineloco/hostname ] && break; sleep 1
 [ -s /var/lib/tor/sineloco/hostname ] || { echo "tor did not create the onion address; see: journalctl -u tor@default"; exit 1; }
 
 echo "== release sync"
-install -m 644 "$here/systemd/sineloco-mirror-sync.service" "$here/systemd/sineloco-mirror-sync.timer" /etc/systemd/system/
+install -m 644 "$here"/systemd/sineloco-mirror-sync.* "$here"/systemd/sineloco-site-update.* /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now sineloco-mirror-sync.timer
+systemctl enable --now sineloco-mirror-sync.timer sineloco-site-update.timer
 systemctl start sineloco-mirror-sync.service || echo "   first sync failed; see: journalctl -u sineloco-mirror-sync"
 
 echo
 echo "Onion address:  http://$(cat /var/lib/tor/sineloco/hostname)/"
 echo "Back up /var/lib/tor/sineloco/ (the secret key IS the address). Anyone with it can impersonate the site."
+if [ ! -r /etc/sineloco-mirror/site-signing.asc ]; then
+  echo
+  echo "Automatic website updates are OFF until you give the server your public signing key:"
+  echo "   on your computer:  gpg --export --armor <your key id> > site-signing.asc"
+  echo "   then copy it to    /etc/sineloco-mirror/site-signing.asc   (see site/onion/README.md)"
+fi
 if [ "$VPN" = 1 ]; then
   echo
   echo "VPN check any time:  sudo sineloco-vpn-check"

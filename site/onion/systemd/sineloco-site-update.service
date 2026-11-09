@@ -1,0 +1,24 @@
+[Unit]
+Description=Update the Sine Loco onion website from its signed repository commit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sineloco-mirror
+StateDirectory=sineloco-site
+Environment=HOME=/var/lib/sineloco-site
+ExecStart=/usr/local/lib/sineloco-mirror/update-site.sh
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/sineloco
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+TimeoutStartSec=10min

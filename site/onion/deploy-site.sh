@@ -6,8 +6,8 @@ SRC=${1:?usage: deploy-site.sh <path to site/public>}
 ROOT=${ROOT:-/srv/sineloco}
 [ -f "$SRC/index.html" ] || { echo "no index.html in $SRC"; exit 1; }
 
-build="$ROOT/builds/$(date -u +%Y%m%dT%H%M%S)"
-mkdir -p "$build"
+mkdir -p "$ROOT/builds"
+build=$(mktemp -d "$ROOT/builds/$(date -u +%Y%m%dT%H%M%S).XXXXXX")   # always a fresh, empty folder
 cp -a "$SRC/." "$build/"
 rm -f "$build/_headers"          # headers are set by nginx on the onion
 
@@ -19,5 +19,5 @@ find "$build" -type f \( -name '*.html' -o -name '*.css' -o -name '*.js' -o -nam
 
 chmod -R a+rX "$build"
 ln -sfn "$build" "$ROOT/site.new" && mv -T "$ROOT/site.new" "$ROOT/site"
-ls -1dt "$ROOT"/builds/*/ | tail -n +4 | xargs -r rm -rf   # keep the last 3
+ls -1dt "$ROOT"/builds/*/ | tail -n +4 | xargs -r rm -rf || true   # keep the last 3
 echo "deployed $build"

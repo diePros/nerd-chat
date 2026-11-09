@@ -13,8 +13,8 @@
     "REPO": "diePros/nerd-chat"
   },
   "kv_namespaces": [
-    // Created on first deploy (automatic provisioning). Holds the daily star samples.
-    { "binding": "STATS" }
+    // Holds the daily star samples. Pinned so CI deploys reuse it instead of provisioning a new one.
+    { "binding": "STATS", "id": "e741349c1c66485b9b7f5d73bddac525" }
   ],
   "triggers": { "crons": ["0 4 * * *"] },
   // Custom domain: Cloudflare creates the DNS record and certificate on deploy.
