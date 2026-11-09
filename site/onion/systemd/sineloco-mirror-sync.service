@@ -1,0 +1,23 @@
+[Unit]
+Description=Mirror the newest Sine Loco releases for the onion site
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sineloco-mirror
+ExecStart=/usr/local/lib/sineloco-mirror/sync-releases.sh
+# the job only needs to write below /srv/sineloco
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/sineloco
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+TimeoutStartSec=20min

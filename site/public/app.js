@@ -92,7 +92,8 @@
     return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" });
   };
   const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
-  const safe = (u) => (typeof u === "string" && u.startsWith("https://github.com/") ? u : "#");
+  // Only GitHub links, or this site's own /dl/ and /downloads/ paths (onion mirror), are ever put into a link.
+  const safe = (u) => (typeof u === "string" && (u.startsWith("https://github.com/") || /^\/(dl|downloads)\//.test(u)) ? u : "#");
 
   function link(text, href) {
     const a = document.createElement("a");

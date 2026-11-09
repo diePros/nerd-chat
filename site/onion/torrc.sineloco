@@ -1,0 +1,6 @@
+# Onion service for the Sine Loco website. Included from /etc/tor/torrc by install.sh.
+HiddenServiceDir /var/lib/tor/sineloco/
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:8080
+@@SINGLE_HOP@@
+@@POW@@

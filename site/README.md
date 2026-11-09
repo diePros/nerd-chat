@@ -18,3 +18,4 @@ Static page plus one small Worker, for Cloudflare Workers.
 - Optional: `npx wrangler secret put GITHUB_TOKEN` (read-only, public data) to avoid the unauthenticated rate limit.
 - The site is configured for `sineloco.dev` (`routes` in `wrangler.jsonc`, custom domain). The first `npm run deploy` creates the DNS record and certificate; the zone must be in the same Cloudflare account as the Worker.
 - Every row in the facts table cites a source file. Re-check them when the code changes.
+- A Tor onion mirror with a direct download page (for your own server) is in `onion/`; see `onion/README.md`.
