@@ -25,62 +25,52 @@
   }
 
   // 2. Relay path: a message crosses, losing one Tor layer per relay on each side.
+  //    There is a wide drawing (.rd) and a tall one for phones (.rm); the one on screen is animated.
   const relay = document.getElementById("relay");
   if (relay && !reduced) {
-    const route = relay.querySelector("#route");
-    const packet = relay.querySelector("#packet");
-    const rings = [...packet.querySelectorAll(".ring")];
-    const nodes = [...relay.querySelectorAll(".n")];
-    const arrive = relay.querySelector(".arrive");
-    const total = route.getTotalLength();
-
-    // distance along the route of each node, from the node coordinates
-    const pts = nodes.map((n) => [Number(n.getAttribute("cx")), Number(n.getAttribute("cy"))]);
-    const stops = [0];
-    for (let i = 1; i < pts.length; i++) {
-      stops.push(stops[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-    }
-    const norm = stops.map((s) => s / stops[stops.length - 1]);
     const RDV = 4; // index of the rendezvous node
-
+    const setup = (svg) => {
+      const route = svg.querySelector(".wire");
+      const packet = svg.querySelector(".packet");
+      const rings = [...packet.querySelectorAll(".ring")];
+      const nodes = [...svg.querySelectorAll(".n")];
+      const arrive = svg.querySelector(".arrive");
+      const total = route.getTotalLength();
+      const pts = nodes.map((n) => [Number(n.getAttribute("cx")), Number(n.getAttribute("cy"))]);
+      const stops = [0];
+      for (let i = 1; i < pts.length; i++) stops.push(stops[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+      const norm = stops.map((s) => s / stops[stops.length - 1]);
+      return { svg, draw(t, MOVE) {
+        const m = Math.min(1, t / MOVE);
+        const p = route.getPointAtLength(m * total);
+        packet.setAttribute("transform", `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`);
+        // layers: three, peeled by each relay up to the rendezvous point, rewrapped for the far side
+        let peeled = 0;
+        if (m < norm[RDV]) { for (let i = 1; i < RDV; i++) if (m >= norm[i]) peeled++; }
+        else { for (let i = RDV + 1; i < nodes.length - 1; i++) if (m >= norm[i]) peeled++; }
+        rings.forEach((r, i) => r.setAttribute("opacity", i < 3 - peeled ? "1" : "0"));
+        nodes.forEach((n, i) => n.classList.toggle("lit", m >= norm[i] && t < MOVE + 0.1));
+        packet.setAttribute("opacity", t < 0.02 ? String(t / 0.02) : t > MOVE ? String(Math.max(0, 1 - (t - MOVE) / 0.04)) : "1");
+        const a2 = t > MOVE ? (t - MOVE) / 0.14 : 0; // arrival pulse at the contact
+        arrive.setAttribute("r", String(11 + a2 * 40));
+        arrive.setAttribute("opacity", a2 > 0 && a2 < 1 ? String(0.8 * (1 - a2)) : "0");
+      } };
+    };
+    const views = [...relay.querySelectorAll("svg.rd, svg.rm")].map(setup);
+    const phone = matchMedia("(max-width: 56rem)");
     const CYCLE = 10000, MOVE = 0.78;
     let running = false, t0 = 0;
 
     const frame = (now) => {
       if (!running) return;
-      const t = ((now - t0) % CYCLE) / CYCLE;
-      const m = Math.min(1, t / MOVE);
-      const p = route.getPointAtLength(m * total);
-      packet.setAttribute("transform", `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`);
-
-      // layers: three, peeled by each relay up to the rendezvous point, rewrapped for the far side
-      let peeled = 0;
-      if (m < norm[RDV]) {
-        for (let i = 1; i < RDV; i++) if (m >= norm[i]) peeled++;
-      } else {
-        for (let i = RDV + 1; i < nodes.length - 1; i++) if (m >= norm[i]) peeled++;
-      }
-      rings.forEach((r, i) => r.setAttribute("opacity", i < 3 - peeled ? "1" : "0"));
-
-      nodes.forEach((n, i) => n.classList.toggle("lit", m >= norm[i] && t < MOVE + 0.1));
-      packet.setAttribute("opacity", t < 0.02 ? String(t / 0.02) : t > MOVE ? String(Math.max(0, 1 - (t - MOVE) / 0.04)) : "1");
-
-      const a = t > MOVE ? (t - MOVE) / 0.14 : 0; // arrival pulse at the contact
-      arrive.setAttribute("r", String(11 + a * 40));
-      arrive.setAttribute("opacity", a > 0 && a < 1 ? String(0.8 * (1 - a)) : "0");
-
+      const v = views.find((x) => x.svg.classList.contains(phone.matches ? "rm" : "rd"));
+      if (v) v.draw(((now - t0) % CYCLE) / CYCLE, MOVE);
       requestAnimationFrame(frame);
     };
-
     const io = new IntersectionObserver((entries) => {
       const visible = entries.some((e) => e.isIntersecting);
-      if (visible && !running) {
-        running = true;
-        t0 = performance.now();
-        requestAnimationFrame(frame);
-      } else if (!visible) {
-        running = false;
-      }
+      if (visible && !running) { running = true; t0 = performance.now(); requestAnimationFrame(frame); }
+      else if (!visible) running = false;
     }, { threshold: 0.2 });
     io.observe(relay);
   }

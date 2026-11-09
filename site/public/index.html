@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sine Loco: chat without a place</title>
 <meta name="description" content="Serverless, Tor-routed, end-to-end encrypted chat. No server, no account, no phone number. Open source and unaudited, with every claim traced to its source.">
 <meta name="color-scheme" content="dark light">
@@ -43,7 +43,7 @@
   </p>
 
   <figure class="relay" id="relay">
-    <svg viewBox="0 0 1200 380" role="img" aria-labelledby="rl-t rl-d">
+    <svg class="rd" viewBox="0 0 1200 380" role="img" aria-labelledby="rl-t rl-d">
       <title id="rl-t">A message crossing Tor</title>
       <desc id="rl-d">A message leaves you wrapped in three layers of encryption. Each relay removes one layer and knows only its neighbours. The two chains of relays meet at a rendezvous point, then the message reaches your contact's onion service. Nothing stores it on the way.</desc>
       <defs>
@@ -96,6 +96,50 @@
         <text x="600" y="232" text-anchor="middle">rendezvous</text>
         <text x="300" y="368" text-anchor="middle" class="dim">relays you pick</text>
         <text x="900" y="368" text-anchor="middle" class="dim">relays they pick</text>
+      </g>
+    </svg>
+    <svg class="rm" viewBox="0 0 360 590" role="img" aria-labelledby="rlm-t rlm-d">
+      <title id="rlm-t">A message crossing Tor</title>
+      <desc id="rlm-d">A message leaves you wrapped in three layers of encryption. Each relay removes one layer and knows only its neighbours. The two chains of relays meet at a rendezvous point, then the message reaches your contact's onion service. Nothing stores it on the way.</desc>
+      <defs><filter id="glow-m" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5"/></filter></defs>
+      <g class="decoy">
+        <line x1="40" y1="75" x2="180" y2="40"/><line x1="40" y1="75" x2="100" y2="115"/>
+        <line x1="310" y1="70" x2="250" y2="185"/><line x1="310" y1="70" x2="180" y2="40"/>
+        <line x1="40" y1="215" x2="100" y2="115"/><line x1="40" y1="215" x2="120" y2="255"/>
+        <line x1="320" y1="250" x2="250" y2="185"/><line x1="320" y1="250" x2="180" y2="300"/>
+        <line x1="50" y1="330" x2="120" y2="255"/><line x1="50" y1="330" x2="120" y2="345"/>
+        <line x1="320" y1="385" x2="250" y2="415"/><line x1="320" y1="385" x2="180" y2="300"/>
+        <line x1="40" y1="450" x2="100" y2="485"/><line x1="40" y1="450" x2="120" y2="345"/>
+        <line x1="310" y1="510" x2="250" y2="415"/><line x1="310" y1="510" x2="180" y2="560"/>
+        <line x1="40" y1="555" x2="100" y2="485"/><line x1="40" y1="555" x2="180" y2="560"/>
+        <circle cx="40" cy="75" r="4"/><circle cx="310" cy="70" r="4"/><circle cx="40" cy="215" r="4"/>
+        <circle cx="320" cy="250" r="4"/><circle cx="50" cy="330" r="4"/><circle cx="320" cy="385" r="4"/>
+        <circle cx="40" cy="450" r="4"/><circle cx="310" cy="510" r="4"/><circle cx="40" cy="555" r="4"/>
+      </g>
+      <path class="wire" d="M180 40 L100 115 L250 185 L120 255 L180 300 L120 345 L250 415 L100 485 L180 560"/>
+      <g class="nodes">
+        <circle class="n end" data-n="0" cx="180" cy="40" r="11"/>
+        <circle class="n" data-n="1" cx="100" cy="115" r="8"/>
+        <circle class="n" data-n="2" cx="250" cy="185" r="8"/>
+        <circle class="n" data-n="3" cx="120" cy="255" r="8"/>
+        <circle class="n rdv" data-n="4" cx="180" cy="300" r="12"/>
+        <circle class="n" data-n="5" cx="120" cy="345" r="8"/>
+        <circle class="n" data-n="6" cx="250" cy="415" r="8"/>
+        <circle class="n" data-n="7" cx="100" cy="485" r="8"/>
+        <circle class="n end" data-n="8" cx="180" cy="560" r="11"/>
+      </g>
+      <circle class="arrive" cx="180" cy="560" r="11"/>
+      <g class="packet" transform="translate(180 40)">
+        <circle class="halo" r="22" filter="url(#glow-m)"/>
+        <circle class="ring" r="22"/><circle class="ring" r="17"/><circle class="ring" r="12"/>
+        <rect class="core" x="-6" y="-6" width="12" height="12" rx="3"/>
+      </g>
+      <g class="lbl">
+        <text x="205" y="45">you</text>
+        <text x="205" y="305">rendezvous</text>
+        <text x="205" y="566">your contact</text>
+        <text x="8" y="168" class="dim">relays you pick</text>
+        <text x="8" y="428" class="dim">relays they pick</text>
       </g>
     </svg>
     <ul class="legend">
@@ -215,7 +259,7 @@
 
   <h3>If one key leaks</h3>
   <figure class="rekey">
-    <svg viewBox="0 0 720 190" role="img" aria-labelledby="rk-t rk-d">
+    <svg class="rd" viewBox="0 0 720 190" role="img" aria-labelledby="rk-t rk-d">
       <title id="rk-t">One key against a key that moves on</title>
       <desc id="rk-d">With a single key for the whole session, a leak exposes every message, before and after. With a new key every 32 cells or 10 minutes, messages before the leak stay sealed. Later ones are exposed until a new handshake.</desc>
       <text class="sm" x="0" y="16">One key for the whole session</text>
@@ -234,7 +278,19 @@
       <text class="sm good" x="180" y="166" text-anchor="middle">earlier cells stay sealed</text>
       <text class="sm bad" x="540" y="166" text-anchor="middle">later cells exposed until a new handshake</text>
     </svg>
-    <figcaption class="src">docs/DELIVERY.md. A rekey is one-way, so it protects the past, not the future.</figcaption>
+    <svg class="rm" viewBox="0 0 360 250" role="img" aria-labelledby="rkm-t rkm-d">
+      <title id="rkm-t">One key against a key that moves on</title>
+      <desc id="rkm-d">With a single key for the whole session, a leak exposes every message, before and after. With a new key every 32 cells or 10 minutes, messages before the leak stay sealed. Later ones are exposed until a new handshake.</desc>
+      <rect class="seg bad" x="0" y="44" width="360" height="34" rx="4"/>
+      <rect class="seg ok" x="0" y="128" width="33" height="34" rx="4"/><rect class="seg ok" x="36" y="128" width="33" height="34" rx="4"/><rect class="seg ok" x="72" y="128" width="33" height="34" rx="4"/><rect class="seg ok" x="108" y="128" width="33" height="34" rx="4"/><rect class="seg ok" x="144" y="128" width="33" height="34" rx="4"/><rect class="seg bad" x="180" y="128" width="33" height="34" rx="4"/><rect class="seg bad" x="216" y="128" width="33" height="34" rx="4"/><rect class="seg bad" x="252" y="128" width="33" height="34" rx="4"/><rect class="seg bad" x="288" y="128" width="33" height="34" rx="4"/><rect class="seg bad" x="324" y="128" width="33" height="34" rx="4"/>
+      <line class="leak" x1="178" y1="30" x2="178" y2="170"/>
+      <text class="sm" x="0" y="34">One key for the whole session</text>
+      <text class="sm" x="0" y="116">Sine Loco: a new key every 32 cells or 10 min</text>
+      <text class="sm leaktxt" x="178" y="16" text-anchor="middle">key leaks</text>
+      <text class="sm good" x="2" y="196">earlier cells</text><text class="sm good" x="2" y="216">stay sealed</text>
+      <text class="sm bad" x="358" y="196" text-anchor="end">later cells exposed</text><text class="sm bad" x="358" y="216" text-anchor="end">until a new handshake</text>
+    </svg>
+    <figcaption class="capt"><code>docs/DELIVERY.md</code> A rekey is one-way, so it protects the past, not the future.</figcaption>
   </figure>
 
   <h3>What one password guess costs</h3>
