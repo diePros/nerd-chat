@@ -86,7 +86,7 @@ fun SineApp(
                             ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) }, persist = st.persist)
                         } ?: run { dest = Dest.Main(0) }
                         is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify)
+                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify, onDelete = { backend.deleteContact(c.id); dest = Dest.Main(0) })
                         } ?: run { dest = Dest.Main(0) }
                     }
                 }

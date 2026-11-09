@@ -31,6 +31,9 @@ interface ChatBackend {
     /** The phone's network went away (`false`) or came back (`true`): with it gone tor's network is switched off, coming back is delayed by a random few seconds. */
     fun networkChanged(up: Boolean) {}
 
+    /** Delete a contact and everything kept about it (keys, conversation, history). The caller has already asked the user to confirm. */
+    fun deleteContact(contactId: Int) {}
+
     /** Ask the core for the current state without changing anything: the first thing every call does is the lock's deadline check, so this is how a wake-up makes a timed-out lock erase itself before anything is shown. */
     fun refresh() {}
 

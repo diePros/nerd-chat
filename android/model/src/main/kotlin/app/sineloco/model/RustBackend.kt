@@ -75,6 +75,7 @@ class RustBackend(
     override fun lock() { op("lock") }
     override fun goOfflineNow() { op("offline_now") }
     override fun refresh() { op("snapshot") }
+    override fun deleteContact(contactId: Int) { op("delete_contact", text(contactId.toString())) }
     override fun networkChanged(up: Boolean) { op("net", text(if (up) "up" else "down")) }
     override fun panicBlocking(timeoutMillis: Long) {
         closed = true // stop the polling first: a poll after the wipe would only show the wiped screen

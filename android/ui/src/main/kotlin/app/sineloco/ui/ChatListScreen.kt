@@ -74,8 +74,8 @@ private fun ChatRow(c: ChatSummary, onClick: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(c.contact.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface)
                 Spacer(Modifier.width(6.dp))
+                // only the GOOD state is marked in the list: a red warning on every unverified contact, always, is noise that people learn to ignore (the chat and the details say it once)
                 if (c.contact.verified) Icon(SineIcons.Shield, "Verified", SineTheme.colors.verified, 15.dp)
-                else Icon(SineIcons.Warning, "Not verified", SineTheme.colors.danger, 15.dp)
             }
             Spacer(Modifier.height(3.dp))
             val sub = c.preview ?: when (c.contact.link) { Link.Connecting -> "Connecting…"; Link.Offline -> "Offline"; Link.Connected -> "Connected" }

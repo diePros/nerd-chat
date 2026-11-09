@@ -96,6 +96,7 @@ impl Bridge {
         let path = dir.join(vault_path::FILE);
         if std::fs::symlink_metadata(&path).is_ok() { vault_path::check_existing(&path)?; }
         let mut cfg = Config::new(Some(path), None, None, profile);
+        cfg.keys = false; // no keyboard on the phone: messages must not tell anybody to press a key
         cfg.tor.tor_path = tor_path.clone();
         let mut tor_base = None;
         if tor_path.is_some() {
@@ -248,6 +249,16 @@ impl Bridge {
                 if arg.len() > 256 { self.app.handle(Key::Esc); return Err("text too long"); } // and close the prompt: nothing on the screen could do it
                 self.app.input = arg.to_string();
                 self.app.handle(Key::Enter);
+            }
+            // ONE operation: select the contact, ask to delete it and answer the confirmation. The phone shows its own confirmation dialog first; the core's text confirmation is not a screen here.
+            "delete_contact" => {
+                if !self.in_main() { return Err(NOT_NOW); }
+                let before = self.app.contacts_len();
+                self.run("select", arg)?;
+                self.ensure_normal(); self.app.handle(Key::Char('d'));
+                if self.app.screen != Screen::Prompt(Prompt::ConfirmDelete) { return Err(NOT_NOW); }
+                self.app.input = "yes".to_string(); self.app.handle(Key::Enter);
+                if self.app.contacts_len() >= before { return Err("the contact was NOT deleted: see the status line"); }
             }
             "cancel" => { if !matches!(self.app.screen, Screen::Prompt(_)) || self.app.locked { return Err("nothing to cancel"); } self.app.handle(Key::Esc); }
             "verify" => {
@@ -523,6 +534,31 @@ mod tests {
         live.lock().unwrap().retain(|(p, _)| *p != 1);                  // tor 1 died: forgotten, nothing is sent to it
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(calls.lock().unwrap().len(), c.len());
+    }
+
+    #[test]
+    fn a_contact_can_be_deleted_in_one_operation_and_the_phone_never_hears_about_key_presses() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        call(&mut b, "new_contact", "Mira"); call(&mut b, "new_contact", "Jo");
+        let s = call(&mut b, "delete_contact", "0");
+        assert!(!s.contains("Mira") && s.contains("Jo") && s.contains("\"rejected\":null"), "{s}");
+        assert!(call(&mut b, "delete_contact", "5").contains("no such contact"));
+        // the core's own messages must not tell anybody to press a key
+        let s = call(&mut b, "snapshot", "");
+        for k in ["Press ", "press ", "(v)", "F12"] { assert!(!s.contains(k), "keyboard wording reached the phone: {k}: {s}"); }
+    }
+
+    #[test]
+    fn locking_closes_the_open_chat_so_that_messages_that_arrive_meanwhile_count_as_unread() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        call(&mut b, "new_contact", "Mira");
+        b.app.pane = Pane::Chat; // (an unpaired contact cannot open a chat through the UI)
+        call(&mut b, "lock", "");
+        assert!(b.app.pane == Pane::Details, "the chat pane is closed by the lock");
     }
 
     #[test]

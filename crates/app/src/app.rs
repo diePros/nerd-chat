@@ -42,6 +42,9 @@ pub struct TorCfg {
 pub type TransportFactory = std::sync::Arc<dyn Fn(&mut dyn FnMut(u8)) -> Result<Box<dyn Transport>, String> + Send + Sync>;
 
 pub struct Config {
+    /// The front end has a KEYBOARD interface (the terminal): messages may speak of key presses ("press v"). The desktop GUI and the phone app set this to false and get wording about
+    /// what is on the screen instead.
+    pub keys: bool,
     /// None = RAM-only: nothing is ever written to disk.
     pub path: Option<PathBuf>,
     pub counter: Option<PathBuf>,
@@ -85,7 +88,7 @@ impl Config {
     pub fn with_test_transport(mut self, f: TransportFactory) -> Self { self.transport = Some(f); self }
 
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, persist_default: Persist::Off, grid: Duration::from_secs(5), history_slot: sine_loco_store::history::SLOT_LEN, platform_keys: None, clock: None, boot_clock: None, lock_timeout_secs: None, lock_max_attempts: None }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, persist_default: Persist::Off, grid: Duration::from_secs(5), history_slot: sine_loco_store::history::SLOT_LEN, platform_keys: None, clock: None, keys: true, boot_clock: None, lock_timeout_secs: None, lock_max_attempts: None }
     }
 }
 
@@ -161,6 +164,7 @@ pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, /// sent, not
 const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
 const NO_CONTACT: &str = "No contact selected. Press n to add one.";
+const NO_CONTACT_GUI: &str = "No contact selected. Add a contact first.";
 /// Upper bound of the history scroll offset (the UI clamps to what really exists).
 const SCROLL_CAP: usize = 100_000;
 
@@ -388,6 +392,8 @@ pub struct App {
     lock_auth: bool,
     /// A lock was requested while the screen could not take it (a key derivation is running): it is applied the moment the app is back on the main screen.
     lock_pending: bool,
+    /// The status line expires: what it said when we last looked and since when (see `expire_status`).
+    status_seen: (String, Instant),
     /// Lets a start that is under way know that it was cancelled.
     start_cancel: Option<Arc<AtomicBool>>,
     /// When (boot seconds) the lock was requested: the timeout runs from the REQUEST, also when it had to wait for a derivation (`lock_pending`).
@@ -444,7 +450,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, start_cancel: None, locked_since: None, lock_attempts: 0, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, status_seen: (String::new(), Instant::now()), start_cancel: None, locked_since: None, lock_attempts: 0, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -716,6 +722,8 @@ impl App {
     pub fn view_number(&self) -> Option<&str> { self.view.as_ref().map(|v| v.number.as_str()) }
     pub fn is_ram_only(&self) -> bool { self.cfg.path.is_none() }
 
+    /// Front-end specific wording: the terminal speaks in key presses, the GUI and the phone in what is on the screen.
+    fn say(&self, tui: &'static str, other: &'static str) -> &'static str { if self.cfg.keys { tui } else { other } }
     fn ok(&mut self, m: impl Into<String>) {
         if self.counter_warn { self.status = format!("{} WARNING: the rollback-counter file could not be written, a rollback of the vault would not be noticed until the next successful save.", m.into()); self.error = true; }
         else { self.status = m.into(); self.error = false; }
@@ -943,7 +951,7 @@ impl App {
         self.kdf_rx = Some(rx);
         self.kdf_back = back;
         self.screen = Screen::Working;
-        self.ok("Deriving the key (memory-hard, takes a few seconds)... F12 = panic.");
+        { let m = self.say("Deriving the key (memory-hard, takes a few seconds)... F12 = panic.", "Deriving the key (memory-hard, takes a few seconds)..."); self.ok(m); }
         thread::spawn(move || { let _ = tx.send(job()); });
         #[cfg(test)]
         if !self.test_async { self.settle(); }
@@ -1006,7 +1014,7 @@ impl App {
                 self.vf = Some(vf);
                 self.open_history();
                 self.screen = Screen::Main;
-                self.ok("Vault created. Press n to add your first contact, ? for help.");
+                { let m = self.say("Vault created. Press n to add your first contact, ? for help.", "Vault created. Add your first contact."); self.ok(m); }
             }
             KdfMsg::Created(Err(e)) => { self.screen = back; self.err(format!("Cannot create vault: {e}")); }
             KdfMsg::Opened(Err(e)) => {
@@ -1058,6 +1066,8 @@ impl App {
         self.locked = true; self.lock_auth = true;
         self.screen = Screen::Main;
         self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
+        // the open chat is closed: messages that arrive meanwhile must COUNT as unread (the front end shows the list again after unlocking), and a half-typed draft must not wait behind the lock
+        self.pane = Pane::Details; self.compose.clear(); self.scroll = 0;
         self.pw.clear(); self.input.clear(); self.code_buf.clear();
         self.lock_msg = self.locked_text(); self.lock_err = false;
     }
@@ -1256,7 +1266,7 @@ impl App {
     }
 
     fn open_saved(&mut self) {
-        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)) else { return self.err(NO_CONTACT) };
+        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)) else { return self.err(self.say(NO_CONTACT, NO_CONTACT_GUI)) };
         if c.saved.is_empty() { return self.ok("No saved messages for this contact. In a chat: m selects a message, y saves it."); }
         self.pane = Pane::Saved; self.mode = Mode::Normal; self.saved_sel = c.saved.len() - 1; self.del_armed = false; self.compose.clear(); self.select = None;
     }
@@ -1287,7 +1297,7 @@ impl App {
                 self.ok("Deleted from the vault.");
                 if n <= 1 { self.pane = Pane::Details; }
             }
-            Key::Char('d') => { if n > 0 { self.del_armed = true; self.ok("Press d again to delete this saved message from the vault."); } }
+            Key::Char('d') => { if n > 0 { self.del_armed = true; { let m = self.say("Press d again to delete this saved message from the vault.", "Tap again to delete this saved message from the vault."); self.ok(m); } } }
             Key::Char('q') => { self.quit_armed = false; return self.quit_request(); }
             _ => {}
         }
@@ -1299,7 +1309,7 @@ impl App {
         let risk = self.at_risk();
         if !risk.is_empty() && !self.quit_armed {
             self.quit_armed = true;
-            self.err(format!("Quitting wipes RAM and may lose: {}. Press q again to quit, any other key to stay.", risk.join(", ")));
+            { let tail = self.say("Press q again to quit, any other key to stay.", "Quit again to confirm."); self.err(format!("Quitting wipes RAM and may lose: {}. {tail}", risk.join(", "))); }
             return Action::None;
         }
         Action::Quit
@@ -1329,7 +1339,7 @@ impl App {
         match self.sel_id() {
             None => { self.err("No contact selected."); false }
             Some(id) if self.linked.contains(&id) && self.engine.is_some() => true,
-            Some(_) => { self.err("Files are only sent to a CONNECTED contact (never queued). Go online (o) and wait for the green dot."); false }
+            Some(_) => { { let m = self.say("Files are only sent to a CONNECTED contact (never queued). Go online (o) and wait for the green dot.", "Files are only sent to a CONNECTED contact (never queued). Go online and wait for the green dot."); self.err(m); } false }
         }
     }
 
@@ -1400,7 +1410,7 @@ impl App {
         thread::spawn(move || { let _ = tx.send(probe_hosting(&ctl, &auth, trust)); });
         self.probe_rx = Some(rx);
         self.probe_then = Some((then, Instant::now()));
-        self.ok("Checking whether your Tor can host onion services ... (Esc = cancel)");
+        { let m = self.say("Checking whether your Tor can host onion services ... (Esc = cancel)", "Checking whether your Tor can host onion services ..."); self.ok(m); }
     }
 
     fn poll_probe(&mut self) {
@@ -1598,9 +1608,9 @@ impl App {
 
     fn require_no_peer(&mut self) -> bool {
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)) else { self.err("No contact selected. Press n to add one."); return false };
-        if c.peer.is_some() { self.err("This contact already has a peer key. Delete (d) and re-add to replace it."); return false; }
+        if c.peer.is_some() { { let m = self.say("This contact already has a peer key. Delete (d) and re-add to replace it.", "This contact already has a peer key. Delete it and add it again to replace it."); self.err(m); } return false; }
         if self.pair_rx.is_some() { self.err("A pairing is already in progress."); return false; }
-        if self.pending_pair.is_some() { self.err("A finished pairing is waiting for your answer: press P first."); return false; }
+        if self.pending_pair.is_some() { { let m = self.say("A finished pairing is waiting for your answer: press P first.", "A finished pairing is waiting for your answer: answer it first."); self.err(m); } return false; }
         true
     }
 
@@ -1684,7 +1694,7 @@ impl App {
                 if self.prep_rx.is_some() { return self.err("Still cleaning the previous file."); }
                 let (tx, rx) = channel();
                 self.prep_rx = Some((id, rx));
-                self.ok("Cleaning the file (metadata removal) ... F12 = panic.");
+                { let m = self.say("Cleaning the file (metadata removal) ... F12 = panic.", "Cleaning the file (metadata removal) ..."); self.ok(m); }
                 thread::spawn(move || { let _ = tx.send(sine_loco_chat::Engine::prepare_file(&raw, mode)); });
             }
             Prompt::SaveFile => {
@@ -1726,7 +1736,7 @@ impl App {
                             let c = self.cur().expect("selected");
                             c.peer = Some(peer);
                             c.trust = trust;
-                            if self.save() { let i = self.sel; self.engine_add(i); self.ok("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel."); }
+                            if self.save() { let i = self.sel; self.engine_add(i); { let m = self.say("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel.", "Imported - UNVERIFIED. Compare the safety number with them over another channel."); self.ok(m); } }
                         }
                     },
                 }
@@ -1878,7 +1888,7 @@ impl App {
                 let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
                 self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
             }
-            Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your contact file to {}. It is NOT public (it shows when you are online): hand it over in person or use a channel you trust (not Discord, e-mail...), then compare the safety number by voice (v). See docs/EXCHANGING_CONTACTS.md.", path.display())) }
+            Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your contact file to {}. It is NOT public (it shows when you are online): hand it over in person or use a channel you trust (not Discord, e-mail...), then compare the safety number by voice. See docs/EXCHANGING_CONTACTS.md.", path.display())) }
             Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
         }
     }
@@ -1989,7 +1999,7 @@ impl App {
                 let open = self.queued_not_kept(); // texts in the encrypted outbox are NOT lost by going offline
                 if open > 0 && !self.offline_armed && !force {
                     self.offline_armed = true;
-                    self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
+                    { let tail = self.say("Press o again to go offline anyway, any other key to stay.", "Go offline again to confirm."); self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. {tail}")); }
                     return false;
                 }
                 self.offline_armed = false;
@@ -2097,8 +2107,8 @@ impl App {
         self.scroll = 0;
         self.max_scroll.set(None);
         if self.online == Online::Offline {
-            if self.history.is_some() { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type: messages are kept encrypted on this device and sent when you are online."); }
-            else { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type; messages are sent only while online."); }
+            if self.history.is_some() { let m = self.say("You are OFFLINE: press Esc, then o to go online. You can still type: messages are kept encrypted on this device and sent when you are online.", "You are OFFLINE. You can still type: messages are kept encrypted on this device and sent when you are online."); self.ok(m); }
+            else { let m = self.say("You are OFFLINE: press Esc, then o to go online. You can still type; messages are sent only while online.", "You are OFFLINE. You can still type; messages are sent only while online."); self.ok(m); }
         }
     }
 
@@ -2106,7 +2116,7 @@ impl App {
         let Some(id) = self.chat_id() else { return };
         if self.compose.is_empty() { return; }
         let kept = self.history.is_some();
-        if self.engine.is_none() && !kept { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
+        if self.engine.is_none() && !kept { { let m = self.say("You are offline: press Esc for normal mode, then o. (Nothing was sent.)", "You are offline. (Nothing was sent.)"); return self.err(m); } }
         // refuse BEFORE taking the draft, so nothing is lost: the engine keeps at most MAX_UNCONFIRMED unconfirmed texts per contact
         let open = self.chats.get(&id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count());
         if open >= sine_loco_chat::engine::MAX_UNCONFIRMED { return self.err("Outbox full: the contact has not confirmed your earlier messages yet. Your draft is kept; try again when they come online."); }
@@ -2307,7 +2317,19 @@ impl App {
         }
     }
 
+    /// An error or a note must not stay on the screen forever (it hides the next real one and teaches people to ignore the line): an "ok" note goes after 8 s, an error after 20 s.
+    /// Warnings that matter are NOT lost this way: security alerts are sticky in `alerts` until acknowledged, and a status that begins with WARNING or ROLLBACK, or the pending
+    /// rollback-counter warning, stays until something replaces it. Only on the main screen (a prompt's own text and the lock's text are not touched).
+    fn expire_status(&mut self) {
+        if self.status != self.status_seen.0 { self.status_seen = (self.status.clone(), Instant::now()); return; }
+        if self.status.is_empty() || self.screen != Screen::Main || self.locked || self.counter_warn { return; }
+        if self.status.starts_with("WARNING") || self.status.contains("ROLLBACK") { return; }
+        let limit = if self.error { Duration::from_secs(20) } else { Duration::from_secs(8) };
+        if self.status_seen.1.elapsed() >= limit { self.status.clear(); self.error = false; self.status_seen = (String::new(), Instant::now()); }
+    }
+
     pub fn poll(&mut self) {
+        self.expire_status();
         if let Some(m) = self.max_scroll.get() { self.scroll = self.scroll.min(m); } // 'g' before the first frame must not leave a huge offset
         self.poll_prep();
         self.poll_kdf();
@@ -2327,7 +2349,7 @@ impl App {
                         // NEVER open a prompt from here: the user may be typing a message or answering another question and their next
                         // keys would answer the "in person?" question (a `y` upgrades trust). The user asks for it with `P`.
                         self.pending_pair = Some((contact_id, contact, sn));
-                        self.record_alert(None, "Pairing finished: press P (normal mode) to answer the in-person question. The contact is not paired until you do.");
+                        { let m = self.say("Pairing finished: press P (normal mode) to answer the in-person question. The contact is not paired until you do.", "Pairing finished: answer the in-person question. The contact is not paired until you do."); self.record_alert(None, m); }
                     }
                     Err(ExchangeError::PairingFailed | ExchangeError::ProofFailed) =>
                         self.err("PAIRING FAILED: wrong code or someone interfered. The code is burned; start over with a fresh one."),
@@ -2356,7 +2378,7 @@ impl App {
         }
         {
             if let Some(i) = self.vf().store.contacts.iter().position(|c| c.id == id) { self.engine_add(i); }
-            let how = if trust == Trust::CodeAuthenticated { "code-authenticated (in person)" } else { "UNVERIFIED - compare the safety number (v)" };
+            let how = if trust == Trust::CodeAuthenticated { "code-authenticated (in person)" } else { self.say("UNVERIFIED - compare the safety number (v)", "UNVERIFIED - compare the safety number") };
             self.ok(format!("Paired: {how}. Safety number {sn}"));
         }
     }
@@ -3931,6 +3953,24 @@ mod tests {
         assert_eq!(a.handle(Key::F12), Action::Panic);
         assert_eq!(a.screen, Screen::Wiped);
         assert!(!a.lock_auth());
+    }
+
+    #[test]
+    fn notes_and_errors_leave_the_status_line_after_a_while_but_warnings_and_alerts_stay() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        a.ok("something happened"); a.poll();
+        assert_eq!(a.status, "something happened");
+        a.status_seen.1 = Instant::now() - Duration::from_secs(9); a.poll();
+        assert!(a.status.is_empty(), "an ok note goes after 8 s");
+        a.err("Could not do it"); a.poll();
+        a.status_seen.1 = Instant::now() - Duration::from_secs(9); a.poll();
+        assert_eq!(a.status, "Could not do it", "an error stays longer");
+        a.status_seen.1 = Instant::now() - Duration::from_secs(21); a.poll();
+        assert!(a.status.is_empty() && !a.error);
+        a.err("WARNING: no counter file"); a.poll();
+        a.status_seen.1 = Instant::now() - Duration::from_secs(3600); a.poll();
+        assert!(a.status.starts_with("WARNING"), "a warning is not expired");
     }
 
     #[test]

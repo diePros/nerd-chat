@@ -85,6 +85,7 @@ impl Gui {
             }
         }
         let mut cfg = Config::new(if ram { None } else { path.clone() }, val("--counter-file").map(PathBuf::from), None, profile);
+        cfg.keys = false; // the GUI has buttons: no "press v" in its messages
         cfg.allow_swap = has("--allow-swap");
         cfg.can_host = !has("--cannot-host");
         if let Some(a) = val("--tor-control").and_then(|s| sine_loco_net::tor::Addr::parse(&s)) { cfg.tor.control = Some(a); }

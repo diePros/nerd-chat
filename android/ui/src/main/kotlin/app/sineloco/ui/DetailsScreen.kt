@@ -7,6 +7,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -20,8 +24,10 @@ import app.sineloco.model.Link
 
 /** The "nerd panel" of the desktop GUI, for one contact: safety number, connection, address, role. */
 @Composable
-fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, onStartVerify: () -> Unit, onConfirmVerify: (Boolean) -> Unit) {
+fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, onStartVerify: () -> Unit, onConfirmVerify: (Boolean) -> Unit, onDelete: () -> Unit = {}) {
+    var confirmDelete by remember { mutableStateOf(false) }
     if (verifyNumber != null) VerifyDialog(verifyNumber, onConfirmVerify)
+    if (confirmDelete) DeleteDialog(contact.name, onConfirm = { confirmDelete = false; onDelete() }, onCancel = { confirmDelete = false })
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AppBar {
             IconButton(onClick = onBack) { Icon(SineIcons.Back, "Back", SineTheme.colors.onBar) }
@@ -51,6 +57,7 @@ fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, o
                 if (contact.onionShort.isNotEmpty()) Row3("Address", contact.onionShort)
                 Row3("Role", if (contact.weHost) "You host for this contact while online" else "You only dial this contact")
             }
+            androidx.compose.material3.OutlinedButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("Remove this contact", color = SineTheme.colors.danger) }
         }
     }
 }
@@ -66,6 +73,17 @@ private fun VerifyDialog(number: String, onResult: (Boolean) -> Unit) {
         } },
         confirmButton = { TextButton(onClick = { onResult(true) }) { Text("They match") } },
         dismissButton = { TextButton(onClick = { onResult(false) }) { Text("They differ") } },
+    )
+}
+
+@Composable
+private fun DeleteDialog(name: String, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Remove $name?") },
+        text = { Text("The keys, the conversation and everything kept about this contact are deleted from this phone. You can only talk to them again by pairing anew.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Remove", color = SineTheme.colors.danger) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Keep") } },
     )
 }
 

@@ -27,6 +27,7 @@ fun ChatScreen(
     onBack: () -> Unit, onSend: (String) -> Unit, onDetails: () -> Unit, persist: Persist = Persist.Off,
 ) {
     var draft by remember { mutableStateOf("") }
+    var bannerDismissed by remember(contact.id) { mutableStateOf(false) } // in memory only: it comes back on the next start, nothing is saved
     val list = rememberLazyListState()
     LaunchedEffect(messages.size) { if (messages.isNotEmpty()) list.animateScrollToItem(messages.size + 1) }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -39,7 +40,7 @@ fun ChatScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(contact.name, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.width(6.dp))
-                        Icon(if (contact.verified) SineIcons.Shield else SineIcons.Warning, if (contact.verified) "Verified" else "Not verified", SineTheme.colors.onBar, 15.dp)
+                        if (contact.verified) Icon(SineIcons.Shield, "Verified", SineTheme.colors.onBar, 15.dp)
                     }
                     Text(
                         when { !online -> if (persist != Persist.Off) "You are offline: messages wait, encrypted" else "You are offline"; contact.link == Link.Connected -> "Connected over Tor"; contact.link == Link.Connecting -> "Connecting…"; else -> "Not reachable: messages wait here" },
@@ -57,7 +58,7 @@ fun ChatScreen(
                     Persist.Day -> "Messages are kept encrypted on this phone for about a day."
                     Persist.Week -> "Messages are kept encrypted on this phone for about a week."
                 }) }
-                if (!contact.verified) item("verify") { VerifyBanner(onDetails) }
+                if (!contact.verified && !bannerDismissed) item("verify") { VerifyBanner(onDetails, onLater = { bannerDismissed = true }) }
                 items(messages, key = { it.id }) { Bubble(it) }
                 item("end") { Spacer(Modifier.height(2.dp)) }
             }
@@ -78,15 +79,15 @@ private fun Pill(text: String) {
 }
 
 @Composable
-private fun VerifyBanner(onCheck: () -> Unit) {
+private fun VerifyBanner(onCheck: () -> Unit, onLater: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.background).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(SineIcons.Warning, null, SineTheme.colors.danger, 20.dp)
+            Icon(SineIcons.Shield, null, SineTheme.colors.muted, 20.dp)
             Spacer(Modifier.width(8.dp))
             Text("Not verified yet", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
         }
         Text("Anyone could be pretending to be this person. Compare the number code once, in person or by phone.", color = SineTheme.colors.muted, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
-        TextButton(onClick = onCheck) { Text("Check the code") }
+        Row { TextButton(onClick = onCheck) { Text("Check the code") }; TextButton(onClick = onLater) { Text("Later") } }
     }
 }
 
