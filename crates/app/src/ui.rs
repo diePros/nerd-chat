@@ -30,7 +30,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Privacy screen: ONLY this is drawn (the app underneath is not rendered at all, so no name or message stays in the terminal buffer).
     if app.locked { lock_view(f, area, app); return; }
     let rows = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 }), Constraint::Length(1)]).split(area);
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 } + app.pair_info.as_ref().map_or(0, |p| p.lines().count().saturating_sub(1) as u16)), Constraint::Length(1)]).split(area);
     let mode = if app.is_ram_only() { "RAM-ONLY" } else { "vault" };
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(" NERD-CHAT ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
@@ -48,7 +48,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Security warnings are sticky: shown above the status line until acknowledged (z), never overwritten.
     let rows2 = if let Some((a, n)) = app.alerts.first() {
-        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(rows[2]);
         let more = if app.alerts.len() > 1 || app.alerts_dropped > 0 { format!(" (+{} more)", app.alerts.len() - 1 + app.alerts_dropped as usize) } else { String::new() };
         let times = if *n > 1 { format!(" (x{n})") } else { String::new() };
         f.render_widget(Paragraph::new(format!("[z] ! {a}{times}{more}")).style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)), sub[0]);
@@ -57,7 +57,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let style = if app.error { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Cyan) };
     // Rendered straight from borrowed &str (no per-frame String copies of the pairing code).
     if let Some(p) = &app.pair_info {
-        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows2);
+        let n = p.lines().count().max(1) as u16; // a pairing over Tor shows the link and the code on two lines
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(n), Constraint::Length(1)]).split(rows2);
         f.render_widget(Paragraph::new(&***p).style(Style::default().fg(Color::Yellow)), sub[0]);
         f.render_widget(Paragraph::new(app.status.as_str()).style(style), sub[1]);
     } else {
@@ -68,7 +69,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match &app.screen {
         Screen::Prompt(p) => {
             let shown = if matches!(p, Prompt::JoinCode(_)) { "•".repeat(app.code_chars().min(40)) } else { app.input.clone() };
-            prompt_popup(f, area, p, &shown)
+            prompt_popup(f, area, p, &shown, app.pair_remote())
         }
         Screen::Verify => verify_popup(f, area, app.view_number().unwrap_or("")),
         Screen::Help => help_popup(f, area),
@@ -84,7 +85,7 @@ fn footer_hint(app: &App) -> &'static str {
         (Screen::Main, Pane::Saved, _) => " SAVED  j/k move  d d delete  Esc back   F12 PANIC-LOCK  Ctrl+] PURGE",
         (Screen::Main, Pane::Chat, Mode::Normal) if app.select.is_some() => " SELECT  j/k choose a message  y save it  Esc cancel   F12 PANIC",
         (Screen::Main, Pane::Chat, Mode::Normal) => " NORMAL  i type  m select+save  j/k scroll  Tab next  f file  t text  a/r accept  s save  v verify  o online  Esc back  ? help  q quit  F12 PANIC  Ctrl+] PURGE",
-        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  v verify  o online  ? help  Esc lock  q quit  F12 PANIC  Ctrl+] PURGE",
+        (Screen::Main, Pane::Details, _) => " Up/Down select  Enter chat  i type  H saved  n new  e export  I import  l/c pair  T/J pair over Tor  v verify  o online  ? help  Esc lock  q quit  F12 PANIC  Ctrl+] PURGE",
         _ => " F12 PANIC-LOCK  Ctrl+] PURGE",
     }
 }
@@ -252,7 +253,7 @@ fn chat_view(f: &mut Frame, area: Rect, app: &App) {
     let n = app.chat_lines().len();
     let mut msgs: Vec<Vec<Line>> = app.chat_lines().iter().enumerate().map(|(i, l)| {
         let who = if l.mine { "me" } else { "them" };
-        let tag = format!("{who}{}{}> ", if l.saved { "★" } else { "" }, if l.queued { " (queued)" } else if l.unsent { " (NOT SENT)" } else { "" });
+        let tag = format!("{who}{}{}> ", if l.saved { "★" } else { "" }, if l.queued { " (queued)" } else if l.unsent { " (NOT SENT)" } else if l.unconfirmed { " (NOT CONFIRMED)" } else { "" });
         wrap_msg(&l.text, &tag, Style::default().fg(if l.mine { Color::Cyan } else { Color::Green }), w, app.select == Some(n - 1 - i))
     }).collect();
     let total: usize = msgs.iter().map(Vec::len).sum();
@@ -290,18 +291,21 @@ fn popup(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, w: u16, h: u1
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(title)).wrap(Wrap { trim: false }), r);
 }
 
-fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str) {
+fn prompt_popup(f: &mut Frame, area: Rect, p: &Prompt, input: &str, remote: bool) {
     let (title, hint) = match p {
         Prompt::NewContact => ("New contact", "Name (a new keypair is generated):".to_string()),
         Prompt::Export => ("Export your public bundle", "Write to file (never overwrites):".into()),
         Prompt::Import => ("Import their bundle", "Path of their .sbc file:".into()),
         Prompt::Listen => ("Pair: listen", "Listen address (use your LAN IP and a port, e.g. 192.168.1.5:4000):".into()),
         Prompt::JoinAddr => ("Pair: connect", "Their address ip:port:".into()),
+        Prompt::JoinLink => ("Pair over Tor: link", "Paste the link your partner sent you (56 characters):".into()),
+        Prompt::JoinCode(a) if a.starts_with("tor:") => ("Pair over Tor: code", "The code your partner told you by voice (hidden as you type):".into()),
         Prompt::JoinCode(a) => ("Pair: connect", format!("One-time code shown on their screen (hidden as you type; connecting to {a}):")),
         Prompt::ConfirmDelete => ("Delete contact", "Type yes to delete this contact AND its keys:".into()),
         Prompt::SendFile => ("Send a file", "Path of a JPEG or PNG (metadata is stripped; every other format is refused):".into()),
         Prompt::SendText => ("Send plain text", "Path of a text file (ONLY invisible/control characters removed; document metadata is NOT understood; RTF/PDF/XML/HTML refused):".into()),
         Prompt::SaveFile => ("Save received file", "Write to (never overwrites; neutral name suggested):".into()),
+        Prompt::InPerson if remote => ("Pairing succeeded", "Did you HEAR the code by voice from this person (not as text)? y/n  (n = stays UNVERIFIED):".into()),
         Prompt::InPerson => ("Pairing succeeded", "Was the code exchanged IN PERSON (same room)? y/n  (n = stays UNVERIFIED):".into()),
     };
     popup(f, area, title, vec![Line::from(hint), Line::from(""), Line::from(Span::styled(format!("{input}_"), Style::default().add_modifier(Modifier::BOLD))), Line::from(""), Line::from("Enter = ok   Esc = cancel")], 76, 9);

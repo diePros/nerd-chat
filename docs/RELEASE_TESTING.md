@@ -10,10 +10,13 @@ Binary under test: the file `nerd-chat-<version>-x86_64-linux-musl` from the Git
 1. Put `nerd-chat-0.1.0-x86_64-linux-musl`, `SHA256SUMS` (and `SHA256SUMS.asc` if present) in a new empty folder.
 2. `sha256sum -c SHA256SUMS --ignore-missing` -> `OK`.   (If a signature exists: `gpg --verify SHA256SUMS.asc SHA256SUMS`.)
 3. `chmod +x nerd-chat-0.1.0-x86_64-linux-musl && ./nerd-chat-0.1.0-x86_64-linux-musl --version` -> `nerd-chat 0.1.0`.
-4. `file nerd-chat-0.1.0-x86_64-linux-musl` -> contains `static-pie linked` (or `statically linked`); `ldd` -> `not a dynamic executable`.
+4. `file nerd-chat-0.1.0-x86_64-linux-musl` -> contains `static-pie linked` (or `statically linked`); `ldd` -> `statically linked` (or `not a dynamic executable`).
 5. Reproducibility (the strongest check, 10 minutes, any second machine or WSL): `git clone https://github.com/diePros/nerd-chat && cd nerd-chat && git checkout v0.1.0 && scripts/release.sh`
    (needs a clean tree and rustup; the pinned toolchain installs itself). The printed SHA-256 of `nerd-chat-0.1.0-x86_64-linux-musl` must
    equal the one in the release. Different? Send me both hashes and `rustc -V` of each machine.
+
+## A2. Default vault location
+Run `./nerd-chat` WITHOUT `--vault` in a fresh `HOME` (e.g. `HOME=$(mktemp -d) ./nerd-chat`): the text names `~/.local/share/nerd-chat/nerd-chat.vault`, an empty line continues, EOF (`</dev/null`) or any text cancels with nothing created. A dangling `./nerd-chat.vault` symlink is refused. On Tails the WARNING about the erased home appears.
 
 ## B. Tails (the open question: can Tails' Tor host onion services for us?)
 Use a fresh Tails session with Persistent Storage ON for the vault only, network connected (Tor ready). Do not use `sudo`.
@@ -39,11 +42,17 @@ Use a fresh Tails session with Persistent Storage ON for the vault only, network
 ## C. Normal Linux machine, full behaviour (30 minutes, the dev laptop is fine)
 1. `sudo apt install tor && sudo systemctl disable --now tor`, `cat /proc/swaps` empty (`sudo swapoff -a`).
 2. Two terminals, two vaults (`--vault ./a.vault`, `./b.vault`), the steps of `docs/GETTING_STARTED.md` sections 3 and 4b (file pairing, verify, online, chat, file).
-3. Message while the peer is offline: peer `o` off; type a message -> shows `(queued)`; peer `o` on -> delivered and the `(queued)` tag disappears.
+3. Message while the peer is offline: peer `o` off; type a message -> shows `(queued)`; peer `o` on -> delivered and the `(queued)` tag disappears (it goes away when the peer's app confirms, also while connected). Extra: kill the peer's terminal (close the window) and type 2 messages at once; restart the peer: both arrive, once each.
 4. Save a message: in the chat `m`, `j`/`k`, `y` -> star; `H` shows it; `d` `d` deletes it. Quit and reopen: only the starred message is still there.
 5. Key rotation: `K` on one side, wait for both sides to say done (about 1-3 minutes), chat still connects.
 6. Lost terminal: start the app, then `kill -HUP <pid of the terminal emulator>` or just close the window; `top` shows no process at 100% CPU.
 7. Wrong password 3 times: each takes ~4 s, no crash. Copy an old vault copy back over the vault: expect `ROLLBACK DETECTED`.
+
+## C2. Interop with the audited 0.1.0 (only while both versions are in use)
+Run the 0.1.0 binary on one side and a build of `next` on the other (two terminals on this laptop are enough), paired as in part C.
+1. Messages flow in BOTH directions. On the `next` side a sent line loses `(queued)` within about 5 s (it sees an old peer).
+2. Close the 0.1.0 terminal, type two messages on the `next` side, start 0.1.0 again and go online: both arrive, once each, nothing older repeats.
+3. Two `next` builds: `(queued)` disappears 1-6 s after sending (the confirmation is delayed on purpose).
 
 ## D. What to send back
 For every failed or odd step: step number, exact text on screen, `uname -r`, the Tails version, and the probe files. Pass/fail per step is enough for the rest.

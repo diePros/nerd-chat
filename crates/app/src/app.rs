@@ -1,9 +1,10 @@
 //! UI state machine (no rendering, no terminal): driven by key events, fully testable.
 use crate::secret::{ComposeBuf, SecretBuf};
-use nerd_chat_chat::{transport::{TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
-use nerd_chat_net::tor::{control::AuthPref, spawn::{find_tor, SpawnConfig}, Addr};
+use nerd_chat_chat::{transport::{BoxStream, PairDialError, PairDialFn, PairHostFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use nerd_chat_net::tor::CancelToken;
+use nerd_chat_net::tor::{control::AuthPref, probe::{probe_hosting, HostProbe}, spawn::{find_tor, SpawnConfig}, Addr};
 use nerd_chat_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
-use nerd_chat_exchange::{file, pair::{Lockout, PairingJoin, PairingOffer}, ExchangeError, ImportedContact, SafetyView};
+use nerd_chat_exchange::{file, pair::{Lockout, PairStream, PairingJoin, PairingOffer, REMOTE_OFFER_MAX_TTL}, ExchangeError, ImportedContact, SafetyView};
 use nerd_chat_store::{read_regular_file, OpenInfo, StoreError, VaultFile};
 use nerd_chat_vault::Profile;
 use std::{
@@ -44,18 +45,24 @@ pub struct Config {
     pub keyfile_path: Option<PathBuf>,
     pub profile: Profile,
     pub tor: TorCfg,
-    pub transport: Option<TransportFactory>,
+    pub(crate) transport: Option<TransportFactory>,
     pub timing: Timing,
     /// Our Tor cannot host onion services (e.g. a Tails with a restricted control port): said in our exported bundles, so the
     /// contact hosts for us and nothing needs to be published speculatively. (`--cannot-host`; `--probe-tor --probe-onion` tells you.)
     pub can_host: bool,
+    /// Tests only: the answer of the automatic hosting probe (None = really probe, when an external tor is configured).
+    pub(crate) host_probe_test: Option<HostProbe>,
     /// Start even though swap is active (secrets could be written to the disk by the OS). Default: refuse.
     pub allow_swap: bool,
 }
 
 impl Config {
+    /// Replace Tor by a test network (the in-memory `MemNet`): only for the developer demo and tests, never in a release build.
+    #[cfg(feature = "test-transport")]
+    pub fn with_test_transport(mut self, f: TransportFactory) -> Self { self.transport = Some(f); self }
+
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, allow_swap: false }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false }
     }
 }
 
@@ -76,6 +83,12 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
     TorTransport::start(setup, progress).map(|t| Box::new(t) as Box<dyn Transport>)
 }
 
+/// What continues once the hosting probe answered. All variants carry the contact id: nothing may be applied to another contact.
+enum Then { Export([u8; 8], String), Listen([u8; 8], SocketAddr), Join([u8; 8], SocketAddr, Result<PairingJoin, ExchangeError>), TorOffer([u8; 8]), TorJoin([u8; 8], String, Result<PairingJoin, ExchangeError>) }
+
+/// How long the worker may take before the answer counts as inconclusive (a hostile or hung control port must not hold us).
+const PROBE_DEADLINE: Duration = Duration::from_secs(15);
+
 /// Where the engine is. (UI reads this.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Online { Offline, Starting(u8), Online, Stopping, Failed(String) }
@@ -89,15 +102,35 @@ enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
 
 /// One line of conversation. RAM only, wiped when dropped.
-pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, pub queued: bool, /// the user saved this message into the vault
-    pub saved: bool, /// the message was queued but is GONE (we went offline or the engine's queue overflowed): it will never be sent
-    pub unsent: bool }
+pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, /// sent, not yet CONFIRMED by the contact's app (the engine resends it on every new connection)
+    pub queued: bool, /// the user saved this message into the vault
+    pub saved: bool, /// the engine REFUSED the text (outbox full, empty, too long): it was not sent and never will be
+    pub unsent: bool, /// we went offline while it was unconfirmed: it may or may not have arrived (the engine's copy is gone)
+    pub unconfirmed: bool, /// the id of one of OUR texts, so that `Delivered`/`Unsent` find exactly this line (None for received lines)
+    pub mid: Option<[u8; 8]> }
 /// A contact may rotate its keys (and so make us re-publish our service) at most this often.
 const ROTATION_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 const MAX_CHAT_LINES: usize = 500;
 const NO_CONTACT: &str = "No contact selected. Press n to add one.";
 /// Upper bound of the history scroll offset (the UI clamps to what really exists).
 const SCROLL_CAP: usize = 100_000;
+
+/// States for the inspector panel (see `App::inspect`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inspect {
+    pub connected: bool,
+    pub contact_can_host: bool,
+    pub we_told_can_host: Option<bool>,
+    pub we_host_now: bool,
+    pub host_anyway: bool,
+    /// "host anyway" may be switched ON (our Tor can host) or is ON (and may be switched off)
+    pub host_anyway_possible: bool,
+    pub rotation: Option<&'static str>,
+    /// a rotation can be started now (online, none waiting)
+    pub rotation_possible: bool,
+    pub saved: usize,
+    pub cap_mismatch: Option<bool>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, BackTab, PageUp, PageDown, Home, End, F12, CtrlBackslash, /// Ctrl+] / Shift+F12: PURGE
@@ -109,7 +142,8 @@ pub enum Action { None, Quit, Panic, /// like `Panic`, and every file of this va
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
-    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), ConfirmDelete, InPerson, SendFile, SendText, SaveFile,
+    NewContact, Import, Export, Listen, JoinAddr, JoinCode(String), /// the pairing link pasted for a pairing over Tor
+    JoinLink, ConfirmDelete, InPerson, SendFile, SendText, SaveFile,
 }
 
 /// What the right-hand pane shows (the contact list sidebar is always there).
@@ -140,13 +174,90 @@ pub enum Screen {
 type PairMsg = ([u8; 8], Result<(ImportedContact, String), ExchangeError>);
 
 /// Handle on a running pairing worker so it can be cancelled (user `x`, or panic).
-struct PairCtl { cancel: Arc<AtomicBool>, stream: Arc<Mutex<Option<TcpStream>>>, handle: JoinHandle<()> }
+/// What the pairing-over-Tor worker reports besides the final result.
+enum LinkMsg { Ready { link: Zeroizing<String>, code: Zeroizing<String>, expires: Instant }, Failed(String), UsedAndFailed }
+
+/// The link and code of an open offer over Tor, for the front end to show (the link goes to the partner only, the code by voice).
+pub struct TorLink { pub contact: [u8; 8], pub link: Zeroizing<String>, pub code: Zeroizing<String>, pub expires: Instant }
+
+/// A stream that came through Tor, as a pairing stream.
+struct TorPairStream(BoxStream);
+impl std::io::Read for TorPairStream { fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.0.read(b) } }
+impl std::io::Write for TorPairStream { fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.write(b) } fn flush(&mut self) -> std::io::Result<()> { self.0.flush() } }
+impl PairStream for TorPairStream { fn set_timeout(&mut self, d: Duration) -> std::io::Result<()> { self.0.set_timeout(Some(d)) } }
+
+/// The offer side over Tor (worker thread): host the one-shot service, wait until it is published, show link + code, wait for ONE
+/// connection, then pair. Everything it owns (service, listener) is dropped on every path.
+fn tor_offer_job(host_fn: PairHostFn, tok: &CancelToken, ident: &ContactIdentity, adv: bool, lockout: Arc<Lockout>, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> {
+    let mut host = match host_fn() {
+        Ok(h) => h,
+        Err(e) => { let _ = ltx.send(LinkMsg::Failed(if e.contains("510") { "Your Tor cannot create the pairing service here. Ask the OTHER person to create the code, and join with their link.".into() } else { format!("Could not create the pairing service: {e}") })); return Err(ExchangeError::Io); }
+    };
+    match host.wait_published(tok) {
+        Ok(true) => {}
+        Ok(false) => return Err(ExchangeError::Io),
+        Err(e) => { let _ = ltx.send(LinkMsg::Failed(format!("The pairing service did not come up in time ({e}). Try again."))); return Err(ExchangeError::Io); }
+    }
+    let (offer, code) = PairingOffer::generate_remote(lockout, REMOTE_OFFER_MAX_TTL)?;
+    let offer = offer.with_can_host(adv);
+    let expires = Instant::now() + offer.expires_in();
+    let _ = ltx.send(LinkMsg::Ready { link: Zeroizing::new(host.id.clone()), code, expires });
+    let stream = loop {
+        if tok.is_cancelled() { return Err(ExchangeError::Io); }
+        match host.incoming.recv_timeout(Duration::from_millis(200)) {
+            Ok(s) => break s,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if Instant::now() >= expires { return Err(ExchangeError::Expired); },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(ExchangeError::Io),
+        }
+    };
+    drop(host); // the service is removed as soon as the one connection arrived
+    tok.register(&*stream);
+    if tok.is_cancelled() { return Err(ExchangeError::Io); }
+    let mut s = TorPairStream(stream);
+    match offer.accept_remote(&mut s, ident) {
+        Ok(p) => Ok(p),
+        Err((e, guessed)) => { if guessed { let _ = ltx.send(LinkMsg::UsedAndFailed); } Err(e) }
+    }
+}
+
+/// The join side over Tor (worker thread): dial the link (bounded retry while the descriptor is not found), then pair.
+fn tor_join_job(dial: PairDialFn, tok: &CancelToken, id: &str, join: PairingJoin, ident: &ContactIdentity, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> {
+    let fail = |m: &str| { let _ = ltx.send(LinkMsg::Failed(m.to_string())); };
+    let start = Instant::now();
+    let stream = loop {
+        let mut iso = [0u8; 16];
+        getrandom::fill(&mut iso).map_err(|_| ExchangeError::Io)?;
+        match dial(id, &iso, tok) {
+            Ok(s) => break s,
+            Err(PairDialError::NotFound) if start.elapsed() < Duration::from_secs(60) => {
+                for _ in 0..30 { if tok.is_cancelled() { return Err(ExchangeError::Io); } thread::sleep(Duration::from_millis(100)); }
+            }
+            Err(PairDialError::NotFound) => { fail("The link is not ready yet, or it has expired. Ask your partner for a new link."); return Err(ExchangeError::Expired) }
+            Err(PairDialError::Unreachable) => { fail("Could not reach your partner through Tor: their pairing is closed or not ready, or Tor is busy. Ask for a new link and try again."); return Err(ExchangeError::Io) }
+            Err(PairDialError::Refused) => { fail("Your partner's pairing is already closed (the link was used once). Ask for a new link."); return Err(ExchangeError::Io) }
+            Err(PairDialError::Cancelled) => return Err(ExchangeError::Io),
+            Err(PairDialError::Other(m)) if m.contains("os error 11") || m.contains("timed out") => { fail("Tor did not answer in time. The link may not be ready yet, or Tor is slow right now. Ask for a new link and try again."); return Err(ExchangeError::Io) }
+            Err(PairDialError::Other(m)) => { fail(&format!("Could not connect through Tor: {m}")); return Err(ExchangeError::Io) }
+        }
+    };
+    tok.register(&*stream);
+    if tok.is_cancelled() { return Err(ExchangeError::Io); }
+    let mut s = TorPairStream(stream);
+    match join.with_deadline(nerd_chat_exchange::pair::REMOTE_PAIR_DEADLINE).join_remote(&mut s, ident) {
+        Ok(p) => Ok(p),
+        Err((e, false)) if e == ExchangeError::Io => { fail("Your partner's pairing closed before it started: the offer was cancelled or already used. Ask for a new link."); Err(e) }
+        Err((e, _)) => Err(e),
+    }
+}
+
+struct PairCtl { cancel: Arc<AtomicBool>, stream: Arc<Mutex<Option<TcpStream>>>, handle: JoinHandle<()>, tor: Option<Arc<CancelToken>> }
 
 impl PairCtl {
     /// Ask the worker to stop and cut its socket so blocked reads return immediately.
     fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
         if let Some(s) = self.stream.lock().unwrap().as_ref() { let _ = s.shutdown(Shutdown::Both); }
+        if let Some(t) = &self.tor { t.cancel(); } // closes the SOCKS/onion stream and ends a wait for the service
     }
 }
 
@@ -170,6 +281,15 @@ pub struct App {
     vf: Option<VaultFile>,
     view: Option<SafetyView>,
     pair_rx: Option<Receiver<PairMsg>>,
+    /// pairing over Tor: progress of the worker (link ready, failures), the shown link, the lockout that only counts real guesses, and whether the running pairing came through Tor
+    link_rx: Option<Receiver<LinkMsg>>,
+    pub tor_offer: Option<TorLink>,
+    /// the contact an open Tor offer belongs to (the card must show it for THAT contact only)
+    tor_contact: Option<[u8; 8]>,
+    remote_lockout: std::sync::Arc<Lockout>,
+    pair_remote: bool,
+    /// The automatic hosting probe (R12-5) running on a worker thread, what to do when it answers, and when it started.
+    probe_rx: Option<Receiver<HostProbe>>, probe_then: Option<(Then, Instant)>,
     pub pair_info: Option<Zeroizing<String>>,
     pair_ctl: Option<PairCtl>,
     code_buf: SecretBuf,
@@ -211,7 +331,7 @@ pub struct App {
     /// Largest useful `scroll`, reported by the last frame (it knows the wrapped width); None before the first frame.
     pub max_scroll: std::cell::Cell<Option<usize>>,
     /// `q` pressed once with something that would be lost: a second `q` quits.
-    quit_armed: bool,
+    quit_armed: bool, offline_armed: bool,
     compose: ComposeBuf,
     /// pending incoming file offers (contact id -> (transfer id, size))
     offers: HashMap<[u8; 8], (nerd_chat_chat::file::Xid, u32)>,
@@ -222,6 +342,8 @@ pub struct App {
     prep_rx: Option<([u8; 8], Receiver<Result<(nerd_chat_chat::FileOut, Vec<String>), nerd_chat_strip::StripError>>)>,
     /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
     pub alerts: Vec<(String, u32)>,
+    /// This session's warnings, newest last, kept after they were acknowledged (memory only, wiped by panic/purge).
+    alert_log: Vec<(String, u32)>,
     /// Alerts that did not fit (never evict an unacknowledged one).
     pub alerts_dropped: u32,
     kdf_rx: Option<Receiver<KdfMsg>>,
@@ -237,17 +359,18 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config) -> Self {
-        let exists = cfg.path.as_ref().is_some_and(|p| p.exists());
+        assert!(cfg!(test) || crate::startup::is_done(), "nerd_chat_app::startup::startup(&args) must be the first thing a front end runs (cleaner helper, hardening)");
+        let exists = cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok());
         let ram = cfg.path.is_none();
         let mut a = Self {
             cfg, screen: if exists { Screen::Unlock } else { Screen::CreatePw }, pw: SecretBuf::new(), pw2: SecretBuf::new(),
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
-            pair_rx: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
+            pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
-            alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
+            alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
@@ -309,7 +432,11 @@ impl App {
         Some((c.name.as_str(), c.trust, sn))
     }
     /// Number of typed characters in the (hidden) join-code buffer.
+    /// Warnings raised in this session, oldest first, with repeat counts (kept after "Got it"; memory only).
+    pub fn alert_history(&self) -> &[(String, u32)] { &self.alert_log }
     pub fn code_chars(&self) -> usize { self.code_buf.chars() }
+    /// Number of typed characters in the repeat-password buffer (only the count leaves the core).
+    pub fn confirm_chars(&self) -> usize { self.pw2.chars() }
     pub fn view_number(&self) -> Option<&str> { self.view.as_ref().map(|v| v.number.as_str()) }
     pub fn is_ram_only(&self) -> bool { self.cfg.path.is_none() }
 
@@ -396,7 +523,7 @@ impl App {
         self.select = None;
         self.saved_sel = 0;
         self.del_armed = false;
-        self.quit_armed = false;
+        self.quit_armed = false; self.offline_armed = false;
         self.compose.clear();
         self.code_buf.clear();
         self.prep_rx = None;
@@ -405,6 +532,7 @@ impl App {
         self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
         self.alerts.clear();
+        self.alert_log.clear();
         self.alerts_dropped = 0;
         self.created.clear();
         self.kdf_cancel.store(true, Ordering::SeqCst); // a creating worker stops before it writes anything (R8-L4)
@@ -415,6 +543,8 @@ impl App {
         self.view = None;
         self.pending_pair = None;
         self.pair_rx = None;
+        self.link_rx = None; self.tor_offer = None; self.tor_contact = None; // the link and the code of an open offer (zeroizing, dropped now)
+        self.probe_rx = None; self.probe_then = None;
         self.pair_info = None;
         self.pw.clear();
         self.pw2.clear();
@@ -428,6 +558,10 @@ impl App {
     pub fn handle(&mut self, k: Key) -> Action {
         if k == Key::Purge { self.purge_prepare(); return Action::Purge; }
         if matches!(k, Key::F12 | Key::CtrlBackslash) { self.panic_wipe(); return Action::Panic; }
+        if self.probe_rx.is_some() { // the hosting probe runs: the only key is Esc (cancel); panic/purge were handled above
+            if k == Key::Esc { self.probe_rx = None; self.probe_then = None; self.ok("Cancelled."); }
+            return Action::None;
+        }
         match &self.screen {
             Screen::Wiped => Action::Quit,
             // the privacy screen swallows every key (even for a prompt an engine event raised underneath it)
@@ -620,6 +754,7 @@ impl App {
 
     fn key_normal(&mut self, k: Key) -> Action {
         if k != Key::Char('q') { self.quit_armed = false; }
+        if k != Key::Char('o') { self.offline_armed = false; }
         if self.pane == Pane::Saved { return self.key_saved(k); }
         if self.select.is_some() { self.key_select(k); return Action::None; }
         let chatting = self.pane == Pane::Chat;
@@ -651,6 +786,7 @@ impl App {
             Key::Char('z') => { if !self.alerts.is_empty() { self.alerts.remove(0); } else { self.alerts_dropped = 0; } }
             Key::Char('n') => self.open_prompt(Prompt::NewContact, ""),
             // Neutral random default: the contact's name must not leak into filesystem metadata.
+            Key::Char('e') if self.pair_rx.is_some() || self.pending_pair.is_some() => self.err("A pairing is running or waiting for your answer (P): export after it finished, so the capability told to the contact stays the same."),
             Key::Char('e') => if self.sel_name().is_some() {
                 let mut r = [0u8; 4];
                 getrandom::fill(&mut r).expect("OS RNG unavailable");
@@ -660,6 +796,8 @@ impl App {
             Key::Char('I') => if self.require_no_peer() { self.open_prompt(Prompt::Import, "") },
             Key::Char('l') => if self.require_no_peer() { self.open_prompt(Prompt::Listen, "127.0.0.1:0") },
             Key::Char('c') => if self.require_no_peer() { self.open_prompt(Prompt::JoinAddr, "") },
+            Key::Char('T') => if self.require_no_peer() { self.start_tor_offer() },
+            Key::Char('J') => if self.require_no_peer() { self.open_prompt(Prompt::JoinLink, "") },
             Key::Char('x') => self.cancel_pairing(),
             Key::Char('o') => self.toggle_online(),
             Key::Char('f') => if self.sel_linked() { self.open_prompt(Prompt::SendFile, "") },
@@ -677,14 +815,13 @@ impl App {
 
     fn scroll_limit(&self) -> usize { self.max_scroll.get().unwrap_or(SCROLL_CAP) }
 
-    /// What quitting would throw away, as a short list for the warning (queued lines of contacts that are NOT connected, files in RAM
+    /// What quitting would throw away, as a short list for the warning (unconfirmed lines, files in RAM
     /// or being cleaned, a pairing in progress/unanswered, a half-written draft). Conservative: it says "may".
     fn at_risk(&self) -> Vec<String> {
-        let queued = self.vf.as_ref().map_or(0, |v| v.store.contacts.iter().filter(|c| !self.linked.contains(&c.id))
-            .map(|c| self.chats.get(&c.id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count())).sum());
+        let queued: usize = self.chats.values().map(|l| l.iter().filter(|x| x.mine && x.queued).count()).sum();
         let files = self.inbox.len() + self.offers.len() + self.accepted.len() + usize::from(self.prep_rx.is_some());
         let mut v = Vec::new();
-        if queued > 0 { v.push(format!("{queued} undelivered message(s)")); }
+        if queued > 0 { v.push(format!("{queued} unconfirmed message(s)")); }
         if files > 0 { v.push(format!("{files} file(s) in RAM or being cleaned")); }
         if self.pair_ctl.is_some() || self.pending_pair.is_some() { v.push("a pairing in progress".into()); }
         if !self.compose.is_empty() { v.push("a draft".into()); }
@@ -856,6 +993,66 @@ impl App {
         self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).and_then(|c| c.adv_can_host).unwrap_or(self.cfg.can_host)
     }
 
+    /// `advertised`, plus the automatic probe (R12-5): while nothing was told to this contact yet, `--cannot-host` wins; otherwise, with
+    /// an EXTERNAL tor (Tails/Whonix) we ask that tor on a worker thread whether it lets us host (throwaway ADD_ONION) and continue
+    /// with `then` when it answers (the UI stays responsive: F12/purge work, Esc cancels). With our own tor hosting always works.
+    /// An inconclusive probe cancels the action: the bit becomes permanent for this contact, so never guess.
+    fn with_adv(&mut self, then: Then) {
+        let idx = self.sel;
+        if self.vf.as_ref().and_then(|v| v.store.contacts.get(idx)).is_some_and(|c| c.adv_can_host.is_some()) || !self.cfg.can_host {
+            let v = self.advertised(idx);
+            return self.resume(then, v);
+        }
+        if let Some(t) = self.cfg.host_probe_test.clone() { return self.probe_done(then, t); }
+        let Some(ctl) = self.cfg.tor.control.clone().filter(|_| self.cfg.transport.is_none()) else { return self.resume(then, true) };
+        let auth = AuthPref { password: None, cookie_path: self.cfg.tor.cookie.clone(), peer_verified: false };
+        let trust = self.cfg.tor.trust_control;
+        let (tx, rx) = channel();
+        thread::spawn(move || { let _ = tx.send(probe_hosting(&ctl, &auth, trust)); });
+        self.probe_rx = Some(rx);
+        self.probe_then = Some((then, Instant::now()));
+        self.ok("Checking whether your Tor can host onion services ... (Esc = cancel)");
+    }
+
+    fn poll_probe(&mut self) {
+        let Some(rx) = &self.probe_rx else { return };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) if self.probe_then.as_ref().is_some_and(|(_, t)| t.elapsed() < PROBE_DEADLINE) => return,
+            Err(TryRecvError::Empty) => HostProbe::Unknown("no answer in time".into()),
+            Err(TryRecvError::Disconnected) => HostProbe::Unknown("probe thread died".into()),
+        };
+        self.probe_rx = None;
+        if let Some((then, _)) = self.probe_then.take() { self.probe_done(then, r); }
+    }
+
+    fn probe_done(&mut self, then: Then, r: HostProbe) {
+        let id = match &then { Then::Export(i, _) | Then::Listen(i, _) | Then::Join(i, _, _) | Then::TorOffer(i) | Then::TorJoin(i, _, _) => *i };
+        if self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) != Some(id) { return self.err("The selected contact changed: nothing was done."); }
+        match r {
+            HostProbe::Can => self.resume(then, true),
+            HostProbe::Cannot(why) => {
+                // a permanent, privacy-relevant decision for this contact: a sticky alert, not a status line the next message replaces
+                self.record_alert(Some(id), &format!("your Tor cannot host onion services ({why}): this contact is told so and will host for you"));
+                self.resume(then, false)
+            }
+            HostProbe::Unknown(why) => self.err(format!("Cannot tell whether your Tor can host onion services ({why}). Start Tor / fix --tor-control, or pass --cannot-host if you know it cannot.")),
+        }
+    }
+
+    fn resume(&mut self, then: Then, can_host: bool) {
+        if !matches!(then, Then::Export(..)) && (self.pair_ctl.is_some() || self.pair_rx.is_some() || self.pending_pair.is_some()) {
+            return self.err("A pairing is already running or waiting for your answer (P): finish or cancel it first.");
+        }
+        match then {
+            Then::Export(_, path) => self.do_export(path, can_host),
+            Then::Listen(_, addr) => self.do_listen(addr, can_host),
+            Then::Join(_, sock, join) => self.do_join(sock, join, can_host),
+            Then::TorOffer(_) => self.do_tor_offer(can_host),
+            Then::TorJoin(_, id, join) => self.do_tor_join(id, join, can_host),
+        }
+    }
+
     /// Fix (and save) what we told this contact, but ONLY after the bundle really left (file written / pairing succeeded) and
     /// only if the vault could be saved: otherwise memory and vault would disagree and later roles would too (review 13: L2/L3).
     fn commit_advertised(&mut self, idx: usize, value: bool) -> bool {
@@ -897,6 +1094,27 @@ impl App {
         let can = self.our_cap(c);
         let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
         Some((p.can_host, c.host_anyway, !dials || (c.host_anyway && can)))
+    }
+
+    /// Everything the GUI's inspector panel shows about the selected contact. No keys, no addresses, no names of other contacts:
+    /// only states and yes/no answers (the panel is drawn on a screen somebody may be looking at).
+    pub fn inspect(&self) -> Option<Inspect> {
+        let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
+        let p = c.peer.as_ref()?;
+        let can = self.our_cap(c);
+        let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
+        Some(Inspect {
+            connected: self.linked.contains(&c.id),
+            contact_can_host: p.can_host,
+            we_told_can_host: c.adv_can_host,
+            we_host_now: !dials || (c.host_anyway && can),
+            host_anyway: c.host_anyway,
+            host_anyway_possible: can || c.host_anyway,
+            rotation: self.rotation_state(),
+            rotation_possible: c.next_transport.is_none() && matches!(self.online, Online::Online),
+            saved: c.saved.len(),
+            cap_mismatch: self.cap_mismatch(),
+        })
     }
 
     /// `K`: rotate OUR onion service and client-auth key for the selected contact (docs/KEY_ROTATION.md). Old copies of our
@@ -1095,19 +1313,8 @@ impl App {
                 if self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)).is_some_and(|c| c.next_transport.is_some()) {
                     return self.err("A key rotation for this contact is still waiting for its answer: export after it finished (the bundle would carry the address about to be retired).");
                 }
-                let can_host = self.advertised(sel);
-                let Some(c) = self.cur() else { return };
-                let id = &c.identity;
-                let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
-                let path = PathBuf::from(&text);
-                match fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(armored.as_bytes())) {
-                    Ok(()) if !self.commit_advertised(sel, can_host) => {
-                        let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
-                        self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
-                    }
-                    Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your PUBLIC bundle to {}. Send it over a channel you trust, then compare the safety number (v).", path.display())) }
-                    Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
-                }
+                let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)).map(|c| c.id) else { return };
+                self.with_adv(Then::Export(id, text));
             }
             Prompt::Import => {
                 // Never follows symlinks, never blocks on FIFOs/devices, size-capped.
@@ -1150,6 +1357,10 @@ impl App {
             }
             Prompt::Listen => self.start_listen(text),
             Prompt::JoinAddr => self.open_prompt(Prompt::JoinCode(text.trim().to_string()), ""),
+            Prompt::JoinLink => match nerd_chat_net::tor::parse_pairing_link(&text) {
+                Ok(id) => self.open_prompt(Prompt::JoinCode(format!("tor:{id}")), ""),
+                Err(_) => self.err("That is not a valid pairing link: paste the 56 characters exactly as you received them."),
+            },
             Prompt::JoinCode(addr) => { let _ = text; self.start_join(addr) }
             Prompt::InPerson => {
                 let Some((id, contact, sn)) = self.pending_pair.take() else { return };
@@ -1205,15 +1416,88 @@ impl App {
             let _ = tx.send((id, result));
         });
         self.pair_rx = Some(rx);
-        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle });
+        self.pair_ctl = Some(PairCtl { cancel, stream: slot, handle, tor: None });
         self.pair_info = Some(info);
+    }
+
+    /// `T`: create the pairing service over Tor and show a link + code (needs the app online).
+    fn start_tor_offer(&mut self) {
+        if self.engine.is_none() || !matches!(self.online, Online::Online) { return self.err("Go online first (o): pairing over Tor needs your Tor to be ready. (Being online makes you visible online to your contacts meanwhile.)"); }
+        if self.engine.as_ref().and_then(|e| e.pair_host_fn()).is_none() { return self.err("This Tor connection cannot host a pairing service. Ask the other person to create the code."); }
+        let wait = self.remote_lockout.remaining();
+        if wait > 0 { return self.err(format!("Too many failed attempts: wait {wait} s before creating a new link (nothing is published meanwhile).")); }
+        let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+        self.with_adv(Then::TorOffer(id));
+    }
+
+    fn do_tor_offer(&mut self, adv: bool) {
+        let Some(host_fn) = self.engine.as_ref().and_then(|e| e.pair_host_fn()) else { return self.err("Go online first (o).") };
+        self.pair_adv = Some(adv);
+        self.pair_remote = true;
+        let (ident, id) = self.identity_clone();
+        self.tor_contact = Some(id);
+        let (tx, rx) = channel();
+        let (ltx, lrx) = channel();
+        let tok = CancelToken::new();
+        let (tok2, lockout) = (tok.clone(), self.remote_lockout.clone());
+        let handle = thread::spawn(move || {
+            let result = tor_offer_job(host_fn, &tok2, &ident, adv, lockout, &ltx).map(|p| (p.contact, p.safety_number));
+            let _ = tx.send((id, result));
+        });
+        self.pair_rx = Some(rx);
+        self.link_rx = Some(lrx);
+        self.pair_ctl = Some(PairCtl { cancel: Arc::new(AtomicBool::new(false)), stream: Arc::new(Mutex::new(None)), handle, tor: Some(tok) });
+        self.pair_info = Some(Zeroizing::new("Getting your link ready (this can take up to a minute) ... (x = cancel)".into()));
+        self.ok("Creating the pairing service ...");
+    }
+
+    fn do_tor_join(&mut self, link: String, parsed: Result<PairingJoin, ExchangeError>, adv: bool) {
+        let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
+        let Some(dial) = self.engine.as_ref().and_then(|e| e.pair_dial_fn()) else { return self.err("Go online first (o).") };
+        self.pair_adv = Some(adv);
+        self.pair_remote = true;
+        let (ident, id) = self.identity_clone();
+        let (tx, rx) = channel();
+        let (ltx, lrx) = channel();
+        let tok = CancelToken::new();
+        let tok2 = tok.clone();
+        let handle = thread::spawn(move || {
+            let result = tor_join_job(dial, &tok2, &link, join, &ident, &ltx).map(|p| (p.contact, p.safety_number));
+            let _ = tx.send((id, result));
+        });
+        self.pair_rx = Some(rx);
+        self.link_rx = Some(lrx);
+        self.pair_ctl = Some(PairCtl { cancel: Arc::new(AtomicBool::new(false)), stream: Arc::new(Mutex::new(None)), handle, tor: Some(tok) });
+        self.pair_info = Some(Zeroizing::new("Connecting through Tor (this can take a minute) ... (x = cancel)".into()));
+        self.ok("Pairing over Tor ...");
+    }
+
+    fn do_export(&mut self, text: String, can_host: bool) {
+        let sel = self.sel;
+        let Some(c) = self.cur() else { return };
+        let id = &c.identity;
+        let armored = file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id));
+        let path = PathBuf::from(&text);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(armored.as_bytes())) {
+            Ok(()) if !self.commit_advertised(sel, can_host) => {
+                let _ = fs::remove_file(&path); // a file we created: do not leave a bundle whose capability bit we could not record
+                self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded).");
+            }
+            Ok(()) => { self.note_created(&path); self.ok(format!("Wrote your contact file to {}. It is NOT public (it shows when you are online): hand it over in person or use a channel you trust (not Discord, e-mail...), then compare the safety number by voice (v). See docs/EXCHANGING_CONTACTS.md.", path.display())) }
+            Err(e) => self.err(format!("Cannot write {}: {e} (never overwrites existing files)", path.display())),
+        }
     }
 
     fn start_listen(&mut self, addr: String) {
         let addr: SocketAddr = match addr.trim().parse() { Ok(a) => a, Err(_) => { self.err("Bad address, expected e.g. 127.0.0.1:0 or 192.168.1.5:4000"); return } };
         if !listen_addr_ok(&addr) { self.err("Refusing to listen on 0.0.0.0 / a public address: use your private LAN IP (e.g. 192.168.1.5:4000) or 127.0.0.1."); return; }
-        let adv = self.advertised(self.sel);
+        let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+        self.with_adv(Then::Listen(id, addr));
+    }
+
+    fn do_listen(&mut self, addr: SocketAddr, adv: bool) {
         self.pair_adv = Some(adv);
+        self.pair_remote = false;
         let (offer, code) = match PairingOffer::generate_in(self.lockout.clone()) { Ok((o, c)) => (o.with_can_host(adv), c), Err(e) => { self.err(format!("{e}")); return } };
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
@@ -1244,12 +1528,25 @@ impl App {
     }
 
     fn start_join(&mut self, addr: String) {
+        if let Some(id) = addr.strip_prefix("tor:") {
+            let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode).and_then(|c| PairingJoin::parse_in(c, self.remote_lockout.clone()));
+            self.code_buf.clear();
+            if self.engine.is_none() || !matches!(self.online, Online::Online) { return self.err("Go online first (o): pairing over Tor needs your Tor to be ready."); }
+            let Some(cid) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+            self.with_adv(Then::TorJoin(cid, id.to_string(), parsed));
+            return;
+        }
         let sock: SocketAddr = match addr.parse() { Ok(a) => a, Err(_) => { self.code_buf.clear(); self.err("Bad address, expected ip:port"); return } };
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
-        let adv = self.advertised(self.sel);
+        let Some(id) = self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map(|c| c.id) else { return };
+        self.with_adv(Then::Join(id, sock, parsed));
+    }
+
+    fn do_join(&mut self, sock: SocketAddr, parsed: Result<PairingJoin, ExchangeError>, adv: bool) {
         self.pair_adv = Some(adv);
+        self.pair_remote = false;
         let join = match parsed { Ok(j) => j.with_can_host(adv), Err(e) => { self.err(format!("{e}")); return } };
         self.spawn_pair(Zeroizing::new(format!("Connecting to {sock} ... (x = cancel)")), move |cancel, slot, ident| {
             match TcpStream::connect_timeout(&sock, Duration::from_secs(10)) {
@@ -1269,6 +1566,14 @@ impl App {
             Online::Starting(_) => self.err("Already starting; wait for it to finish."),
             Online::Stopping => self.err("Still shutting down; wait a moment."),
             Online::Online => {
+                // going offline throws away the engine's copies of texts the contact has not confirmed: say so first (second `o` goes)
+                let open: usize = self.chats.values().map(|l| l.iter().filter(|x| x.mine && x.queued).count()).sum();
+                if open > 0 && !self.offline_armed {
+                    self.offline_armed = true;
+                    return self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
+                }
+                self.offline_armed = false;
+                if self.pair_ctl.as_ref().is_some_and(|c| c.tor.is_some()) { self.cancel_pairing(); } // the pairing service lives in the engine's Tor: it goes with it
                 // tear down on a worker so the UI (and the panic key) stay responsive while onion services are removed
                 let (tx, rx) = channel();
                 if let Some(e) = self.engine.take() { thread::spawn(move || { e.shutdown(); let _ = tx.send(()); }); } else { let _ = tx.send(()); }
@@ -1350,14 +1655,18 @@ impl App {
         let Some(id) = self.chat_id() else { return };
         if self.compose.is_empty() { return; }
         if self.engine.is_none() { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
+        // refuse BEFORE taking the draft, so nothing is lost: the engine keeps at most MAX_UNCONFIRMED unconfirmed texts per contact
+        let open = self.chats.get(&id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count());
+        if open >= nerd_chat_chat::engine::MAX_UNCONFIRMED { return self.err("Outbox full: the contact has not confirmed your earlier messages yet. Your draft is kept; try again when they come online."); }
         let text = self.compose.take_string();
-        let queued = !self.linked.contains(&id);
+        let linked = self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
-        if let Some(e) = &self.engine { e.send(id, text); }
-        self.push_line(id, ChatLine { mine: true, text: shown, queued, saved: false, unsent: false });
+        let mid = self.engine.as_ref().map(|e| e.send(id, text));
+        // "(queued)" = not yet CONFIRMED by the contact's app (connected or not): the engine resends it on every new connection
+        self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false, unconfirmed: false, mid });
         self.scroll = 0; // sending jumps to the newest line
-        if queued { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
+        if !linked { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
     }
 
     fn push_line(&mut self, id: [u8; 8], l: ChatLine) {
@@ -1389,6 +1698,8 @@ impl App {
         let mut t: String = text.chars().take(300).collect();
         let who = id.and_then(|i| self.contact(i)).map(|c| c.name.clone());
         if let Some(w) = who { t = format!("{w}: {t}"); }
+        if let Some(e) = self.alert_log.iter_mut().rev().find(|(a, _)| *a == t) { e.1 = e.1.saturating_add(1); }
+        else { if self.alert_log.len() >= 30 { self.alert_log.remove(0); } self.alert_log.push((t.clone(), 1)); }
         if let Some(e) = self.alerts.iter_mut().find(|(a, _)| *a == t) { e.1 = e.1.saturating_add(1); }
         else if self.alerts.len() < 5 { self.alerts.push((t.clone(), 1)); }
         else { self.alerts_dropped = self.alerts_dropped.saturating_add(1); }
@@ -1404,7 +1715,7 @@ impl App {
                 Err(TryRecvError::Empty) => self.stop_rx = Some(rx),
                 _ => {
                     self.online = Online::Offline;
-                    for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unsent = true; } // the engine's queue is gone with it
+                    for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unconfirmed = true; } // the engine's copy is gone: they may or may not have arrived
                     self.ok("Offline. Connections closed, onion services and credentials removed.");
                 }
             }
@@ -1425,21 +1736,22 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Flushed { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Delivered { id, .. } | Event::Unsent { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
                 Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); }
                 Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
-                Event::Message { id, text } => {
-                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false, unsent: false });
+                Event::Message { id, mid, text } => {
+                    self.push_line(id, ChatLine { mine: false, text, queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
+                    // only NOW does the sender hear "received": this line is in our own state
+                    if let (Some(m), Some(e)) = (mid, &self.engine) { e.confirm(id, m); }
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
-                // the queue was handed to the live connection: those lines are no longer "(queued)" (older ones were dropped with a notice)
-                Event::Flushed { id, count } => if let Some(l) = self.chats.get_mut(&id) {
-                    let mut left = count;
-                    for x in l.iter_mut().rev().filter(|x| x.queued) { x.queued = false; if left > 0 { left -= 1; } else { x.unsent = true; } } // older ones were dropped by the engine's queue cap
-                },
+                // the contact's app confirmed exactly this text (found by its id: order, trimming and refusals cannot mislead us)
+                Event::Delivered { id, mid } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; },
+                // the engine refused exactly this text: it was NOT sent
+                Event::Unsent { id, mid } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; x.unsent = true; },
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
                     let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
@@ -1467,14 +1779,41 @@ impl App {
     }
 
     /// The worker is done (or gone): forget its handles and the code/address line.
-    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; }
+    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.tor_contact = None; }
 
     fn cancel_pairing(&mut self) {
         match self.pair_ctl.take() {
-            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.ok("Pairing cancelled."); }
+            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.tor_contact = None; self.ok("Pairing cancelled."); }
             None => self.ok("No pairing in progress."),
         }
     }
+
+    /// Messages of a pairing-over-Tor worker: the link is ready, it failed, or somebody used the link and failed.
+    fn poll_link(&mut self) {
+        let Some(rx) = &self.link_rx else { return };
+        let mut msgs = vec![];
+        while let Ok(m) = rx.try_recv() { msgs.push(m); }
+        for m in msgs {
+            match m {
+                LinkMsg::Ready { link, code, expires } => {
+                    self.pair_info = Some(Zeroizing::new(format!("Link (for your partner only): {}\nCODE (tell it by voice): {}    x = cancel", &*link, &*code)));
+                    let contact = self.tor_contact.unwrap_or([0; 8]);
+                    self.tor_offer = Some(TorLink { contact, link, code, expires });
+                    self.ok("Ready. Send the link to your partner and tell them the code by voice or in person. It works for 10 minutes and only once.");
+                }
+                LinkMsg::Failed(why) => { if let Some(c) = self.pair_ctl.take() { c.cancel(); } self.end_pairing(); self.err(why); }
+                LinkMsg::UsedAndFailed => { self.record_alert(None, "Someone used your pairing link and did not know the code. If your partner did not just type a wrong code, the link was seen by someone else: make a new one and send it another way."); }
+            }
+        }
+    }
+
+    /// Was the pairing that just finished (or is waiting for the answer) made through Tor? Then the question is whether the code was HEARD by voice.
+    pub fn pair_remote(&self) -> bool { self.pair_remote }
+
+    /// The id of the selected contact (a front end compares it with `TorLink::contact`).
+    pub fn selected_contact_id(&self) -> Option<[u8; 8]> { self.vf.as_ref()?.store.contacts.get(self.sel).map(|c| c.id) }
+    /// Name of the contact an open Tor offer belongs to.
+    pub fn tor_offer_name(&self) -> Option<&str> { let id = self.tor_offer.as_ref()?.contact; self.contact(id).map(|c| c.name.as_str()) }
 
     /// Call every UI tick: collects a finished pairing.
     fn poll_prep(&mut self) {
@@ -1501,7 +1840,9 @@ impl App {
         if let Some(m) = self.max_scroll.get() { self.scroll = self.scroll.min(m); } // 'g' before the first frame must not leave a huge offset
         self.poll_prep();
         self.poll_kdf();
+        self.poll_probe();
         self.poll_online();
+        self.poll_link();
         let Some(rx) = &self.pair_rx else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {}
@@ -1530,6 +1871,7 @@ impl App {
         let told = self.pair_adv.take();
         let Some(c) = self.vf().store.contacts.iter_mut().find(|c| c.id == id) else { self.err("Contact vanished during pairing."); return };
         if c.peer.is_some() { self.err("Contact already has a peer key; discarded the paired one."); return; }
+        if told.is_some() && c.adv_can_host.is_some() && c.adv_can_host != told { self.err("Pairing discarded: the capability stored for this contact differs from the one just told to the peer (roles would disagree). Pair again."); return; }
         c.peer = Some(peer);
         c.trust = trust;
         let set_adv = c.adv_can_host.is_none() && told.is_some();
@@ -1629,6 +1971,76 @@ mod tests {
         a.online = Online::Stopping;
         a.handle(Key::Char('h'));
         assert!(a.error && a.status.contains("settles"));
+    }
+
+    #[test]
+    fn export_probes_hosting_automatically_and_never_guesses() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        let export = |a: &mut App, name: &str| { a.handle(Key::Char('e')); a.input = d.path().join(name).to_str().unwrap().into(); a.handle(Key::Enter); };
+        a.cfg.host_probe_test = Some(HostProbe::Unknown("no tor".into()));
+        export(&mut a, "1.sbc");
+        assert!(a.error && a.status.contains("Cannot tell"), "{}", a.status);
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, None);
+        assert!(!d.path().join("1.sbc").exists(), "no bundle without a capability answer");
+        a.cfg.host_probe_test = Some(HostProbe::Cannot("510".into()));
+        export(&mut a, "2.sbc");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
+        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("2.sbc")).unwrap()).unwrap().can_host);
+        // fixed once told: a later, different probe answer changes nothing
+        a.cfg.host_probe_test = Some(HostProbe::Can);
+        export(&mut a, "3.sbc");
+        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("3.sbc")).unwrap()).unwrap().can_host);
+        // another contact, tor can host
+        add(&mut a, "carol"); a.sel = 1;
+        export(&mut a, "4.sbc");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[1].adv_can_host, Some(true));
+        // --cannot-host wins without asking the probe
+        add(&mut a, "dave"); a.sel = 2; a.cfg.can_host = false; a.cfg.host_probe_test = Some(HostProbe::Unknown("x".into()));
+        export(&mut a, "5.sbc");
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[2].adv_can_host, Some(false));
+    }
+
+    #[test]
+    fn the_real_probe_runs_off_the_ui_thread_keys_are_ignored_and_esc_cancels() {
+        use std::os::unix::net::UnixListener;
+        let d = tempfile::tempdir().unwrap();
+        let sock = d.path().join("ctl");
+        let l = UnixListener::bind(&sock).unwrap();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || for mut s in l.incoming().flatten() {
+            go_rx.recv().ok(); // the "tor" stalls until the test lets it answer
+            let mut rd = std::io::BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            while { line.clear(); std::io::BufRead::read_line(&mut rd, &mut line).unwrap_or(0) > 0 } {
+                let r = if line.starts_with("PROTOCOLINFO") { "250-PROTOCOLINFO 1\r\n250-AUTH METHODS=NULL\r\n250 OK\r\n" } else if line.starts_with("AUTHENTICATE") { "250 OK\r\n" } else { "510 Command filtered\r\n" };
+                if s.write_all(r.as_bytes()).is_err() { break; }
+            }
+        });
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        a.cfg.tor.control = Some(Addr::Unix(sock));
+        let f = d.path().join("b.sbc");
+        a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
+        assert!(a.probe_rx.is_some(), "{}", a.status);
+        assert!(a.handle(Key::Char('d')) == Action::None && a.probe_rx.is_some(), "other keys are ignored while probing");
+        a.handle(Key::Esc);
+        assert!(a.probe_rx.is_none() && !f.exists() && a.vf.as_ref().unwrap().store.contacts[0].adv_can_host.is_none(), "Esc cancels without exporting");
+        // again, this time let tor answer: 510 -> told "cannot host", with a sticky alert
+        a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
+        go_tx.send(()).ok(); go_tx.send(()).ok();
+        for _ in 0..200 { a.poll(); if a.probe_rx.is_none() { break; } thread::sleep(Duration::from_millis(25)); }
+        assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false), "{}", a.status);
+        assert!(f.exists() && a.alerts.iter().any(|(t, _)| t.contains("cannot host")), "{:?}", a.alerts);
+    }
+
+    #[test]
+    fn export_is_refused_while_a_pairing_waits_so_the_told_bit_cannot_diverge() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add(&mut a, "bob");
+        a.pending_pair = Some(([0; 8], ImportedContact::from_file(Bundle::from_identity(&ContactIdentity::generate())), "1".into()));
+        a.handle(Key::Char('e'));
+        assert!(a.error && a.status.contains("pairing"), "{}", a.status);
+        assert!(!matches!(a.screen, Screen::Prompt(_)));
     }
 
     #[test]
@@ -1902,7 +2314,8 @@ mod tests {
     // ---------- online + chat (over the in-memory network) ----------
     fn fast_timing() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(150), idle: Duration::from_secs(2),
-                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0 }
+                 min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0,
+                 ack_delay_min: Duration::from_millis(20), ack_delay_max: Duration::from_millis(40), caps_wait: Duration::from_millis(400) }
     }
 
     fn net_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet) -> App {
@@ -2061,7 +2474,8 @@ mod tests {
         a.handle(Key::Char('i'));
         assert_eq!((a.pane, a.mode), (Pane::Chat, Mode::Insert));
         type_str(&mut a, "hello bob, this is private"); a.handle(Key::Enter);
-        assert!(a.compose_text().is_empty() && a.chat_lines().len() == 1 && a.chat_lines()[0].mine && !a.chat_lines()[0].queued);
+        assert!(a.compose_text().is_empty() && a.chat_lines().len() == 1 && a.chat_lines()[0].mine);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "bob's app confirms it: the mark goes");
         // bob sees an unread marker, opens the chat, sees the line
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].contact_rows()[0].4 == 1), "no unread marker");
         b.handle(Key::Char('i'));
@@ -2373,8 +2787,8 @@ mod tests {
         let _ = id;
         a.pane = Pane::Chat;
         let msg: String = "漢".repeat(60);
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false, unsent: false });
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new(msg.clone()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(msg), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 30)).unwrap();
         term.draw(|f| crate::ui::draw(f, &a)).unwrap();
         let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
@@ -2505,7 +2919,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false, unsent: false }); }
+        for i in 0..60 { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("line-{i:02}")), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None }); }
         a.handle(Key::Enter);
         let s0 = screen_text(&a, 110, 24);
         assert!(s0.contains("line-59") && !s0.contains("line-00"), "starts at the newest line");
@@ -2564,11 +2978,42 @@ mod tests {
     }
 
     #[test]
+    fn the_alert_history_outlives_the_acknowledgement_and_dies_with_a_panic() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.record_alert(Some(id), "bad thing"); a.record_alert(Some(id), "bad thing");
+        a.handle(Key::Char('z'));
+        assert!(a.alerts.is_empty());
+        assert_eq!(a.alert_history(), &[("bob: bad thing".to_string(), 2)]);
+        for i in 0..40 { a.record_alert(None, &format!("n{i}")); }
+        assert_eq!(a.alert_history().len(), 30, "bounded");
+        a.panic_wipe();
+        assert!(a.alert_history().is_empty(), "wiped with everything else");
+    }
+
+    #[test]
+    fn the_inspector_reports_states_only_and_matches_the_roles() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        assert!(a.inspect().is_none(), "no contact");
+        add_peer(&mut a, "bob");
+        let i = a.inspect().expect("a paired contact");
+        assert!(!i.connected && !i.host_anyway && i.rotation.is_none() && i.saved == 0);
+        assert!(!i.rotation_possible, "offline: a rotation cannot start");
+        assert_eq!(Some((i.contact_can_host, i.host_anyway, i.we_host_now)), a.contact_roles());
+        let dump = format!("{i:?}");
+        assert!(!dump.contains("bob"), "no names in the inspector data: {dump}");
+        a.handle(Key::Char('h'));
+        assert_eq!(a.inspect().unwrap().host_anyway, a.vf.as_ref().unwrap().store.contacts[0].host_anyway);
+    }
+
+    #[test]
     fn the_privacy_screen_draws_nothing_about_contacts_or_messages() {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bobsecret");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("topsecretmessage".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.unread.insert(id, 4);
         a.record_alert(Some(id), "something bad happened with bobsecret");
         a.ok("Paired: Safety number 11111 22222 with bobsecret");
@@ -2642,7 +3087,7 @@ mod tests {
         assert!(a.error && a.status.contains("press P") && !a.pair_ctl.is_some(), "{}", a.status);
     }
 
-    /// A message typed while the contact was away is shown as "(queued)"; once the engine hands it to the new connection the label goes.
+    /// A message typed while the contact was away is shown as "(queued)"; once the contact's app has CONFIRMED it (not merely once it was written) the label goes.
     #[test]
     fn a_queued_line_stops_saying_queued_once_it_was_delivered_to_the_connection() {
         let d = tempfile::tempdir().unwrap();
@@ -2664,7 +3109,7 @@ mod tests {
     fn chat_with_lines(d: &std::path::Path, n: usize) -> App {
         let mut a = create_app(d, "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false, unsent: false }); }
+        for i in 0..n { a.push_line(id, ChatLine { mine: i % 2 == 0, text: Zeroizing::new(format!("message-{i}")), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None }); }
         a.handle(Key::Enter);
         a
     }
@@ -2674,7 +3119,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut a = chat_with_lines(d.path(), 5);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("incoming".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         for k in [Key::Char('j'), Key::Char('k'), Key::Tab, Key::PageUp, Key::Char('G')] { a.handle(k); }
         assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "receiving, reading, scrolling and sending never save anything");
         // the message cursor: m, move to the 2nd newest, y
@@ -2723,7 +3168,7 @@ mod tests {
         add_peer(&mut a, "bob");
         a.handle(Key::Enter); a.handle(Key::Char('m')); assert!(a.error && a.select.is_none(), "{}", a.status);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.handle(Key::Char('m')); a.handle(Key::Char('y'));
         assert!(a.error && a.status.contains("RAM-only") && a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty(), "{}", a.status);
     }
@@ -2853,6 +3298,7 @@ mod tests {
         a.handle(Key::Char('i')); type_str(&mut a, "from a"); a.handle(Key::Enter);            // sending
         b.handle(Key::Char('i')); type_str(&mut b, "from b"); b.handle(Key::Enter);            // receiving + replying
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 2 && x[1].chat_lines().len() == 2));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].at_risk().is_empty()), "bob's app confirmed alice's line");
         a.handle(Key::Esc); a.handle(Key::Char('o'));                                           // going offline
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline));
         assert_eq!(vault_bytes(d.path()), before, "sending, receiving and going offline must not rewrite the vault");
@@ -2868,7 +3314,7 @@ mod tests {
         let mut a = chat_with_lines(d.path(), 5);
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         a.handle(Key::Char('m')); a.handle(Key::Char('k')); a.handle(Key::Char('k'));           // on message-2
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("brand new".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("brand new".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.handle(Key::Char('y'));
         let c = &a.vf.as_ref().unwrap().store.contacts[0];
         assert_eq!(c.saved.len(), 1);
@@ -2882,7 +3328,7 @@ mod tests {
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         a.handle(Key::Char('m')); a.handle(Key::Char('g'));                                       // the OLDEST line
         assert_eq!(a.select, Some(MAX_CHAT_LINES - 1));
-        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         assert_eq!(a.select, None, "the chosen message was dropped by the cap: no cursor, nothing saved by accident");
     }
 
@@ -2896,7 +3342,7 @@ mod tests {
         let mut a = open_app(c);
         add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("keep".into()), queued: false, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("keep".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         a.handle(Key::Enter);
         std::fs::set_permissions(&cdir, std::fs::Permissions::from_mode(0o500)).unwrap();      // the counter can no longer be written; the vault can
         a.handle(Key::Char('m')); a.handle(Key::Char('y'));
@@ -2922,22 +3368,78 @@ mod tests {
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].saved.len(), 3, "saving it again works after the delete");
     }
 
+    /// Confirmation, not hand-over: a line says "(queued)" until the contact's app has confirmed it, connected or not.
     #[test]
-    fn flush_marks_only_the_newest_queued_lines_delivered_and_going_offline_marks_the_rest_not_sent() {
+    fn a_line_stays_queued_until_the_contact_confirms_it() {
         let d = tempfile::tempdir().unwrap();
-        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
-        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        for t in ["old-dropped", "kept-1", "kept-2"] { a.push_line(id, ChatLine { mine: true, text: Zeroizing::new(t.into()), queued: true, saved: false, unsent: false }); }
-        // the engine says only 2 were handed over (its queue overflowed and dropped the oldest)
-        a.engine = None;
-        let ev = Event::Flushed { id, count: 2 };
-        // feed it through the same path poll() uses
-        if let Some(l) = a.chats.get_mut(&id) { let mut left = 2; for x in l.iter_mut().rev().filter(|x| x.queued) { x.queued = false; if left > 0 { left -= 1; } else { x.unsent = true; } } }
-        let _ = ev;
-        let l = &a.chats[&id];
-        assert_eq!([(l[0].queued, l[0].unsent), (l[1].queued, l[1].unsent), (l[2].queued, l[2].unsent)], [(false, true), (false, false), (false, false)]);
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].linked.is_empty() && !x[1].linked.is_empty()), "connected");
+        a.handle(Key::Char('i')); type_str(&mut a, "confirm me"); a.handle(Key::Enter);
+        assert!(a.chat_lines()[0].queued, "just sent: not confirmed yet");
+        assert!(!a.at_risk().is_empty(), "quitting this very moment could lose it");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "the confirmation clears the mark");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "confirm me"))));
+        assert!(a.at_risk().is_empty());
+    }
+
+    /// Going offline throws away the engine's copies of unconfirmed texts: the first `o` warns, the second goes, and the lines say
+    /// "(NOT CONFIRMED)" (they may have arrived), never "(NOT SENT)".
+    #[test]
+    fn going_offline_with_unconfirmed_lines_warns_first_and_then_says_not_confirmed() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Char('i')); type_str(&mut a, "maybe arrived"); a.handle(Key::Enter);
+        a.handle(Key::Esc);
+        a.handle(Key::Char('o'));
+        assert!(a.error && a.status.contains("not confirmed") && a.status.contains("o again"), "{}", a.status);
+        assert_eq!(a.online, Online::Online, "the first o only warns");
+        a.handle(Key::Char('j'));                                    // any other key disarms
+        a.handle(Key::Char('o'));
+        assert_eq!(a.online, Online::Online, "disarmed: warns again instead of going offline");
+        a.handle(Key::Char('o'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline), "the second o goes offline");
+        let l = &a.chat_lines()[0];
+        assert!(!l.queued && l.unconfirmed && !l.unsent);
+        let screen = screen_text(&a, 110, 24);
+        assert!(screen.contains("(NOT CONFIRMED)") && !screen.contains("(NOT SENT)"), "{screen}");
+    }
+
+    /// Several lines are confirmed by THEIR ids, each exactly once.
+    #[test]
+    fn each_line_is_confirmed_by_its_own_id() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        a.handle(Key::Char('i'));
+        for t in ["one", "two", "three"] { type_str(&mut a, t); a.handle(Key::Enter); }
+        let mids: Vec<_> = a.chat_lines().iter().map(|l| l.mid).collect();
+        assert!(mids.iter().all(Option::is_some) && mids[0] != mids[1] && mids[1] != mids[2], "every sent line has its own id");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().iter().all(|l| !l.queued)), "all three confirmed");
+        assert!(a.chat_lines().iter().all(|l| !l.unsent && !l.unconfirmed));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().flatten().count() == 3));
+        let got: Vec<String> = b.chats.values().flatten().map(|l| l.text.to_string()).collect();
+        assert_eq!(got, ["one", "two", "three"], "in order, each once");
+    }
+
+    /// A full outbox refuses BEFORE the draft is taken: nothing typed is lost.
+    #[test]
+    fn a_full_outbox_keeps_the_draft_and_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Char('i'));
+        for i in 0..nerd_chat_chat::engine::MAX_UNCONFIRMED { type_str(&mut a, &format!("m{i}")); a.handle(Key::Enter); }
+        type_str(&mut a, "the draft");
         a.handle(Key::Enter);
-        assert!(screen_text(&a, 110, 24).contains("(NOT SENT)"), "a message that will never be sent says so");
+        assert!(a.error && a.status.contains("Outbox full"), "{}", a.status);
+        assert_eq!(a.chat_lines().len(), nerd_chat_chat::engine::MAX_UNCONFIRMED, "no line was added");
+        assert!(!a.compose.is_empty(), "the draft is still there");
     }
 
     #[test]
@@ -2999,21 +3501,21 @@ mod tests {
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "nothing pending: quits at once");
-        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false, unsent: false });
+        a.push_line(id, ChatLine { mine: true, text: Zeroizing::new("unsent".into()), queued: true, saved: false, unsent: false, unconfirmed: false, mid: None });
         assert_eq!(a.handle(Key::Char('q')), Action::None);
-        assert!(a.error && a.status.contains("q again") && a.status.contains("1 undelivered"), "{}", a.status);
+        assert!(a.error && a.status.contains("q again") && a.status.contains("1 unconfirmed"), "{}", a.status);
         a.handle(Key::Char('j'));                                    // any other key disarms
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         assert_eq!(a.handle(Key::Char('q')), Action::Quit, "second q quits");
-        // a queued line of a CONNECTED contact was delivered by the engine: nothing is at risk
+        // an unconfirmed line is at risk even while the contact is connected (the ack may not have arrived yet)
         a.quit_armed = false; a.linked.insert(id);
-        assert_eq!(a.handle(Key::Char('q')), Action::Quit, "queued lines of a connected contact are not at risk");
-        a.linked.remove(&id);
+        assert_eq!(a.handle(Key::Char('q')), Action::None, "an unconfirmed line of a connected contact is still at risk");
+        a.linked.remove(&id); a.quit_armed = false;
         // the same guard on the privacy screen (review 20, L1), with a generic hint and no counts or names
         a.quit_armed = false; a.handle(Key::Esc); assert!(a.locked);
         assert_eq!(a.handle(Key::Char('q')), Action::None);
         let lock = screen_text(&a, 90, 20);
-        assert!(lock.contains("press q again") && !lock.contains("undelivered") && !lock.contains("bob"), "{lock}");
+        assert!(lock.contains("press q again") && !lock.contains("unconfirmed") && !lock.contains("bob"), "{lock}");
         a.handle(Key::Enter); assert!(!a.quit_armed, "unlocking disarms");
         a.locked = false; a.chats.clear();
         // other things that would be lost: a file in RAM, a pairing waiting for its answer, a half-written draft
@@ -3055,5 +3557,140 @@ mod tests {
         a.vf().store.contacts[0].next_transport = Some(Zeroizing::new([1u8; 64]));
         a.handle(Key::Esc); a.handle(Key::Esc);
         assert!(screen_text(&a, 200, 30).contains("key rotation pending"));
+    }
+
+    // ---------------------------------------------------------------- pairing over Tor (spec 2026-11-09-tor-pairing-spec.md), on the in-memory network
+    fn tor_pair_apps(dir: &std::path::Path) -> (nerd_chat_chat::MemNet, App, App) {
+        let net = nerd_chat_chat::MemNet::new();
+        let mut a = net_app(dir, "a.vault", &net); add(&mut a, "bob");
+        let mut b = net_app(dir, "b.vault", &net); add(&mut b, "alice");
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online && x[1].online == Online::Online), "{} / {}", a.status, b.status);
+        (net, a, b)
+    }
+
+    /// `a` creates the offer; returns (link, code) once it is published.
+    fn tor_offer(a: &mut App, b: &mut App) -> (String, String) {
+        a.handle(Key::Char('T'));
+        assert!(pump_until(&mut [&mut *a, &mut *b], |x| x[0].tor_offer.is_some() || x[0].error), "{}", a.status);
+        let o = a.tor_offer.as_ref().expect("the offer must be ready");
+        (o.link.to_string(), o.code.to_string())
+    }
+
+    fn tor_join(b: &mut App, link: &str, code: &str) {
+        b.handle(Key::Char('J')); type_str(b, link); b.handle(Key::Enter);
+        if matches!(b.screen, Screen::Prompt(Prompt::JoinCode(_))) { type_str(b, code); b.handle(Key::Enter); }
+    }
+
+    #[test]
+    fn pairing_over_tor_between_two_apps_through_the_screens() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        net.set_pair_publish_delay(Duration::from_millis(200));
+        let (link, code) = tor_offer(&mut a, &mut b);
+        assert!(net.pair_open(&link) && link.len() == 56 && !link.contains(':'), "the link is the bare onion id");
+        tor_join(&mut b, &format!("  {}\n", link.to_uppercase()), &code); // paste noise and capitals are tolerated
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pending_pair.is_some() && x[1].pending_pair.is_some()), "{} / {}", a.status, b.status);
+        assert!(a.tor_offer.is_none() && a.pair_ctl.is_none(), "the offer ends with the pairing");
+        assert!(pump_until(&mut [&mut a, &mut b], |_| !net.pair_open(&link)), "the service is removed after use");
+        assert!(a.pair_remote() && b.pair_remote(), "the in-person question becomes the voice question");
+        a.handle(Key::Char('P')); b.handle(Key::Char('P'));
+        type_str(&mut a, "y"); a.handle(Key::Enter);
+        type_str(&mut b, "y"); b.handle(Key::Enter);
+        assert_eq!(a.selected_detail().unwrap().1, Trust::CodeAuthenticated);
+        assert_eq!(a.selected_detail().unwrap().2, b.selected_detail().unwrap().2, "same safety number on both sides");
+    }
+
+    #[test]
+    fn over_tor_needs_the_app_online_and_a_valid_link() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "a.vault"); add(&mut a, "bob");
+        a.handle(Key::Char('T'));
+        assert!(a.error && a.status.contains("online"), "{}", a.status);
+        a.handle(Key::Char('J')); type_str(&mut a, "not a link"); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("not a valid pairing link"), "{}", a.status);
+        assert!(a.pair_ctl.is_none() && a.screen == Screen::Main);
+    }
+
+    #[test]
+    fn connect_then_close_burns_the_offer_without_a_guess_and_a_wrong_code_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        // an attacker who only has the link connects and hangs up
+        let (link, _code) = tor_offer(&mut a, &mut b);
+        let dial = net.transport().pair_dial_fn().unwrap();
+        drop(dial(&link, &[9; 16], &nerd_chat_net::tor::CancelToken::new()).unwrap());
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pair_ctl.is_none()), "{}", a.status);
+        assert!(a.error && a.remote_lockout.remaining() == 0 && !a.alerts.iter().any(|(t, _)| t.contains("Someone used your pairing link")), "no guess, no accusation: {} {:?}", a.status, a.alerts);
+        // a joiner who types a wrong code
+        let (link, _code) = tor_offer(&mut a, &mut b);
+        tor_join(&mut b, &link, "00000-00000");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pair_ctl.is_none() && x[1].pair_ctl.is_none()), "{} / {}", a.status, b.status);
+        assert!(a.alerts.iter().any(|(t, _)| t.contains("Someone used your pairing link")), "{:?}", a.alerts);
+        assert!(a.pending_pair.is_none() && b.pending_pair.is_none());
+    }
+
+    #[test]
+    fn cancel_going_offline_and_panic_remove_the_pairing_service() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        let (link, _) = tor_offer(&mut a, &mut b);
+        a.handle(Key::Char('x')); // cancel
+        assert!(pump_until(&mut [&mut a, &mut b], |_| !net.pair_open(&link)), "cancel must remove the service");
+        assert!(a.tor_offer.is_none() && a.pair_ctl.is_none());
+        // going offline with an offer open
+        let (link, _) = tor_offer(&mut a, &mut b);
+        a.handle(Key::Char('o'));
+        assert!(pump_until(&mut [&mut a, &mut b], |_| !net.pair_open(&link)), "going offline must remove the service");
+        assert!(a.pair_ctl.is_none() && a.tor_offer.is_none());
+        // panic wipe with an offer open
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        let (link, _) = tor_offer(&mut a, &mut b);
+        a.panic_wipe();
+        assert!(pump_until(&mut [&mut b], |_| !net.pair_open(&link)), "panic must remove the service");
+        assert!(a.tor_offer.is_none() && a.pair_ctl.is_none());
+    }
+
+    #[test]
+    fn a_joiner_gives_up_on_a_link_that_never_gets_published_and_can_cancel() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = tor_pair_apps(d.path());
+        net.set_pair_publish_delay(Duration::from_secs(3600)); // never reachable
+        a.handle(Key::Char('T'));
+        // the link is only shown after publication: nothing to show yet
+        for _ in 0..10 { a.poll(); b.poll(); thread::sleep(Duration::from_millis(20)); }
+        assert!(a.tor_offer.is_none(), "no link before the service is published");
+        a.handle(Key::Char('x'));
+        assert!(a.pair_ctl.is_none());
+    }
+
+    #[test]
+    fn the_open_offer_belongs_to_its_contact_and_a_second_pairing_cannot_overwrite_it() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = tor_pair_apps(d.path());
+        add(&mut a, "carol");
+        a.sel = 0;
+        let (_link, _code) = tor_offer(&mut a, &mut b);
+        let (_, bob_id) = a.identity_clone();
+        assert_eq!(a.tor_offer.as_ref().unwrap().contact, bob_id, "the offer is tied to the contact it was created for");
+        assert_eq!(a.tor_offer_name(), Some("bob"));
+        a.sel = 1; // another (unpaired) contact is selected: a front end must not show the offer card for it
+        assert_ne!(a.selected_contact_id(), Some(bob_id));
+        // a delayed resume of another pairing (e.g. after a hosting probe) must not replace the running one
+        a.resume(Then::TorOffer(bob_id), true);
+        assert!(a.error && a.status.contains("already running"), "{}", a.status);
+        assert!(a.tor_offer.is_some() && a.pair_ctl.is_some(), "the running offer is untouched");
+        a.handle(Key::Char('x'));
+    }
+
+    #[test]
+    fn the_joiner_hears_why_a_link_failed() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, _a, mut b) = tor_pair_apps(d.path());
+        let ghost = nerd_chat_core::onion::service_id(&[7u8; 32]); // a well-formed link nobody serves
+        tor_join(&mut b, &ghost, "1234567890");
+        assert!(pump_until(&mut [&mut b], |x| x[0].pair_ctl.is_none()), "{}", b.status);
+        assert!(b.error && b.status.contains("Could not reach your partner"), "{}", b.status);
     }
 }

@@ -19,6 +19,7 @@ key pair and its own onion service, and everything runs from a **single static L
 - **Panic:** F12 or Ctrl+\ (panic-lock) wipes memory and screen and exits immediately; Ctrl+] (purge) additionally overwrites and deletes the vault, counter, keyfile and exported files. No logs, no automatic history, no clipboard.
 - **Keeping messages is manual:** nothing is ever saved by itself; you can save a chosen message into the encrypted vault (message cursor `m`, `y`) and delete it again.
 - **Key rotation:** you can replace the onion address and auth key of a contact so that old copies of your bundle stop revealing when you are online.
+- **GUI (in progress):** `cargo build -p nerd-chat-gui` (dynamically linked, needs X11/Wayland and OpenGL; no screen-reader support on purpose, see `docs/superpowers/specs/2026-11-09-gui-spike-report.md`). Build it with `-p`, never from a workspace-wide release build.
 - **UI:** terminal UI with a permanent contact list, a vim-style Normal/Insert input and a privacy screen (3rd Esc). A GUI is planned (`docs/ROADMAP.md`).
 
 ## Build
@@ -28,6 +29,8 @@ cargo test --workspace                                              # expect all
 cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui   # static binary (pinned toolchain, see rust-toolchain.toml)
 ```
 Details, checksums, the reproducible-build check (also on WSL) and live-USB notes: `docs/BUILD_AND_RUN.md`; first steps and the key map: `docs/GETTING_STARTED.md`.
+Without `--vault` the vault lives in `~/.local/share/nerd-chat/` on this computer's disk (home backups and sync tools copy it); use `--vault PATH` for a USB stick or Tails Persistent Storage.
+
 Needs `tor` installed for chat (or an existing Tor via `--tor-control`). x86_64 Linux only; the file-cleaning sandbox needs seccomp.
 
 ## Honest limits
@@ -36,7 +39,7 @@ The privacy screen only hides the screen (the vault stays open). `docs/SECURITY_
 
 ## Documents
 `docs/GETTING_STARTED.md`, `docs/BUILD_AND_RUN.md`, `docs/TRANSPORT.md`, `docs/FILE_SHARING.md`, `docs/KEY_ROTATION.md`, `docs/SECURITY_TRACKER.md`,
-`docs/ROADMAP.md`, `docs/NAMES.md` (project name and how to change it), `SECURITY.md` (reporting vulnerabilities).
+`docs/EXCHANGING_CONTACTS.md` (how to hand over a contact file safely), `docs/ROADMAP.md`, `docs/NAMES.md` (project name and how to change it), `SECURITY.md` (reporting vulnerabilities).
 
 ## License
 GNU Affero General Public License v3.0 or later (`LICENSE`). Vendored third-party code keeps its own license (`vendor/`).

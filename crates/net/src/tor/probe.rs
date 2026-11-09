@@ -72,13 +72,57 @@ pub fn probe(c: &Candidates, try_onion: bool, auth: &AuthPref, trust_control: bo
     out
 }
 
-/// Create one throwaway onion service (with a dummy authorized client) and remove it again.
-fn onion_test<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> String {
+/// What a quiet hosting probe found out (used automatically at export/pairing, R12-5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostProbe {
+    /// tor accepted and removed a throwaway onion service: we can host.
+    Can,
+    /// tor answered but refused to host (filtered control port): we cannot host, say so in the bundle.
+    Cannot(String),
+    /// no answer we can rely on (tor not running, auth failed, owner not verified...): do NOT fix a capability on this.
+    Unknown(String),
+}
+
+/// Ask the tor behind `control` whether it lets us host onion services, by creating and removing one throwaway service.
+/// Only the reply 510 ("command filtered / unrecognized": what a restricted control port such as Tails' answers) counts as `Cannot`;
+/// every other failure (451 resource exhausted, 55x internal errors, auth failure, timeouts, odd codes) is `Unknown`, because the
+/// bit that follows from it is permanent per contact. Nothing is sent unless the owner of the control port is verified (or trusted).
+/// Blocking: call it from a worker thread.
+pub fn probe_hosting(control: &Addr, auth: &AuthPref, trust_control: bool) -> HostProbe {
+    let unknown = |what: &str, e: &dyn std::fmt::Display| HostProbe::Unknown(format!("{what}: {}", sanitize(&e.to_string())));
+    let (s, check) = match open_control(control, Duration::from_secs(5)) { Ok(x) => x, Err(e) => return unknown("tor control port not reachable", &e) };
+    if !(auth.peer_verified || check.verified || trust_control) {
+        return HostProbe::Unknown(format!("the owner of the control port is not verified ({}); pass --tor-trust-control only if you vouch for it", sanitize(&check.detail)));
+    }
+    let mut ctl = Controller::new(s);
+    let pref = AuthPref { password: auth.password.clone(), cookie_path: auth.cookie_path.clone(), peer_verified: true };
+    if let Err(e) = ctl.authenticate(&pref) { return unknown("cannot authenticate to the tor control port", &e); }
+    classify(onion_attempt(&mut ctl))
+}
+
+fn classify(r: Result<(), TorError>) -> HostProbe {
+    match r {
+        Ok(()) => HostProbe::Can,
+        Err(TorError::Rejected { code: 510, msg }) => HostProbe::Cannot(format!("tor refused to host (510 {})", sanitize(&msg))),
+        Err(e) => HostProbe::Unknown(format!("hosting test failed: {}", sanitize(&e.to_string()))),
+    }
+}
+
+fn onion_attempt<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> Result<(), TorError> {
     let id = ContactIdentity::generate();
     let dummy = Bundle::from_identity(&ContactIdentity::generate());
-    let target = Target::Tcp(SocketAddr::from(([127, 0, 0, 1], 9)));
-    match ctl.add_onion(&id.onion_expanded_secret(), super::VIRT_PORT, &target, &[dummy.auth_pub], &id.onion_public()) {
-        Ok(sid) => { let _ = ctl.del_onion(&sid); "  ADD_ONION (hosting onion services): ALLOWED".into() }
+    let mut r = [0u8; 2];
+    getrandom::fill(&mut r).map_err(|_| TorError::Other("no OS randomness".into()))?;
+    let target = Target::Tcp(SocketAddr::from(([127, 0, 0, 1], 49152 + u16::from_be_bytes(r) % 16000))); // like real hosting: a high port
+    let sid = ctl.add_onion(&id.onion_expanded_secret(), super::VIRT_PORT, &target, &[dummy.auth_pub], &id.onion_public())?;
+    let _ = ctl.del_onion(&sid);
+    Ok(())
+}
+
+/// Create one throwaway onion service (with a dummy authorized client) and remove it again.
+fn onion_test<S: std::io::Read + std::io::Write>(ctl: &mut Controller<S>) -> String {
+    match onion_attempt(ctl) {
+        Ok(()) => "  ADD_ONION (hosting onion services): ALLOWED".into(),
         Err(TorError::Rejected { code, msg }) => format!("  ADD_ONION: REFUSED by tor ({code} {}) - hosting not possible through this control port", sanitize(&msg)),
         Err(e) => format!("  ADD_ONION: failed ({})", sanitize(&e.to_string())),
     }
@@ -100,5 +144,45 @@ mod tests {
         assert!(r.contains("not reachable"), "{r}");
         assert!(r.contains("not a tor control port") || r.contains("reachable but"), "{r}");
         assert!(r.contains("RESULT: no authenticated control port"), "{r}");
+    }
+
+    #[test]
+    fn only_510_is_cannot_everything_else_is_unknown() {
+        let rej = |code: u16| classify(Err(TorError::Rejected { code, msg: "x".into() }));
+        assert!(matches!(rej(510), HostProbe::Cannot(_)));
+        for c in [451, 512, 513, 515, 550, 551, 552, 400, 300, 700] { assert!(matches!(rej(c), HostProbe::Unknown(_)), "{c}"); }
+        assert!(matches!(classify(Err(TorError::Other("boom".into()))), HostProbe::Unknown(_)));
+        assert_eq!(classify(Ok(())), HostProbe::Can);
+    }
+
+    /// A scripted tor on a unix socket we own (so the owner check passes): NULL auth, then the given ADD_ONION answer twice (hardened + plain).
+    fn scripted(answer: &'static str) -> (tempfile::TempDir, Addr) {
+        let d = tempfile::tempdir().unwrap();
+        let sock = d.path().join("ctl");
+        let l = UnixListener::bind(&sock).unwrap();
+        thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut rd = std::io::BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                while { line.clear(); std::io::BufRead::read_line(&mut rd, &mut line).unwrap_or(0) > 0 } {
+                    let r: &str = if line.starts_with("PROTOCOLINFO") { "250-PROTOCOLINFO 1\r\n250-AUTH METHODS=NULL\r\n250-VERSION Tor=\"0.4.8.9\"\r\n250 OK\r\n" }
+                        else if line.starts_with("AUTHENTICATE") { "250 OK\r\n" } else { answer };
+                    if s.write_all(r.as_bytes()).is_err() { break; }
+                }
+            }
+        });
+        (d, Addr::Unix(sock))
+    }
+
+    #[test]
+    fn probe_hosting_end_to_end_against_a_scripted_tor() {
+        let (_d, a) = scripted("510 Command filtered\r\n");
+        assert!(matches!(probe_hosting(&a, &AuthPref::default(), false), HostProbe::Cannot(_)));
+        let (_d, a) = scripted("451 Resource exhausted\r\n");
+        assert!(matches!(probe_hosting(&a, &AuthPref::default(), false), HostProbe::Unknown(_)), "451 is transient, never a permanent Cannot");
+        let (_d, a) = scripted("250-ServiceID=aaaa\r\n250 OK\r\n");
+        assert!(matches!(probe_hosting(&a, &AuthPref::default(), false), HostProbe::Unknown(_)), "a wrong ServiceID is not Can");
+        let d = tempfile::tempdir().unwrap();
+        assert!(matches!(probe_hosting(&Addr::Unix(d.path().join("nothing")), &AuthPref::default(), false), HostProbe::Unknown(_)));
     }
 }

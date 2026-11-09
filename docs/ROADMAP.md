@@ -7,6 +7,8 @@
   security-critical code is not rewritten while it is being audited. Every feature lands in the core first and then in BOTH front ends.
 - **Toolkit recommendation:** a native Rust toolkit (egui/eframe or iced) in a second binary `nerd-chat-gui`: still one static-ish executable, no web
   view, no JavaScript, no IPC to a separate backend. Tauri/Electron are rejected for the memory-wiping and attack-surface reasons below.
+- **Installable program:** DONE for the `.deb` (`scripts/release.sh` builds `nerd-chat_<version>_amd64.deb` next to the tarball). Later: signed apt repository, other packaging formats.
+- **Default vault:** DONE (`~/.local/share/nerd-chat`, see CHANGELOG).
 
 ## Real GUI (future)
 Goal: usability for people who do not live in a terminal, without hiding anything from the people who do.
@@ -17,7 +19,7 @@ Goal: usability for people who do not live in a terminal, without hiding anythin
 - **Same invariants as the TUI:** messages in RAM only, a panic key that wipes and exits, only sanitised text rendered, no clipboard by default,
   no per-frame copies of secrets, the privacy screen is documented as "hides the screen", not as a lock.
 - **Toolkit:** open decision. Prefer a native Rust toolkit; avoid embedding a web view (large attack surface, hard to reason about memory wiping).
-- **Prerequisite:** extract the UI-agnostic state machine out of `crates/tui/src/app.rs` (screens/modes, key handling as commands, events from
+- **Prerequisite (DONE in phase 1 of the GUI plan: crate `crates/app`, `nerd-chat-app`):** the UI-agnostic state machine was extracted out of `crates/tui/src/app.rs` (screens/modes, key handling as commands, events from
   the engine, vault access) into its own crate, so the TUI and a GUI are two front ends over the same tested core. `App::handle(Key)` is already
   shaped like that; the work is mostly moving code and separating `Key` from rendering concerns.
 

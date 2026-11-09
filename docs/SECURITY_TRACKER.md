@@ -167,7 +167,7 @@ No Critical. Verified OK: only the pinned peer gets a session; no contact can im
 | R6-L7 | A crafted bundle can reuse another contact's onion address and overwrite our client-auth entry for it | FIXED | contacts whose onion key collides with any other contact's (peer or own) are refused |
 | R6-I1 | Stale Up/DialFailed after remove+re-add of the same id attaches an old connection to the new entry | FIXED | per-contact epoch checked on Up/DialFailed |
 | R6-I2 | Spawn-mode unix socket files never unlinked (re-add fails with EADDRINUSE) | FIXED | |
-| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | ACCEPTED | RAM-only by design, documented in the UI status text |
+| R6-I3 | Pending outbox lost silently if the connection dies before writing; "(queued)" implies more than is promised | FIXED on branch `next` (docs/DELIVERY.md), reviewed in review 24 (findings below) | per-text id + confirmation, unconfirmed texts kept in RAM and resent on every new connection, receiver drops repeats by id; still RAM-only (lost on quit/offline, both warn). NOT part of the audited v0.1.0 tag |
 
 ## PQ-auth stage notes (before review 7)
 - Wire change: msg2 = ct_e || ct_i || noise2 (2224 bytes); psk2 label v2. Old binaries cannot talk to new ones: restart both sides.
@@ -204,7 +204,7 @@ No Critical/High. Opus review integrated:
 | R8-L4 | Panic during vault CREATE: worker may still write the vault/counter after panic or be cut mid-write (stray .tmp, counter without vault -> CounterExists) | FIXED (cycle 14) | `VaultFile::create_cancellable`: the panic wipe sets a cancel flag that is checked after the KDF and right before any write; test `a_cancelled_create_leaves_nothing_on_disk`. A write already in progress (microseconds) still completes; stray `*.tmp` sweep not done (blobs are encrypted) |
 | R8-L5 | ADD_ONION for lazy hosting runs synchronously on the engine thread; a broken control connection silently disables DEL_ONION/auth removal (client-auth secrets stay in a shared tor); shutdown gives up after 3 s but UI says removed | SUPERSEDED by R12 (lazy hosting code removed; PARTIAL before) | FIXED: `Tor::healthy_ctl` opens a fresh authenticated control connection (ownership re-checked) before unhost/forget_dial/Drop when the old one is broken; test `cleanup_uses_a_fresh_control_connection_when_the_old_one_is_broken`. OPEN: ADD_ONION still synchronous on the engine thread; UI says "removed" after the 3 s give-up |
 | R8-I6 | `Up` clears `dialing` while an outbound thread is in flight -> two overlapping dials | FIXED (cycle 14) | `dialing` now means 'outbound thread alive' and is cleared only by `DialEnded`, which the thread always sends last |
-| R8-I7 | After a flip the designated dialer keeps dialing the never-existing onion | OPEN | stop/slow dialing a peer known to have flipped (needs signalling) |
+| R8-I7 | After a flip the designated dialer keeps dialing the never-existing onion | ACCEPTED (analysed after cycle 38) | No signalling is possible: after a flip NEITHER side hosts, so there is no channel to carry a 'I flipped' message, and a dial that fails looks identical for a flipped peer and an offline one. A slower cap (e.g. 10 min) would delay every normal reconnect after a peer was offline. Cost today: one SOCKS/HSDir lookup of the peer's onion address at most every 60 s (max_backoff), visible only to the user's own Tor and the HSDirs, no data of ours. The flipped side's notice already tells the user to set 'host anyway' on the other side, which ends the situation. Revisit if cover-traffic/timing work (C6-timing) changes the dial schedule |
 | R8-I8 | "about a minute" is optimistic (SOCKS up to 120 s + 45 s handshake per attempt; sending resets backoff) | OPEN (docs) | |
 | R8-I9 | `Screen::Working` has no cancel/timeout on a hung filesystem | OPEN (info) | F12/signals work |
 | R8-I10 | `add_onion` error after a 250 reply leaves an untracked live service until control closes | OPEN | |
@@ -259,7 +259,7 @@ Round 4 not run: remaining items are minor; run one before wider use.
 | R12-2 | Capability excluded from the fingerprint/safety number (so both sides compute the same number from keys only); authenticated only by the bundle self-signature + the pairing proof | ACCEPTED | |
 | R12-3 | A malicious contact can claim "cannot host" to make us host for them (presence visible to holders of their bundle). Inherent (no other way to connect); visible in the UI | ACCEPTED/documented | |
 | R12-4 | A wrong bit (claims can host, Tor refuses): the other side must switch on `h`; not automatic by design | ACCEPTED | |
-| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | OPEN | could run the probe at export time when a control port is configured |
+| R12-5 | The capability is chosen by the user (`--cannot-host`); it is not probed automatically at export | FIXED (review 25) | with `--tor-control`, the first export/pairing runs a throwaway ADD_ONION probe on a worker thread; see review 25 for the hardening |
 
 ## Review 12 — capability/host-anyway change (commit 8f85714); fixes
 No Critical/High. Integrated:
@@ -420,3 +420,120 @@ Verdict of the reviewer: nothing CRITICAL/HIGH; four MEDIUM issues, all reproduc
 | R23-L5 | Enter in the message cursor saved the newest message | FIXED | only `y` saves |
 | R23-L6 | imported bundle files are not purged | ACCEPTED | documented |
 | R23-I | OsStr compared lossily; duplicate targets; tracker had LT-1 twice | FIXED (raw bytes, dedup); LT-1 duplicate left as history |
+
+## Delivery confirmation (branch `next`, after the v0.1.0 audit snapshot) — self-notes, review PENDING
+Adds `KIND_MSG_ID`/`KIND_MSG_ACK` and resend (docs/DELIVERY.md). For the reviewer: (1) can a peer make us show a text twice or never
+confirm one (dedup window 256, replaced connections, re-add carrying `seen`)? (2) can ack/id frames be abused for resource use or as a
+side channel (ack for unknown ids is a no-op; malformed ones cut the connection; one extra fixed-size cell each)? (3) is anything now
+kept longer in RAM than before (up to 50 x 32 KiB per contact until confirmed, wiped on drop/shutdown)? (4) does the quit guard
+and going offline still account for every unconfirmed line? Status: reviewed in review 26 (below).
+
+## Default vault location (branch `next`) — self-notes, review PENDING
+`crates/app/src/vault_path.rs`, `main.rs::default_vault`. Trade-off accepted and visible: the default vault now sits on the computer's disk
+at a predictable path (easier to find in a forensic look than a vault on a USB stick the user chose); the first run says so and waits for
+Enter, and Tails gets an explicit warning (home is erased at shutdown). Checks: the directory is created 0700, an existing one must be a real
+directory (no symlink), owned by us and not group/world-writable (other users could swap the vault or its rollback counter). A relative
+`$XDG_DATA_HOME` or `$HOME` is ignored (XDG rule). The choice never depends on the current directory once a default vault exists; if a
+`./nerd-chat.vault` also exists it is named in a note and ignored. `--ram` now wins over `--vault` (before, `--ram --vault X` silently wrote to X).
+Not done: the purge leaves the (empty) directory; the counter file still defaults to sit beside the vault. Status: OPEN until reviewed.
+
+## Review 24 (Opus, delivery confirmation, commit 9282b40) — integrated on branch `next`
+No critical/high. Nothing was re-reviewed after the fixes yet.
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R24-M1 | a v0.1.0 peer never confirms: after 50 texts every send says "outbox full", every reconnect resends all of them (and, after the id moved into the text frame, v0.1.0 would have DROPPED the texts: a regression found while fixing this) | FIXED | `KIND_CAPS` on every connection; nothing is written until the peer's capabilities are known; a peer silent for `caps_wait` (5 s) gets plain v0.1.0 frames and written = done. Tests with a raw non-announcing peer + a manual run of the real v0.1.0 binary against this build over Tor (both directions, reconnect: no loss, no duplicates) |
+| R24-M2 | the ack was queued when the text entered the UI's event channel: going offline/quitting within ~200 ms confirmed a text the user never saw | FIXED | the UI calls `Engine::confirm` after the line is in its own state; the engine confirms nothing else; test `a_text_the_ui_never_saw_is_not_confirmed_and_arrives_after_the_restart` |
+| R24-M3 | the id was its own cell and the reply was immediate: message vs keepalive recognisable by cell count and reply (worsens C6-timing) | FIXED (residual: C6-timing) | id inside the text frame (cell count of a text unchanged); confirmations wait a random 1-5 s, go out batched in one cell (up to 64 ids) and a due keepalive carries them; tests for the delay, the batching and the keepalive rule |
+| R24-M4 | going offline marked possibly delivered texts "(NOT SENT)" without warning (conflicting instructions for high-risk users) | FIXED | `o` warns first (second `o` goes); marks say "(NOT CONFIRMED)"; "(NOT SENT)" only for engine refusals |
+| R24-L1 | `Delivered`/`Unsent` mapped to lines by position (out-of-order ack, 500-line trim, refusals without event, invalid re-add dropping carried texts) | FIXED | `Engine::send` returns the id, lines carry it, `Delivered`/`Unsent` name it; every refusal emits `Unsent`; `add()` validates the key material before taking `unacked`/`seen`. RESIDUAL: the 500-line trim can drop an unconfirmed line from view (warnings undercount) |
+| R24-L2 | both sides resending ~1.9 MB at once could deadlock their writers (no per-turn text budget) | OPEN | not reachable from the TUI (2 KiB draft cap); add a per-turn byte budget for texts before the engine API gets other users |
+| R24-I1 | malformed id/ack frames cut the connection, unknown kinds are ignored | ACCEPTED | only the authenticated contact can send them; the format is declared frozen in `proto.rs` |
+| R24-I2 | texts stay in RAM longer (until confirmed); if the engine misses the panic key's 400 ms, `unacked` lives until exit | ACCEPTED | every normal path wipes (verified by the reviewer); the UI holds the same text anyway |
+| R24-I3 | comments and DELIVERY.md out of date | FIXED | |
+| R24-T | test gaps: UI never saw the text, out-of-order/misc mapping, replaced connection | FIXED / PARTIAL | first and third added (the replaced connection by injecting a stale-generation event), mapping covered by real two-app tests; no UI test for an out-of-order ack from a hostile peer |
+
+## Review 25 (Opus, R12-5 automatic hosting probe, commits db70077 + 1c20cca) — fixed in the next commit
+No critical. Test coverage: probe classification, a scripted tor end to end (510 / 451 / wrong ServiceID / unreachable), the real probe through the app (stalled tor, keys ignored, Esc, 510 -> alert + bit false).
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R25-H1 | the probe blocked the UI thread (up to ~35 s honest, unbounded with a hostile endpoint): F12 / purge / signal wipe delayed; it also sent PROTOCOLINFO to an unverified owner before refusing | FIXED | worker thread; while it runs only F12/purge/Esc act; 15 s overall deadline; unverified owner -> `Unknown` before any byte is sent |
+| R25-M1 | every non-2xx reply (451 transient, 55x, odd codes) became a permanent `Cannot` | FIXED | only `510` is `Cannot`; the rest is `Unknown` (the action is cancelled). Not done: asking the user to confirm a `Cannot` (a sticky alert tells them instead) |
+| R25-M2 | export during a running/waiting pairing could store a different bit than the one told to the peer | FIXED | export refused while a pairing runs or waits for P; `finish_pair` discards the pairing if stored and told bits differ |
+| R25-L1 | the `Cannot` notice was overwritten by the next status line | FIXED | sticky alert (`z` acknowledges) |
+| R25-L2 | with `--tor-trust-control` a short-lived squatter at export time fixes the bit forever | ACCEPTED | inside the documented trust model; 510-only and the alert limit it; delete + re-pair undoes it (R13-M1) |
+| R25-L3 | local controllers of a shared tor see a short ADD_ONION/DEL_ONION at export/pairing time | ACCEPTED | random key, not linkable; documented in TRANSPORT.md |
+| R25-L4 | probe used port 9, real hosting a random high port | FIXED | random high port |
+| R25-I | TRANSPORT.md said "nobody publishes a service just to find out" | FIXED | reworded |
+
+## Review 26 (Opus, default vault location) — fixed in the commit after d33ed03
+No critical/high. All vault_path tests pass; new tests: dangling symlink / directory / group-writable directory for `check_existing`, `create` never replaces a dangling symlink.
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R26-M1 | a dangling symlink at `./nerd-chat.vault` (or the default path) counted as "existing", then as "absent" in the UI/store (`Path::exists` follows links): the vault was created in the current directory without confirmation, directory checks or Tails warning | FIXED | `check_existing` refuses anything but a regular file; store/app/main use `symlink_metadata`; any inspect error other than NotFound = refuse |
+| R26-L1 | an existing default vault: no check of directory mode/owner or file owner | FIXED | `check_existing` (regular file, ours, absolute parent dir private and ours) |
+| R26-L2 | parents not checked, `create_dir_all` follows a symlinked `~/.local`; confirmation shows the unresolved path; window between `prepare_dir` and write | OPEN (low) | idea: show the canonical path, `O_NOFOLLOW` dirfd |
+| R26-L3 | any input (also EOF) at the confirmation created the directory | FIXED | only an empty line continues |
+| R26-L4 | the directory was created before the password / swap check | PARTIAL | swap is checked before anything is created; an empty directory is still left if the user then quits at the password prompt (stated in the confirmation) |
+| R26-L5 | purge leaves the empty directory; names stay in the journal/free blocks | OPEN | rmdir after purge when it is the empty default directory; document remanence |
+| R26-L6 | backups/sync copy `~/.local/share`; a restore defeats rollback protection | FIXED (text) | stated in the confirmation; GETTING_STARTED/README updated |
+| R26-L7 | running as root with the user's HOME takes over the user's vault | FIXED | `check_existing` requires file and directory to be owned by the effective user |
+| R26-L8 | Tails detection fails open; Whonix/other live systems get no warning | OPEN (optional) | statfs tmpfs/overlay or `boot=live` heuristic |
+| R26-I1 | the "ignoring ./nerd-chat.vault" notes go to stderr right before the alternate screen and are practically never seen | OPEN | the header shows the path; show the note in the first status line |
+| R26-I3 | an inspect error other than NotFound was treated as "no vault" | FIXED | refused |
+
+## Review 27 (Opus, GUI phase 1a: core extraction into crates/app, commit 10fe8a4) — fixed in the commit that follows
+No critical/high. Moved files verified byte-identical (`similarity index 100%`); 306 tests passed before and after, no test lost.
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R27-M1 | the moved code lost `#![forbid(unsafe_code)]` (it used to be covered by the tui binary's attribute) | FIXED | `#![forbid(unsafe_code)]` in `crates/app/src/lib.rs` |
+| R27-M2 | nothing forced a front end to run the process-level safety nets (cleaner helper dispatch, sandboxed cleaner, hardening); a GUI that forgot `set_cleaner` would parse hostile files in the key-holding process | FIXED | `startup::startup(&args)` does all three; `App::new` asserts that it ran (off only in tests); the order and reasons are in the crate docs. Not done: strip's silent in-process fallback when no cleaner is installed (the assert makes it unreachable through `App`) |
+| R27-L1 | "tests only" fields (`Config::transport`, `host_probe_test`) became public | FIXED | `pub(crate)`; a front end can inject a test network only through `Config::with_test_transport`, behind the non-default feature `test-transport` (enabled only by the GUI's developer `demo` feature) |
+| R27-L2 | lib.rs doc described `cmd_*` methods that do not exist | FIXED | reworded: the GUI maps widgets to the same `Key`s; a command layer is planned, not built |
+| R27-L3 | a dynamic GUI binary doubles as the cleaning helper (re-exec of `/proc/self/exe`) | ACCEPTED (partial) | the binary links only libc/libm/libgcc_s (windowing and GL libraries are `dlopen`ed by the toolkit AFTER `startup`), so the helper loads none of them before seccomp; the cleaner integration tests still run only against the terminal binary: duplicate them for the GUI binary in phase 6 |
+| R27-L4 | stale docs | FIXED | BUILD_AND_RUN, PLAN, PROGRESS updated |
+| R27-I1 | `parse_args` reads the keyfile before the swap refusal (older) | OPEN (info) | move the swap check before reading the keyfile |
+| R27-I2 | design §7 listed `no_new_privs` for the main process; `harden()` sets only RLIMIT_CORE=0 and non-dumpable | ACCEPTED | `no_new_privs` on the main process could break AppArmor transitions for the spawned Tor (Ubuntu `system_tor`); it stays a property of the cleaning helper. Design text corrected |
+| R27-I3 | cargo feature unification: `cargo build --workspace` turns `terminal-ui` on for the GUI | NOTED | build the GUI with `-p nerd-chat-gui`, never from a workspace-wide release build |
+
+## D-5 GUI dependencies (owner approved, 2026-11-09)
+egui/eframe 0.37 with features `default_fonts, glow, wayland, x11` only (no AccessKit, no clipboard, no web screen reader, no system fonts) enter the project in `crates/gui`; the terminal binary and its static build do not link them. `cargo deny` stays green with ONE narrow exception: `epaint_default_fonts` (bundled fonts) is allowed the SIL OFL 1.1 and the Ubuntu Font Licence. `cargo vet` exemptions grew from about 210 to 395 crates (all UNAUDITED, like the existing ones); `cargo vet` and `cargo deny` pass. Audit backlog is listed by `cargo vet`.
+
+## Review 28 (Opus, SPEC of pairing over Tor, 2026-11-09) — integrated into the spec (section 8)
+No critical. The crypto argument holds (one online guess per offer; nothing offline-attackable from the link). Findings fixed IN THE SPEC before any code:
+
+| # | Finding | Status |
+|---|---|---|
+| R28-H1 | joiner retries cannot work: Tor will not re-ask the same HSDirs for ~15 min after "not found" | SPEC FIXED: publish only after `HS_DESC UPLOADED` (own control connection), bounded joiner retry |
+| R28-H2 | "the link is public, safe anywhere" is false (presence probe, rendezvous-circuit confirmation, burning) | SPEC FIXED: presence-sensitive link, publish when the partner is ready, short TTL, count first rendezvous |
+| R28-M1 | attacker-caused offer failures feed the process-wide lockout and block ALL pairing | SPEC FIXED: separate remote lockout, counted only after a real SPAKE message; distinct alert |
+| R28-M2 | `pair.rs` hard-codes a 300 s TTL | SPEC FIXED: TTL constructor, offer created at publication |
+| R28-M3 | cancel/panic cannot interrupt Tor streams (no shutdown, blocking SOCKS connect) | SPEC FIXED: `Stream::shutdown`, early registration, cancel checks |
+| R28-M4 | engine command for hosting: races, orphans, no events | SPEC FIXED: `pair_host_fn` with its own control connection; drop = removal |
+| R28-M5 | `can_host` probe tests the wrong command form | SPEC FIXED: the real public `ADD_ONION` decides; bit untouched |
+| R28-M6 | `nerdchat:pair/` prefix names the app to the link carrier | SPEC FIXED: bare onion id |
+| R28-L1..L7, I1..I4 | descriptor lingers ~3 h; random socket name; joiner error classes; clear code after failure; trust wording; online presence; derive nothing from the code | SPEC FIXED / documented |
+
+## Review 29 (Opus, IMPLEMENTATION of pairing over Tor, commits fc1d179..2ffdb49)
+No critical/high; 225 tests passed in the reviewed crates. Fixed in the commit that follows (live test result: see PROGRESS).
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R29-M-a | the GUI offer card followed whichever contact was selected: the code/link could be told to the wrong person while the result landed in another contact's entry | FIXED | `TorLink.contact`; the card shows only for that contact; a bar "Pairing with X is open, Cancel" on every screen |
+| R29-M-b | a delayed resume (hosting probe) could start a second pairing on top of a running one and orphan it | FIXED | `resume` refuses while a pairing runs or waits (keys are already ignored during a probe; defence in depth) |
+| R29-M-c | "2 distinct HSDirs uploaded" is too weak: joiners can hit HSDirs without the right descriptor and be blocked ~15 min (probable cause of the first live failure: the joiner dialed 2 s after the link appeared) | FIXED | `PublishRule`: 4+ uploads and 8 s grace, or 2+ uploads and 30 s |
+| R29-L-a | the joiner's lockout grew on EOF/cancelled offers; spec L4 not implemented | FIXED | `join_remote` counts only after a well-formed SPAKE message, on the remote lockout |
+| R29-L-b | a tor that rejects SETEVENTS made offering fail (wrong message "cannot create service") | FIXED | continue without events, fixed wait |
+| R29-L-c | the remote lockout was checked only after the service was published | FIXED | checked before hosting |
+| R29-L-d | the TUI showed link+code on one clipped line | FIXED | two lines, layout grows |
+| R29-L-e | spec H2: count the first HS_SERVICE_REND as use | OPEN | silent presence probes stay undetected (documented in TRANSPORT.md) |
+| R29-L-f | GUI button said "Yes, in person" for the voice question | FIXED | |
+| R29-L-g | CancelToken keeps a dup fd per registered stream until it is dropped | ACCEPTED (low) | the token dies with the pairing |
+| R29-L-h | nothing watches the service/control connection after publication | OPEN (low) | a dead link is shown until the TTL |
+| R29-I | the code is copied into non-zeroized memory (TUI `format!`, GUI RichText/galley): same class as R4-M2; the link sits in plain Strings | ACCEPTED | the code is worthless once consumed/expired; the link is presence-sensitive, not authenticating |
+| R29-I2 | "someone used your link" alert also fires when an honest partner's circuit breaks after a well-formed message | ACCEPTED | counting is right; wording could hedge |
+
+Clipboard (owner decision 2026-11-09): enabled ONLY for the pairing link (explicit Copy button, Ctrl+V in the link field). The GUI drops every paste event and disables selectable labels, so passwords, the code, chat text and everything else stay out of it.

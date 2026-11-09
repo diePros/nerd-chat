@@ -2,12 +2,8 @@
 //!   nerd-chat [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]
 #![forbid(unsafe_code)]
 
-mod app;
-mod cleaner;
-mod secret;
-mod ui;
 
-use app::{Action, App, Config, Key};
+use nerd_chat_app::{app::{self, Action, App, Config, Key}, hardening::{harden, swap_problem}, ui, vault_path};
 use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -19,7 +15,8 @@ use zeroize::Zeroizing;
 
 fn usage() -> ! {
     eprintln!("usage: nerd-chat [--version] [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
-  --vault PATH         vault file (default ./nerd-chat.vault). Put it on your USB stick.\n\
+  --vault PATH         vault file. Default: ~/.local/share/nerd-chat/nerd-chat.vault ($XDG_DATA_HOME), or an existing ./nerd-chat.vault.\n\
+                       On a USB stick or Tails Persistent Storage pass the path yourself.\n\
   --ram                RAM-only: never write anything to disk\n\
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
   --keyfile PATH       second factor file (>= 32 bytes), keep it on a SEPARATE device\n\
@@ -27,8 +24,8 @@ fn usage() -> ! {
   --tor-path PATH      tor binary to start when going online (default: `tor` from PATH)\n\
   --tor-control ADDR   use an already running tor (127.0.0.1:9051 or unix:/run/tor/control) instead of starting one;\n\
                        with --tor-cookie PATH, --tor-socks ADDR, --tor-trust-control (see docs/TRANSPORT.md)\n\
-  --cannot-host        our Tor cannot host onion services (Tails with a restricted control port): bundles you export/pair say so,\n\
-                       so the contact hosts for you (check with --probe-tor --probe-onion)\n\
+  --cannot-host        say cannot-host in the bundles you export/pair (with --tor-control this is probed\n\
+                       automatically at export; check by hand with --probe-tor --probe-onion)\n\
   --allow-swap         start even if swap is active (default: refuse: the OS could write secrets to disk)\n  --no-sandbox         clean received/sent files in this process instead of the resource-limited helper process\n\
 \
   --strip IN OUT       clean one JPEG/PNG offline (add --text for plain text) into a NEW file, then exit (same swap rule, --allow-swap)\n\
@@ -90,6 +87,32 @@ fn strip_cmd(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
+/// The vault to use when there is no `--vault`: an existing one (see `vault_path`), or a NEW one at the default place after the user
+/// confirmed that place (it is on this computer's disk, and on Tails it would be erased at shutdown).
+fn default_vault(allow_swap: bool) -> PathBuf {
+    use std::io::IsTerminal;
+    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match vault_path::resolve(env("XDG_DATA_HOME").as_deref(), env("HOME").as_deref(), &cwd, &|p| match std::fs::symlink_metadata(p) { Err(e) => e.kind() != std::io::ErrorKind::NotFound, Ok(_) => true }) {
+        vault_path::Choice::Existing { path, note } => {
+            if let Err(e) = vault_path::check_existing(&path) { eprintln!("{e}"); std::process::exit(2) }
+            if let Some(n) = note { eprintln!("{n}"); }
+            path
+        }
+        vault_path::Choice::Unusable(why) => { eprintln!("{why}"); std::process::exit(2) }
+        vault_path::Choice::New { dir, path } => {
+            if !allow_swap { refuse_if_swap(); } // before anything is created on disk
+            let tails = std::fs::read_to_string("/etc/os-release").is_ok_and(|s| vault_path::is_tails(&s));
+            eprintln!("{}", vault_path::confirm_text(&path, tails));
+            if !std::io::stdin().is_terminal() { eprintln!("not interactive: pass --vault PATH to say where the new vault goes"); std::process::exit(2) }
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || !line.trim().is_empty() { eprintln!("cancelled: nothing was created"); std::process::exit(2) } // EOF or any text = cancel
+            if let Err(e) = vault_path::prepare_dir(&dir) { eprintln!("{e}"); std::process::exit(2) }
+            path
+        }
+    }
+}
+
 fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "--version" || a == "-V") {
@@ -99,10 +122,7 @@ fn parse_args() -> Config {
     if raw.first().is_some_and(|a| a == "--help" || a == "-h") { usage() }
     if raw.first().is_some_and(|a| a == "--strip") { strip_cmd(&raw[1..]); }
     if raw.iter().any(|a| a == "--probe-tor") { probe_tor(&raw); }
-    // before the rename the default file was ./seburity.vault: keep using it instead of silently offering to create a new vault
-    let legacy = !std::path::Path::new("nerd-chat.vault").exists() && std::path::Path::new("seburity.vault").exists();
-    if legacy { eprintln!("note: using the existing ./seburity.vault (the default file name is now nerd-chat.vault)"); }
-    let mut path = Some(PathBuf::from(if legacy { "seburity.vault" } else { "nerd-chat.vault" }));
+    let (mut path, mut ram) = (None, false);
     let (mut counter, mut keyfile, mut keyfile_path, mut profile) = (None, None, None, Profile::Strong);
     let mut tor = app::TorCfg::default();
     let mut allow_swap = false;
@@ -111,7 +131,7 @@ fn parse_args() -> Config {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--vault" => path = Some(it.next().unwrap_or_else(|| usage()).into()),
-            "--ram" => path = None,
+            "--ram" => ram = true,
             "--low-mem" => profile = Profile::LowMem,
             "--allow-swap" => allow_swap = true,
             "--no-sandbox" => {} // handled at startup: clean files in-process instead of in the limited helper
@@ -132,6 +152,8 @@ fn parse_args() -> Config {
             _ => usage(),
         }
     }
+    // --ram always wins (it promises that nothing is written); without --vault the default location applies (see vault_path.rs)
+    let path = if ram { None } else { Some(path.unwrap_or_else(|| default_vault(allow_swap))) };
     let mut cfg = Config::new(path, counter, keyfile, profile);
     cfg.keyfile_path = keyfile_path;
     cfg.tor = tor;
@@ -171,22 +193,6 @@ fn wipe_terminal() {
     let _ = execute!(stdout(), event::DisableBracketedPaste);
     ratatui::restore();
     let _ = execute!(stdout(), Clear(ClearType::All), Clear(ClearType::Purge), ratatui::crossterm::cursor::MoveTo(0, 0));
-}
-
-/// Process hardening that needs no `unsafe`: no core dumps (a dump of the unlocked heap would put
-/// keys on disk), and not ptrace/proc-mem readable by same-user processes.
-/// Returns human-readable warnings for anything that could not be applied.
-fn harden() -> Vec<String> {
-    use rustix::process::{setrlimit, Resource, Rlimit};
-    let mut w = Vec::new();
-    if setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) }).is_err() {
-        w.push("could not disable core dumps".to_string());
-    }
-    #[cfg(target_os = "linux")]
-    if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).is_err() {
-        w.push("could not mark the process non-dumpable".to_string());
-    }
-    w
 }
 
 /// Wait up to `timeout` for input on `fd`. `Err(UnexpectedEof)` = the terminal is GONE (window closed, ssh dropped, tmux killed: hangup, error or
@@ -239,18 +245,6 @@ fn panic_exit(app: &mut App, term: &mut ratatui::DefaultTerminal) -> ! {
     std::process::exit(0)
 }
 
-/// Active swap devices/files from `/proc/swaps` text (everything after the header line).
-fn parse_swaps(text: &str) -> Vec<String> {
-    text.lines().skip(1).filter_map(|l| l.split_whitespace().next()).map(str::to_string).collect()
-}
-
-/// Refuse to run with swap active: the kernel may write our memory (keys, plaintext) to disk, where it survives power-off.
-/// (Without swap there is also no hibernation image.) `None` = unknown (can't read /proc/swaps): treated as OK.
-fn swap_problem() -> Option<Vec<String>> {
-    let active = parse_swaps(&std::fs::read_to_string("/proc/swaps").ok()?);
-    if active.is_empty() { None } else { Some(active) }
-}
-
 fn refuse_if_swap() {
     if let Some(active) = swap_problem() {
         eprintln!("REFUSING TO START: swap is active ({}).\n\
@@ -263,15 +257,12 @@ survive power-off and be recovered later. Turn swap off first:\n\
 }
 
 fn main() {
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if cleaner::is_worker_invocation(&args) { cleaner::worker_main(); }
-        if !args.iter().any(|a| a == "--no-sandbox") { nerd_chat_strip::set_cleaner(cleaner::sandboxed_clean); }
-    }
-    for w in harden() { eprintln!("warning: {w}"); }
+    let args: Vec<String> = std::env::args().collect();
+    let started = nerd_chat_app::startup::startup(&args); // FIRST: cleaner helper dispatch, sandboxed cleaner, hardening
+    for w in started.warnings { eprintln!("warning: {w}"); }
     let cfg = parse_args();
     if !cfg.allow_swap { refuse_if_swap(); }
-    if cfg.path.as_ref().is_some_and(|p| !p.exists()) {
+    if cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_err()) {
         eprintln!("No vault at {:?}: a NEW one will be created.", cfg.path.as_ref().unwrap());
     }
     // SIGTERM / SIGHUP (terminal closed) / SIGINT trigger the same wipe as the panic key.
@@ -346,12 +337,4 @@ mod tests {
         assert_eq!(key(KeyCode::Char(']'), KeyModifiers::NONE), Some(Key::Char(']')), "a plain ] is just text");
     }
 
-    #[test]
-    fn swaps_are_parsed_from_proc_text() {
-        let none = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n";
-        assert!(parse_swaps(none).is_empty());
-        let some = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile                               file\t\t524284\t\t524280\t\t-1\n/dev/zram0                              partition\t1024\t0\t100\n";
-        assert_eq!(parse_swaps(some), vec!["/swapfile", "/dev/zram0"]);
-        assert!(parse_swaps("").is_empty());
-    }
 }

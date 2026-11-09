@@ -17,6 +17,13 @@ ls -la target/x86_64-unknown-linux-musl/release/nerd-chat
 mkdir -p ~/nerd-chat-demo && cd ~/nerd-chat-demo
 ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./alice.vault
 ```
+**Where the vault goes without `--vault`:** an existing `~/.local/share/nerd-chat/nerd-chat.vault` (`$XDG_DATA_HOME` if set to an absolute
+path) is used from any directory; otherwise an existing `./nerd-chat.vault` (or the old `./seburity.vault`) in the current directory, with a
+note; if there is none, the program shows the path it would create, says that it is on this computer's disk, and waits for Enter before
+creating the directory (mode 0700) and vault. It refuses a symlinked, foreign or group/world-writable directory. Without a terminal (a script)
+it refuses and asks for `--vault`. `--ram` always wins over `--vault`. For a vault on a USB stick or on Tails (`~/Persistent`, because the
+home directory there is erased at shutdown; the program warns when it recognises Tails) pass `--vault` yourself.
+
 Type a passphrase of at least 12 characters, Enter, repeat it, Enter (takes ~4 s: that is the memory-hard KDF).
 Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode (keys are text only, nothing typed there can trigger a command).
 - Contacts / details: Up/Down (or `j`/`k`, Tab/Shift+Tab) select, `Enter` opens the chat, `i` opens it and starts typing.
@@ -30,7 +37,7 @@ Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode
 - **Keeping messages (by hand, never automatic):** in a chat press `m` (message cursor), `j`/`k` choose a message, `y` saves THAT message into the
   vault (encrypted with it; no timestamp; at most 500 per contact and 4 MiB in total; not possible in `--ram` mode). Saved messages are marked ★ in the chat.
   `H` opens the saved messages of the selected contact (`d` twice deletes one). Whoever gets your vault AND password can read what you saved.
-- `q` quits and wipes RAM; if queued messages or unsaved files would be lost it asks you to press `q` a second time.
+- `q` quits and wipes RAM; if unconfirmed messages or unsaved files would be lost it asks you to press `q` a second time.
 **Panic-lock: F12 or Ctrl+\\** wipes memory, clears screen + scrollback and exits immediately; the vault file stays, the password opens it again.
 **PURGE: Ctrl+] (or Shift+F12)** does the same AND overwrites and deletes the vault, its rollback counter, the keyfile and every file this
 session exported or saved: contacts, keys and saved messages are gone for good. No confirmation, no undo. Works from any screen, also at the
@@ -54,7 +61,10 @@ cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-mu
 
 Then in Terminal 1: `I` -> `bob-for-alice.sbc`. In Terminal 2: `I` -> `alice-for-bob.sbc`.
 Both now show **UNVERIFIED** and the SAME safety number. Press `v` on both, compare the digits, press `y`.
-Status turns **● verified**. (Real use: send the .sbc over any channel; compare the number by voice/in person.)
+Status turns **● verified**. (Real use: do NOT send the .sbc over just any channel: read docs/EXCHANGING_CONTACTS.md; compare the number by voice/in person.)
+
+## 4a. Pairing over Tor (no shared network)
+Both online (`o`), a contact added on each side (`n`). Terminal 1: `T` shows a link and a code once the service is published (up to a minute). Send the LINK to your partner (only), tell the CODE by voice. Terminal 2: `J`, paste the link, Enter, type the code, Enter. Both: `P`, answer whether you HEARD the code by voice. The service is removed as soon as the one connection arrived; `x` cancels.
 
 ## 4. Try local one-time-code pairing (no files)
 Add a fresh contact on each side (`n`), then:
@@ -83,11 +93,12 @@ Using a Tor that is already running (Tails/Whonix/system):
 ./nerd-chat --vault ./alice.vault --tor-control unix:/run/tor/control      # add --tor-trust-control only if you vouch for its owner
 ```
 Good to know:
-- Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. Messages typed while the other person is
-  offline are queued in RAM (max 50) and sent when they connect; they are lost if you quit first.
+- Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. A message says `(queued)` until the other
+  person's app has confirmed it. Until then it is kept in RAM (max 50) and sent again on every new connection, so a message written into a dying
+  connection or typed while they are away is not lost; it IS lost if you quit or go offline first (both ask first; lines left unconfirmed say `(NOT CONFIRMED)`: they may have arrived; see docs/DELIVERY.md).
 - Who dials: the contact whose signing key is smaller dials, the other one hosts, so normally only one of you publishes an onion service. If the hosting side cannot host (e.g. Tails refusing it) it switches to dialing and the other side starts hosting after about a minute of failed dials; you will see a notice.
 - An unverified contact shows a red warning in the chat header. Verify the safety number first (v).
-- There are no read receipts, typing indicators or timestamps (metadata). A small keepalive cell is sent every 30 s while idle.
+- There are no read receipts, typing indicators or timestamps (metadata); the only confirmation is "their app has it" (the `(queued)` mark goes away). A small keepalive cell is sent every 30 s while idle.
 
 ## 5. RAM-only mode (nothing ever written)
 ```bash
@@ -99,7 +110,7 @@ Good to know:
 rustup target add x86_64-unknown-linux-musl
 cd ~/Documents/Code/nerd-chat
 cargo build --release --target x86_64-unknown-linux-musl -p nerd-chat-tui
-ldd target/x86_64-unknown-linux-musl/release/nerd-chat     # want: "not a dynamic executable"
+ldd target/x86_64-unknown-linux-musl/release/nerd-chat     # want: "statically linked" (or "not a dynamic executable")
 ```
 
 ## 7. On a live USB system (checklist)

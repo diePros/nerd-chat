@@ -8,7 +8,7 @@ the only priorities; it is a single static musl executable). Commit under review
 A new crate `crates/sandbox` (`nerd-chat-sandbox`) that is the ONLY place in the project allowed to contain `unsafe`. It must
 contain EXACTLY ONE unsafe block (`prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog)` in `install`). It builds a classic-BPF
 seccomp ALLOWLIST (`filter()`, safe code) and installs it on the calling thread. It is used by the file-cleaning helper process
-(`crates/tui/src/cleaner.rs`, `worker_main`) which parses HOSTILE JPEG/PNG/text from contacts; the filter is installed before
+(`crates/app/src/cleaner.rs`, `worker_main`) which parses HOSTILE JPEG/PNG/text from contacts; the filter is installed before
 the first untrusted byte is read. Allowed (x86_64 only): `read` on fd 0, `write` on fd 1 and 2, `mmap` without PROT_EXEC,
 `munmap`, `mremap`, `madvise`, `brk`, `sigaltstack`, `clock_gettime`, `getrandom`, `exit_group`. Everything else, foreign
 architectures and the x32 ABI must kill the process (`SECCOMP_RET_KILL_PROCESS`). The goal is that a COMPROMISED parser
@@ -16,7 +16,7 @@ cannot read files, open sockets (IP leak!), exec, unlink/rename, signal the pare
 the vault/keys/Tor. The user asked that the unsafe surface be as small as possible and that there be absolutely no errors.
 
 Files: `crates/sandbox/src/lib.rs`, `crates/sandbox/tests/filter.rs` (BPF interpreter + spec comparison + 200k random inputs),
-`crates/sandbox/tests/kernel.rs` (real-kernel tests via re-exec), `crates/tui/src/cleaner.rs` (integration, rlimits, parent side),
+`crates/sandbox/tests/kernel.rs` (real-kernel tests via re-exec), `crates/app/src/cleaner.rs` (integration, rlimits, parent side),
 `docs/FILE_SHARING.md` ("Syscall allowlist"), `docs/SECURITY_TRACKER.md` (R9-open, R17). Read `docs/SECURITY_TRACKER.md` first so you
 do not re-report known OPEN items, and note that earlier reviews already proved that rlimits alone are NOT a sandbox.
 

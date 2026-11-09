@@ -144,10 +144,10 @@ impl VaultFile {
     /// touches the disk: a panic wipe that arrives while the worker derives the key must not leave a
     /// vault, a counter file or a half-written temp file behind (R8-L4).
     pub fn create_cancellable(path: Option<&Path>, counter_path: Option<&Path>, pw: &[u8], keyfile: Option<&[u8]>, profile: Profile, cancel: &AtomicBool) -> Result<Self, StoreError> {
-        if let Some(p) = path { if p.exists() { return Err(StoreError::Exists); } }
+        if let Some(p) = path { if fs::symlink_metadata(p).is_ok() { return Err(StoreError::Exists); } } // a dangling symlink is NOT 'absent' (R26-M1)
         // A leftover counter file means a vault existed: creating over it would silently reset rollback protection.
         let cp = counter_path.map(Path::to_path_buf).or_else(|| path.map(default_counter_path));
-        if cp.as_ref().is_some_and(|c| c.exists()) { return Err(StoreError::CounterExists); }
+        if cp.as_ref().is_some_and(|c| fs::symlink_metadata(c).is_ok()) { return Err(StoreError::CounterExists); }
         let vault = Vault::create(pw, keyfile, profile)?;
         if cancel.load(Ordering::SeqCst) { return Err(StoreError::Cancelled); }
         let mut vf = Self {
@@ -366,5 +366,15 @@ mod tests {
         let p = d.path().join("v.vault");
         VaultFile::create(Some(&p), None, b"pw", None, P).unwrap();
         assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn create_never_replaces_a_dangling_symlink() {
+        let d = tempfile::tempdir().unwrap();
+        let link = d.path().join("v.vault");
+        std::os::unix::fs::symlink(d.path().join("nowhere"), &link).unwrap();
+        let r = VaultFile::create(Some(&link), None, b"a password of 12+", None, Profile::LowMem);
+        assert!(matches!(r, Err(StoreError::Exists)), "{:?}", r.err());
+        assert!(!d.path().join("nowhere").exists());
     }
 }

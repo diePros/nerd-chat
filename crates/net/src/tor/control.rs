@@ -158,6 +158,11 @@ fn b64_secret(key: &[u8]) -> Zeroizing<Vec<u8>> {
     b
 }
 
+impl Controller<Box<dyn super::Stream>> {
+    /// How long `poll_event` waits for an event.
+    pub fn set_poll_timeout(&mut self, d: std::time::Duration) -> std::io::Result<()> { self.s.set_timeout(Some(d)) }
+}
+
 impl<S: Read + Write> Controller<S> {
     pub fn new(s: S) -> Self { Self { s, buf: Vec::new(), authenticated: false, broken: false } }
     pub fn into_inner(self) -> S { self.s }
@@ -342,6 +347,46 @@ impl<S: Read + Write> Controller<S> {
         let id = r.lines.iter().find_map(|l| l.strip_prefix("ServiceID=")).ok_or_else(|| TorError::Protocol("no ServiceID in ADD_ONION reply".into()))?;
         if id != service_id(expected_pub) { return Err(TorError::Protocol("tor created a different onion address than expected".into())); }
         Ok(id.to_string())
+    }
+
+    /// Host the ONE-SHOT PAIRING service (docs/superpowers/specs/2026-11-09-tor-pairing-spec.md): a v3 onion service WITHOUT client
+    /// authorization (the joiner has no key yet; the pairing code, proven by SPAKE2, is the secret). A separate method on purpose:
+    /// `add_onion` keeps refusing an empty authorization list, so "no auth" can never be reached by accident. `DiscardPK`: this
+    /// process never sees the key. Never `Detach` (the service dies with this control connection), never `NonAnonymous`. One stream
+    /// at a time. Returns the validated service id.
+    pub fn add_public_ephemeral_onion(&mut self, virt_port: u16, target: &Target) -> Result<String, TorError> {
+        let tgt = target.arg()?;
+        let build = |pow: bool| format!("ADD_ONION NEW:ED25519-V3 Flags=DiscardPK,MaxStreamsCloseCircuit MaxStreams=1{} Port={virt_port},{tgt}", if pow { " PoWDefensesEnabled=1" } else { "" });
+        let r = match self.command(&build(true)) {
+            Err(TorError::Rejected { code, .. }) if (500..600).contains(&code) && code != 510 => self.command(&build(false))?,
+            other => other?,
+        };
+        let id = r.lines.iter().find_map(|l| l.strip_prefix("ServiceID=")).ok_or_else(|| TorError::Protocol("no ServiceID in ADD_ONION reply".into()))?;
+        parse_onion_address(id).map_err(|_| TorError::Protocol("tor returned an invalid service id".into()))?;
+        Ok(id.to_string())
+    }
+
+    /// Ask tor for asynchronous events (`HS_DESC`, `CIRC`...). They are read with `poll_event`.
+    pub fn set_events(&mut self, events: &[&str]) -> Result<(), TorError> {
+        if events.iter().any(|e| !e.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')) { return Err(TorError::Other("bad event name".into())); }
+        self.command(&format!("SETEVENTS {}", events.join(" "))).map(|_| ())
+    }
+
+    /// Wait up to the stream's read timeout for one asynchronous (6xx) event; `Ok(None)` = nothing arrived. Anything that is not an
+    /// event is a protocol error. A timeout while NOTHING was buffered does not poison the connection.
+    pub fn poll_event(&mut self) -> Result<Option<Vec<String>>, TorError> {
+        if self.broken { return Err(TorError::Io("control connection is in an unusable state after an earlier error".into())); }
+        if self.buf.is_empty() {
+            let mut chunk = [0u8; 4096];
+            match self.s.read(&mut chunk) {
+                Ok(0) => return self.fail(TorError::Io("control connection closed".into())),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Ok(None),
+                Err(e) => return self.fail(e.into()),
+            }
+        }
+        let r = self.read_reply()?;
+        if (600..700).contains(&r.code) { Ok(Some(r.lines)) } else { self.fail(TorError::Protocol(format!("unexpected reply {} while waiting for an event", r.code))) }
     }
 
     pub fn del_onion(&mut self, id: &str) -> Result<(), TorError> {

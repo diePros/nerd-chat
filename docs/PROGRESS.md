@@ -29,11 +29,12 @@ spelled `Bash` (capital B).
 | 30-31 | (this commit) | review 20 fixes, AGPL LICENSE, README/SECURITY.md, rename to nerd-chat with tooling, cleanup (-90 lines + dead API), review 21 fixes | yes (reviews 20, 21) | yes (static, sandbox-check) | yes, 3/3 live |
 | 33-34 | (this commit) | queued-label fix, manual message saving (SBS5), purge panic, review 22 fixes | yes (review 22) | yes | yes |
 | 35-36 | (this commit) | terminal-loss fix, release prep (--version, scripts/release.sh, RELEASE_TESTING), review 23 fixes (purge never follows links, read-only keyfile, blank-before-shred, bracketed paste) | yes (review 23), fixes applied | yes | yes (net test now uses the tor RAM dir: Ubuntu AppArmor system_tor blocks sockets elsewhere) |
+| 38-39 | ff0f8fc | R12-5 automatic hosting probe at export/pairing (worker thread, 510-only, sticky alert, export blocked during pairing), review 25 fixes, tor_live test made robust (d33ed03) | yes (review 25), fixes applied | yes (static-pie) | chat 3/3 pass; net test passed 6 of 7 runs after the test fix (it failed 5/5 before it, also on the commit before this work: Tor can open and drop an early connection; the one failure left was not captured, suspected slow bootstrap) |
 
 ## Next candidates (privacy first)
 1. Short re-review of cycle 15 fixes (small), together with the next feature.
 2. (done) rotation retry; counter rejected; random port accepted as unneeded.
-3. R12-5: probe hosting capability automatically at export.
+3. (done, cycles 38-39) R12-5: hosting probed automatically at export/pairing when --tor-control is set; review 25 fixed (worker thread, 510 only, export blocked during pairing).
 4. (sandbox done) cargo-fuzz is installed (nightly toolchain added with the user's OK): write fuzz targets for nerd-chat-strip (jpeg/png/text), the bundle/cell/handshake decoders and the vault/store decoders; run them for a while.
 5. (done, cycles 19-20) snow wiping, ml-kem key wipe verified. mlock stays deferred: RLIMIT_MEMLOCK (usually 8 MiB) is far below Argon2's 512 MiB, swap is refused anyway.
 6. cargo-deny (ask first), cargo-vet, CI, cross-machine reproducible build.
@@ -50,3 +51,40 @@ unfixed Medium+; workspace tests, static musl build, repro check and live Tor te
 3. cargo-fuzz target (new tool).
 4. Tails test and professional audit (human).
 Work that needs none of these is continuing: ADD_ONION retry (R15-L1), R8-I7 wasted dials, R12-5 probe at export, random virtual port.
+
+## Cycle 37 (after the Tails success)
+Tails test passed (user). `.deb` added to `scripts/release.sh` (deterministic: two builds give the same sha256; contents checked with `dpkg-deb -c`,
+`--version` works from the extracted binary; not installed, no lintian available). Next: Opus review of the delivery-confirmation work is done (review 24);
+remaining candidates are the fuzz targets, R8-I7, R12-5 and the GUI-core extraction (0.2).
+
+## Cycle 38-39 (2026-11-08/09)
+Done: R12-5 (see tracker review 25), live Tor tests re-run, `docs/REVIEW_PROMPT_VAULT_PATH.md` written and the Opus review of the default vault
+location started (findings go into the tracker as review 26; not yet integrated). Open: re-test R12-5 on Tails (user), review 26 fixes,
+R24-L2 (per-turn text budget, not reachable from the TUI), cross-machine reproducible build, CI, cargo-vet audits, professional audit.
+GUI status 2026-11-09 (late): pairing over Tor is built and PASSES the live test on the real Tor network (two spawned Tors, real screens: link ready ~11 s, paired ~19 s, second dial fails with a clear message; `cargo test -p nerd-chat-app --test live_pairing -- --ignored --nocapture`). Reviews 27 (extraction), 28 (spec), 29 (implementation) are in the tracker. GUI has: first run, unlock/create, contacts, chat, composer from the core's buffer, auto-connect, offline switch, panic, unverified notice, over-the-internet/Wi-Fi/file add flows, files, settings (hide the menu entry), clipboard for the link only. GUI .deb (menu entry + icon) is in scripts/release.sh. Screenshots for unattended runs: `vblank_mode=0 nerd-chat-gui --demo --skip-notice --screenshot out.png --shot-frame 40000` (vsync stalls an unattended window). NOT done: Tails/Whonix test (user), pairing over Tor on Tails (onion-grater), phase-5 leftovers (key rotation and host-anyway buttons, privacy screen), cleaner tests for the GUI binary, a real audit.
+
+GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phase 0 spike DONE (go, report in the same folder), phase 1 core extraction DONE (crate `crates/app`, review 27), phase 2 first GUI shell DONE (`crates/gui`, `cargo build -p nerd-chat-gui`; developer demo: `--features demo` and `nerd-chat-gui --demo --screenshot out.png`). Next: phase 3, pairing over Tor (own spec first), then add-contact flows, unverified notice, parity, packaging.
+
+## Release check (2026-11-09, commit d38683f)
+`scripts/release.sh` builds the static terminal binary, tarball, terminal .deb AND `nerd-chat-gui_0.1.0_amd64.deb` (binary, `/usr/share/applications/nerd-chat.desktop`, scalable icon, docs). The GUI .deb as built on this machine says `Depends: libc6 (>= 2.43)`: it will NOT install on Tails (Debian 12, glibc 2.36). For a portable GUI package build the release on the OLDEST system to support (the script computes the needed glibc itself). Not yet checked: installing the .deb and launching from a real menu, the reproducibility of the GUI build (dynamic glibc), `lintian`.
+
+## GUI parity steps 1-3 (2026-11-09)
+- Contact details: collapsible "Advanced" panel (`App::inspect`, states only, no keys/addresses/names): connection, roles, capability told, saved count, rotation state; buttons "Switch to new keys" (K) and "Host anyway" (h, disabled when impossible).
+- "Hide screen (Ctrl+L)" in the status bar (privacy screen; not a lock); Enter or "Show again" brings it back. Only from the main screen (never over a prompt).
+- Details pane scrolls. Screenshot: docs/superpowers/specs/gui-advanced.png. Still open: purge button with confirmation, alert history in the inspector.
+
+## GUI leftovers (2026-11-09)
+- Settings: "Warnings in this session" (history kept in memory, bounded 30, wiped by panic/purge; `App::alert_history`) and a Purge button behind a confirmation checkbox (same path as Shift+F12).
+- `crates/gui/tests/cleaner.rs`: the file-cleaning helper checks (works, refuses, rlimits, seccomp filter, no_new_privs) now also run against the GUI binary.
+- Portable GUI package: `GUI_BUILD_IMAGE=rust:1-bookworm ./scripts/release.sh` builds the GUI inside Debian 12 (Tails 6 base). The .deb then says `Depends: libc6 (>= 2.35)` instead of 2.43. Two consecutive builds gave identical SHA256SUMS (reproducible, including the terminal binary and both .deb files).
+- Still open: lintian (not installed here), installing the .deb and launching from a real menu, Tails/Whonix tests (owner).
+
+## lintian and a trial of the GUI .deb (2026-11-09)
+- Added man pages (`packaging/nerd-chat.1`, `nerd-chat-gui.1`), a Debian-format `changelog.gz` next to `CHANGELOG.md.gz`, and a lintian override for the static terminal binary. lintian 2.129 now reports only `bogus-mail-host` (the placeholder maintainer `noreply@invalid`, replaced by admin@sebis.net): it needs the owner's real contact address in `scripts/release.sh` (Maintainer line and `deb_changelog`).
+- Trial without root: the .deb was unpacked, `desktop-file-validate` passes, `ldd` finds every library, and the binary built in Debian 12 starts here (first screen shown). A real `apt install` and a launch from the menu are still for the owner (needs sudo).
+
+## BUG FIXED: first run started RAM-only (2026-11-09, found by the owner)
+After the first-run dialog the GUI created the app core WITHOUT the vault path, so nothing was saved (the sidebar said "RAM only", the dialog said otherwise). Fixed in `crates/gui/src/shell.rs` (`path = Some(..)` in the new-vault branch) with a regression test (`first_run_gives_the_app_the_default_vault_path_not_ram_only`, verified to fail without the fix). Lesson: the screenshot demo runs with `--ram`, so no test had covered the real default path. TODO: an end-to-end GUI test that creates a vault under a temporary HOME, closes and reopens it.
+
+## Window icon (2026-11-09)
+On Wayland the compositor finds the icon through the window's app id, which must equal the .desktop file name: the GUI now sets `app_id = "nerd-chat"` (matches `nerd-chat.desktop`, `StartupWMClass=nerd-chat`). Reported by the owner (default Wayland icon showed).

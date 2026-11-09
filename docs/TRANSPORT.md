@@ -78,9 +78,8 @@ The report states for every control port whether its owner check passed (`owner 
   onion service for that contact). Only listeners publish a service, so you are not visible online for contacts that never dial you.
   A new, AUTHENTICATED inbound connection replaces a stale one (strangers fail the handshake and cannot).
 - **Roles come from the bundles (decided: capability bit + explicit opt-in, no timers).** Every bundle (v4, `SBC4`) carries a
-  SIGNED `can_host` bit, set by `--cannot-host` (use it when `--probe-tor --probe-onion` shows that your Tor refuses to host,
-  e.g. a Tails with a restricted control port). The bit WE advertise to a contact is fixed at the first export/pairing with that contact and stored in the vault: roles always use what we told them, whatever flags we run with later. If exactly ONE side can host, that side hosts and the other dials; if both or
-  neither can, the smaller signing key dials. Nobody publishes a service just to find out, and nothing is published after a number
+  SIGNED `can_host` bit. With `--tor-control` it is probed automatically at the first export/pairing with a contact (a throwaway `ADD_ONION`; only the reply 510 means "cannot host" and is shown as a sticky alert; anything else inconclusive cancels the export instead of guessing; the probe runs on a worker thread, Esc cancels). `--cannot-host` forces "cannot" without probing. Our own spawned tor can always host. The bit WE advertise to a contact is fixed at the first export/pairing with that contact and stored in the vault: roles always use what we told them, whatever flags we run with later. If exactly ONE side can host, that side hosts and the other dials; if both or
+  neither can, the smaller signing key dials. No service is published to find out (the automatic probe at the first export/pairing creates a throwaway service and removes it at once; no descriptor is meant to be published, but other controllers of a shared tor can see it for that moment), and nothing is published after a number
   of failed dials any more. The bit is not part of the safety number (it is operational; both sides must compute the same number
   from key material).
 - **Safety nets.** (1) A designated host whose hosting fails anyway (the bit was wrong, or a transient error) flips to dialing and says
@@ -113,3 +112,11 @@ The report states for every control port whether its owner check passed (`owner 
 ## Not done yet
 Pairing over an onion, role negotiation, delivery markers, constant-rate cover traffic, embedded tor binary
 (bundling a static tor into the single file), bridge flags, control password support, idle/cover traffic.
+
+## Pairing over Tor (one-shot public onion service)
+Two devices that share no network pair through Tor: the OFFER side (`T`) hosts a v3 onion service WITHOUT client authorization (the joiner has no key yet; the 10-digit code, proven by SPAKE2, is the secret), the JOIN side (`J`) dials it through SOCKS. Full spec and the review that shaped it: `docs/superpowers/specs/2026-11-09-tor-pairing-spec.md` (section 8), tracker reviews 28 and 29.
+- The service is created with `ADD_ONION NEW:ED25519-V3 Flags=DiscardPK,MaxStreamsCloseCircuit MaxStreams=1 PoWDefensesEnabled=1` on its OWN control connection (never `Detach`): closing that connection (cancel, panic, crash, kill) makes tor remove it. `add_onion`'s refusal of "no client authorization" is untouched; the public form is a separate, named method.
+- The link (the bare 56-character onion id) is shown only after tor reported the descriptor uploaded to two HSDirs (`HS_DESC UPLOADED`), or after a fixed 60 s when tor sends no such events. The offer then lives 10 minutes at most and accepts ONE connection; an unverified local client does not consume it.
+- **The link is presence-sensitive, not secret:** whoever holds it during the 10 minutes can make your Tor build rendezvous circuits and can burn the offer; send it only to your partner. After removal the descriptor can stay on HSDirs for up to ~3 hours (it shows that an offer with this id existed). While an offer is open the app is online, visible to all contacts.
+- Failures on the offer side feed a SEPARATE lockout and only when a well-formed SPAKE2 message arrived (a real guess); connect-then-close burns the offer without locking the user out. A real wrong guess raises the alert "someone used your pairing link and did not know the code".
+- Tails/Whonix: a filtered control port may refuse the public `ADD_ONION` (510); the screen then says to ask the OTHER person to create the code. Joining needs only SOCKS. Untested on real Tails/Whonix.

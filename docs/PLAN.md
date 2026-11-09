@@ -71,7 +71,9 @@ crates/core      # protocol, bundle format, Noise+PQ handshake, cells
 crates/vault     # Argon2id + AEAD vault, zeroize/mlock
 crates/exchange  # file/QR/PAKE local exchange (BLE via bluer/btleplug, LAN)
 crates/net       # transport trait; embedded-tor driver; system-tor driver; bridge/proxy cfg
-crates/tui       # ratatui front end (core stays UI-agnostic for later GUI)
+crates/app       # UI-agnostic application core (state machine, vault, pairing, panic/purge): shared by the front ends
+crates/tui       # terminal front end (ratatui) on top of crates/app
+crates/gui       # graphical front end (egui) on top of crates/app
 bin/nerd-chat     # single static binary: embeds tor, loads via memfd
 docs/THREAT_MODEL.md, docs/PROTOCOL.md
 ```
@@ -112,7 +114,7 @@ Honest limit: stripping cannot remove information that is in the content itself 
 
 ## Verification
 - `cargo test` + `cargo fuzz` on bundle/cell/handshake parsers; known-answer tests for KDF/AEAD.
-- `ldd bin/nerd-chat` → "not a dynamic executable"; run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).
+- `ldd bin/nerd-chat` → "statically linked" (or "not a dynamic executable"); run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).
 - End-to-end: two VMs, exchange bundles by file, chat over Tor; `tcpdump` confirms only Tor traffic leaves the host; confirm no plaintext/keys on disk (`strings`, entropy check of vault, RAM-only mode leaves nothing).
 - Wrong-password and tamper tests (vault must fail closed); reproducible-build hash match across two machines.
 

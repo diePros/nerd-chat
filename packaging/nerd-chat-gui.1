@@ -1,0 +1,12 @@
+.TH NERD-CHAT-GUI 1 "2026-11-09" "nerd-chat 0.1" "User Commands"
+.SH NAME
+nerd-chat-gui \- serverless chat over Tor onion services (graphical version)
+.SH SYNOPSIS
+.B nerd-chat-gui
+[\fB\-\-vault\fR \fIPATH\fR | \fB\-\-ram\fR] [\fB\-\-low\-mem\fR] [\fB\-\-tor\-control\fR \fIADDR\fR] [\fB\-\-tor\-socks\fR \fIADDR\fR] [\fB\-\-cannot\-host\fR] [\fB\-\-allow\-swap\fR]
+.SH DESCRIPTION
+The graphical front end of nerd\-chat. It starts from the application menu, connects by itself and reconnects automatically. Messages exist only in memory. There is no screen\-reader support on purpose: a screen reader would receive a copy of every message. Unaudited software: read SECURITY.md in /usr/share/doc/nerd-chat-gui before relying on it.
+.PP
+The options have the same meaning as in nerd\-chat(1). The panic button (or F12) wipes everything and exits.
+.SH SEE ALSO
+nerd-chat(1)

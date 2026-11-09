@@ -174,6 +174,20 @@ pub fn safety_number(a: &Bundle, b: &Bundle) -> String {
 mod tests {
     use super::*;
 
+    /// docs/EXCHANGING_CONTACTS.md promises that a contact file holds no private key: no secret byte string of the identity may occur in it.
+    #[test]
+    fn an_exported_bundle_contains_no_secret_key_material() {
+        let id = ContactIdentity::generate();
+        let enc = Bundle::from_identity(&id).encode(&id);
+        let has = |needle: &[u8]| enc.windows(needle.len()).any(|w| w == needle);
+        let secrets = id.secret_bytes(); // sign seed 32 | dh 32 | ML-KEM seed 64 | onion seed 32 | client-auth 32
+        for (name, chunk) in [("sign", &secrets[0..32]), ("dh", &secrets[32..64]), ("kem seed a", &secrets[64..96]), ("kem seed b", &secrets[96..128]), ("onion seed", &secrets[128..160]), ("auth", &secrets[160..192])] {
+            assert!(!has(chunk), "the {name} secret appears in the exported bundle");
+        }
+        assert!(!has(&id.onion_expanded_secret()[..]) && !has(&id.auth_secret_bytes()[..]));
+        assert_eq!(enc.len(), BUNDLE_LEN, "exactly the documented fields, nothing appended");
+    }
+
     #[test]
     fn roundtrip_and_tamper() {
         let id = ContactIdentity::generate();
