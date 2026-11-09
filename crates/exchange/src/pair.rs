@@ -36,6 +36,10 @@ const ID_B: &[u8] = b"seburity-pair-v1-join";
 pub const CODE_DIGITS: usize = 10;
 pub const OFFER_TTL: Duration = Duration::from_secs(300);
 pub const PAIR_DEADLINE: Duration = Duration::from_secs(60);
+/// Pairing over Tor: the offer may live this long AT MOST (counted from the moment the link is published), and one protocol run gets
+/// more time (circuits are slow).
+pub const REMOTE_OFFER_MAX_TTL: Duration = Duration::from_secs(600);
+pub const REMOTE_PAIR_DEADLINE: Duration = Duration::from_secs(90);
 
 /// A byte stream with a settable I/O timeout (TCP, Unix socket, BLE wrapper...).
 pub trait PairStream: Read + Write {
@@ -115,6 +119,30 @@ impl PairingOffer {
         Ok((Self { code, expires: Instant::now() + OFFER_TTL, lockout, deadline: PAIR_DEADLINE, can_host: true }, shown))
     }
 
+    /// An offer for a pairing over Tor (docs/superpowers/specs/2026-11-09-tor-pairing-spec.md). Create it when the link is PUBLISHED: the TTL
+    /// counts from now (capped at `REMOTE_OFFER_MAX_TTL`). Pass a lockout that is SEPARATE from the local pairing's: an attacker who holds
+    /// the link must not be able to lock the user out of every other way of pairing.
+    pub fn generate_remote(lockout: Arc<Lockout>, ttl: Duration) -> Result<(Self, Zeroizing<String>), ExchangeError> {
+        let (mut o, shown) = Self::generate_in(lockout)?;
+        o.expires = Instant::now() + ttl.min(REMOTE_OFFER_MAX_TTL);
+        o.deadline = REMOTE_PAIR_DEADLINE;
+        Ok((o, shown))
+    }
+
+    /// Like `accept`, for the remote offer: consumes the offer, but a failure only counts toward the lockout when a well-formed SPAKE2
+    /// message arrived (a real guess at the code). Connect-then-close and garbage burn the offer without growing the lockout. The error
+    /// carries `true` when it was a real guess.
+    pub fn accept_remote<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, (ExchangeError, bool)> {
+        if Instant::now() >= self.expires { return Err((ExchangeError::Expired, false)); }
+        self.lockout.guard().map_err(|e| (e, false))?;
+        let got = std::cell::Cell::new(false);
+        let r = run(Role::A, s, me, &self.code, self.deadline, self.can_host, None, &got);
+        match r {
+            Ok(p) => { self.lockout.ok(); Ok(p) }
+            Err(e) => { if got.get() { self.lockout.fail(); } Err((e, got.get())) }
+        }
+    }
+
     pub fn expires_in(&self) -> Duration { self.expires.saturating_duration_since(Instant::now()) }
     pub fn with_deadline(mut self, d: Duration) -> Self { self.deadline = d; self }
     /// Our capability, carried in the bundle we send (false = our Tor cannot host onion services).
@@ -124,7 +152,7 @@ impl PairingOffer {
     pub fn accept<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
         if Instant::now() >= self.expires { return Err(ExchangeError::Expired); }
         self.lockout.guard()?;
-        let r = run(Role::A, s, me, &self.code, self.deadline, self.can_host, None);
+        let r = run(Role::A, s, me, &self.code, self.deadline, self.can_host, None, &std::cell::Cell::new(false));
         if r.is_ok() { self.lockout.ok() } else { self.lockout.fail() }
         r
     }
@@ -152,7 +180,7 @@ impl PairingJoin {
 
     pub fn join<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
         self.lockout.guard()?;
-        let r = run(Role::B, s, me, &self.code, self.deadline, self.can_host, None);
+        let r = run(Role::B, s, me, &self.code, self.deadline, self.can_host, None, &std::cell::Cell::new(false));
         if r.is_ok() { self.lockout.ok() } else { self.lockout.fail() }
         r
     }
@@ -244,7 +272,7 @@ fn check_point(msg: &[u8]) -> Result<(), ExchangeError> {
 /// I/O order: B (the joiner) always speaks first, so a listener stays SILENT until a joiner
 /// writes (a port scanner gets no Nerd-chat banner). Outcome note: the last message is A's confirmation
 /// cell, so if it is lost A may have committed while B failed; users should confirm on both sides.
-fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, can_host: bool, claimed: Option<Vec<u8>>) -> Result<Paired, ExchangeError> {
+fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[u8; CODE_DIGITS], deadline: Duration, can_host: bool, claimed: Option<Vec<u8>>, got_msg: &std::cell::Cell<bool>) -> Result<Paired, ExchangeError> {
     let mut b = Bounded { s: stream, end: Instant::now() + deadline };
     let pw = Password::new(&code[..]);
     let (st, my_msg) = match role {
@@ -258,6 +286,7 @@ fn run<S: PairStream>(role: Role, stream: &mut S, me: &ContactIdentity, code: &[
     // 1. PAKE messages
     let peer_msg = swap(&mut b, &my_msg)?;
     check_point(&peer_msg)?;
+    got_msg.set(true); // a well-formed SPAKE2 message arrived: from here on a failure is a real guess
     let k = Zeroizing::new(st.finish(&peer_msg).map_err(|_| ExchangeError::PairingFailed)?);
     let (ma, mb) = if role == Role::A { (&my_msg, &peer_msg) } else { (&peer_msg, &my_msg) };
     let k_conf = kdf(&k, b"conf", ma, mb);
@@ -469,7 +498,7 @@ mod tests {
         let alice = ContactIdentity::generate();
         let ta = thread::spawn(move || o.accept(&mut sa, &alice).err());
         let mallory = ContactIdentity::generate();
-        let r = run(Role::B, &mut sm, &mallory, b"5555555555", Duration::from_secs(10), true, Some(carol_enc));
+        let r = run(Role::B, &mut sm, &mallory, b"5555555555", Duration::from_secs(10), true, Some(carol_enc), &std::cell::Cell::new(false));
         assert!(r.is_err());
         assert_eq!(ta.join().unwrap(), Some(ExchangeError::ProofFailed));
     }
@@ -485,5 +514,68 @@ mod tests {
         let (_, d2) = PairingOffer::generate_in(l).unwrap();
         assert_eq!(d1.len(), CODE_DIGITS + 1);
         assert_ne!(*d1, *d2);
+    }
+
+    // ---------------------------------------------------------------- remote (Tor) offers, spec 2026-11-09-tor-pairing-spec.md
+    fn remote_offer(code: &str, l: Arc<Lockout>) -> PairingOffer {
+        let (mut o, _) = PairingOffer::generate_remote(l.clone(), Duration::from_secs(600)).unwrap();
+        o.code = PairingJoin::parse_in(code, l).unwrap().code; // test-only: fixed code
+        o.with_deadline(Duration::from_secs(5))
+    }
+
+    #[test]
+    fn a_remote_offer_pairs_like_a_local_one_and_its_ttl_is_capped() {
+        let (mut sa, mut sb) = UnixStream::pair().unwrap();
+        let (a, b) = (ContactIdentity::generate(), ContactIdentity::generate());
+        let (a2, b2) = (clone_id(&a), clone_id(&b));
+        let offer = remote_offer("2468013579", lo());
+        let join = PairingJoin::parse_in("2468013579", lo()).unwrap().with_deadline(Duration::from_secs(5));
+        let ta = thread::spawn(move || offer.accept_remote(&mut sa, &a2));
+        let tb = thread::spawn(move || join.join(&mut sb, &b2));
+        let (ra, rb) = (ta.join().unwrap().map_err(|e| e.0).unwrap(), tb.join().unwrap().unwrap());
+        assert_eq!(ra.safety_number, rb.safety_number);
+        let (o, _) = PairingOffer::generate_remote(lo(), Duration::from_secs(36000)).unwrap();
+        assert!(o.expires_in() <= REMOTE_OFFER_MAX_TTL, "a remote offer lives at most 10 minutes");
+        assert_eq!(o.deadline, REMOTE_PAIR_DEADLINE);
+    }
+
+    #[test]
+    fn an_expired_remote_offer_is_refused_without_a_guess() {
+        let (mut sa, _sb) = UnixStream::pair().unwrap();
+        let (o, _) = PairingOffer::generate_remote(lo(), Duration::ZERO).unwrap();
+        let e = o.accept_remote(&mut sa, &ContactIdentity::generate()).err().unwrap();
+        assert_eq!(e, (ExchangeError::Expired, false));
+    }
+
+    #[test]
+    fn connect_then_close_and_garbage_burn_the_offer_but_never_grow_the_lockout() {
+        let l = lo();
+        for i in 0..6 {
+            let (mut sa, sb) = UnixStream::pair().unwrap();
+            let offer = remote_offer("1357924680", l.clone());
+            if i % 2 == 0 { drop(sb); } else { let mut sb = sb; std::io::Write::write_all(&mut sb, &[0, 5, 1, 2, 3, 4, 5]).unwrap(); drop(sb); }
+            let e = offer.accept_remote(&mut sa, &ContactIdentity::generate()).err().unwrap();
+            assert!(!e.1, "attempt {i}: nothing was guessed ({:?})", e.0);
+        }
+        assert_eq!(l.remaining(), 0, "an attacker who only has the link must not lock the user out");
+        assert!(PairingOffer::generate_remote(l, Duration::from_secs(60)).is_ok());
+    }
+
+    #[test]
+    fn real_wrong_guesses_do_count_and_end_in_a_lockout() {
+        let l = lo();
+        for _ in 0..3 {
+            let (mut sa, mut sb) = UnixStream::pair().unwrap();
+            let (a, b) = (ContactIdentity::generate(), ContactIdentity::generate());
+            let offer = remote_offer("1111111111", l.clone());
+            let join = PairingJoin::parse_in("2222222222", lo()).unwrap().with_deadline(Duration::from_secs(5));
+            let ta = thread::spawn(move || offer.accept_remote(&mut sa, &a));
+            let tb = thread::spawn(move || { let r = join.join(&mut sb, &b); drop(sb); r });
+            let e = ta.join().unwrap().err().unwrap();
+            assert!(e.1, "a wrong code is a real guess");
+            let _ = tb.join();
+        }
+        assert!(matches!(PairingOffer::generate_remote(l.clone(), Duration::from_secs(60)), Err(ExchangeError::Locked(_))), "three real guesses lock the REMOTE lockout");
+        assert_eq!(lo().remaining(), 0, "the local pairing lockout is a different object");
     }
 }
