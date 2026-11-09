@@ -260,6 +260,12 @@ impl Bridge {
                 self.app.input = "yes".to_string(); self.app.handle(Key::Enter);
                 if self.app.contacts_len() >= before { return Err("the contact was NOT deleted: see the status line"); }
             }
+            // forget the keys of one contact so that it can be paired again (the phone shows its own confirmation first)
+            "repair_contact" => {
+                if !self.in_main() { return Err(NOT_NOW); }
+                self.run("select", arg)?;
+                if !self.app.repair_selected() { return Err("nothing was changed: see the status line"); }
+            }
             "cancel" => { if !matches!(self.app.screen, Screen::Prompt(_)) || self.app.locked { return Err("nothing to cancel"); } self.app.handle(Key::Esc); }
             "verify" => {
                 if self.app.screen != Screen::Verify { return Err("no verification is open"); }
@@ -269,7 +275,8 @@ impl Bridge {
                 if !self.in_main() || !self.app.pairing_waiting() { return Err("no pairing is waiting"); }
                 self.ensure_normal(); self.app.handle(Key::Char('P'));
                 if self.app.screen == Screen::Prompt(Prompt::InPerson) {
-                    self.app.input = if arg.as_str() == "1" { "y" } else { "n" }.to_string();
+                    // "1" yes, "0" no, "x" discard (the other side did not finish: save nothing)
+                    self.app.input = match arg.as_str() { "1" => "y", "x" => "x", _ => "n" }.to_string();
                     self.app.handle(Key::Enter);
                 }
             }

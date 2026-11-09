@@ -26,10 +26,10 @@ import app.sineloco.model.AppState
 @Composable
 fun PairScreen(
     state: AppState, onOffer: (name: String) -> Unit, onJoin: (name: String, link: String, code: CharArray) -> Unit,
-    onCancel: () -> Unit, onCopy: (String) -> Unit, initialTab: Int = 0,
+    onCancel: () -> Unit, onCopy: (String) -> Unit, initialTab: Int = 0, existingName: String? = null,
 ) {
     var tab by remember { mutableIntStateOf(initialTab) }
-    var name by remember { mutableStateOf("") }
+    var name by remember(existingName) { mutableStateOf(existingName ?: "") } // pairing AGAIN: the contact exists, its name is fixed
     var link by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
     var started by remember { mutableStateOf(false) }
@@ -49,7 +49,7 @@ fun PairScreen(
                 Text("Send the link by any channel. Tell the code by phone or in person: a DIFFERENT channel. The link is useless without the code.", color = SineTheme.colors.muted)
                 if (offer == null) {
                     if (!started) {
-                        SecureField(name, { name = it }, "Contact name (only you see it)", modifier = Modifier.fillMaxWidth())
+                        if (existingName == null) SecureField(name, { name = it }, "Contact name (only you see it)", modifier = Modifier.fillMaxWidth()) else Text("Pairing again with $existingName", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                         Button(onClick = { started = true; onOffer(name) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Create link and code") }
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp); Spacer(Modifier.width(12.dp)); Text("Waiting for Tor to publish the pairing service…", color = SineTheme.colors.muted) }
@@ -69,7 +69,7 @@ fun PairScreen(
                 }
             } else {
                 Text("Paste the link you received and type the code you were told.", color = SineTheme.colors.muted)
-                SecureField(name, { name = it }, "Contact name (only you see it)", modifier = Modifier.fillMaxWidth())
+                if (existingName == null) SecureField(name, { name = it }, "Contact name (only you see it)", modifier = Modifier.fillMaxWidth()) else Text("Pairing again with $existingName", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                 SecureField(link, { link = it }, "Link (sineloco:pair/…)", singleLine = false, maxLines = 3, modifier = Modifier.fillMaxWidth())
                 SecureField(code, { code = it }, "Code (10 digits)", numeric = true, secret = true, modifier = Modifier.fillMaxWidth())
                 if (state.status.isNotEmpty() && state.statusIsError) Text(state.status, color = SineTheme.colors.danger)

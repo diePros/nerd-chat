@@ -37,6 +37,8 @@ fun SineApp(
     var palette by remember { mutableStateOf(initialPalette) }
     var mode by remember { mutableStateOf(initialMode) }
     var dest by remember { mutableStateOf<Dest>(Dest.Main(startAt ?: 0)) }
+    var pairAgain by remember { mutableStateOf<String?>(null) } // in memory only: the contact whose keys were just forgotten, to pair with again
+    LaunchedEffect(dest) { if (dest != Dest.Main(1)) pairAgain = null }
     val st by backend.state.collectAsState()
 
     // a wipe (panic or purge) ends the process; leaving Ready for any other reason shows the lock screen again from the list
@@ -68,9 +70,9 @@ fun SineApp(
                                 when (d.tab) {
                                     0 -> ChatListScreen(st.chats, st.tor, st.online, onOpen = { backend.open(it); dest = Dest.Chat(it) }, onPair = { dest = Dest.Main(1) }, onLock = panic)
                                     1 -> PairScreen(st,
-                                        onOffer = { name -> backend.addContact(name); backend.startOffer() },
-                                        onJoin = { name, link, code -> backend.addContact(name); backend.joinWithLink(link, code) },
-                                        onCancel = backend::cancelPairing, onCopy = onCopy)
+                                        onOffer = { name -> if (pairAgain == null) backend.addContact(name); backend.startOffer() },
+                                        onJoin = { name, link, code -> if (pairAgain == null) backend.addContact(name); backend.joinWithLink(link, code) },
+                                        onCancel = backend::cancelPairing, onCopy = onCopy, existingName = pairAgain)
                                     else -> SettingsScreen(palette, mode, st.online, st.tor, st.persist,
                                         onPalette = { palette = it; onThemeChanged(it, mode) }, onMode = { mode = it; onThemeChanged(palette, it) },
                                         onOnline = backend::setOnline, onPersist = backend::setPersist, onLock = panic, onPurge = { backend.purge() })
@@ -86,12 +88,12 @@ fun SineApp(
                             ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) }, persist = st.persist)
                         } ?: run { dest = Dest.Main(0) }
                         is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify, onDelete = { backend.deleteContact(c.id); dest = Dest.Main(0) })
+                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify, onDelete = { backend.deleteContact(c.id); dest = Dest.Main(0) }, onPairAgain = { backend.repairContact(c.id); pairAgain = c.name; dest = Dest.Main(1) })
                         } ?: run { dest = Dest.Main(0) }
                     }
                 }
             }
-            if (st.pairingWaiting) InPersonDialog(onAnswer = backend::answerInPerson)
+            if (st.pairingWaiting) InPersonDialog(onAnswer = backend::answerInPerson, onDiscard = backend::discardPairing)
         }
     }
 }
@@ -118,12 +120,14 @@ private fun AlertBanner(text: String, more: Int, onAck: () -> Unit) {
 
 /** The question the core asks after a pairing: the answer decides the trust level (a "yes" for a code that travelled over a weak channel would be a lie). */
 @Composable
-private fun InPersonDialog(onAnswer: (Boolean) -> Unit) {
+private fun InPersonDialog(onAnswer: (Boolean) -> Unit, onDiscard: () -> Unit) {
     AlertDialog(
         onDismissRequest = { onAnswer(false) },
         title = { Text("Pairing finished") },
-        text = { Text("Did you exchange the code in person or by a voice call you trust? If it travelled in a message, answer No: you can verify the safety number later.") },
-        confirmButton = { TextButton(onClick = { onAnswer(true) }) { Text("Yes, in person") } },
-        dismissButton = { TextButton(onClick = { onAnswer(false) }) { Text("No") } },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Did you exchange the code in person or by a voice call you trust? If it travelled in a message, answer No: you can verify the safety number later.")
+            Text("First look at the OTHER device: it must also say that pairing finished. If it shows an error, choose Discard here and pair again (the last message of a pairing can get lost, then only one side has finished).", color = SineTheme.colors.muted, fontSize = 13.sp)
+        } },
+        confirmButton = { Row { TextButton(onClick = onDiscard) { Text("Discard") }; TextButton(onClick = { onAnswer(false) }) { Text("No") }; TextButton(onClick = { onAnswer(true) }) { Text("Yes, in person") } } },
     )
 }

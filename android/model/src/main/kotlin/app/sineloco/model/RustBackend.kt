@@ -75,6 +75,8 @@ class RustBackend(
     override fun lock() { op("lock") }
     override fun goOfflineNow() { op("offline_now") }
     override fun refresh() { op("snapshot") }
+    override fun repairContact(contactId: Int) { op("repair_contact", text(contactId.toString())) }
+    override fun discardPairing() { op("in_person", text("x")) }
     override fun deleteContact(contactId: Int) { op("delete_contact", text(contactId.toString())) }
     override fun networkChanged(up: Boolean) { op("net", text(if (up) "up" else "down")) }
     override fun panicBlocking(timeoutMillis: Long) {

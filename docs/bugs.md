@@ -29,3 +29,12 @@
 **Not fixed, need more information:**
 - *stuck after in person check*: I could not find it by reading the code and have no repro. What exactly do you see (which side: the one that shows the link or the one that enters it; does the dialog stay, the screen freeze, or does the contact not appear)? Was the app locked or in the background when the pairing finished?
 - *implementation of other pairing options* (file, local IP, QR): not built. On the phone only the over-Tor link+code pairing exists. File and local-IP pairing exist in the core and the terminal/desktop apps (e/i, l/c) but need Android screens; QR needs a camera permission and a scanner/encoder, so it is a bigger decision.
+
+## One-sided pairing (reported: TUI + Android; Android thought it was paired, the TUI had no bundle, no way out)
+Cause (known and documented in `crates/exchange/src/pair.rs`): the LAST message of a pairing is the offering side's confirmation, so if it is lost, the offering side has finished and the joining side has failed. The Android app then held a peer key for the contact and refused to pair it again ("already has a peer key"), and the phone had no way to delete a contact.
+Fixed:
+- the in-person question now has a THIRD answer, **Discard** (Android button, TUI/GUI prompt answer `x`): nothing is saved and the contact stays unpaired; the dialog tells you to look at the other device first;
+- contact details: **Pair again** forgets the contact's keys, gives it FRESH keys of our own (the old half-pairing holds our old bundle and onion address) and goes straight to the pairing screen for that contact; name and conversation stay;
+- **Remove this contact** (see above);
+- the failure message on the side that failed now says what to do on the other one.
+Not changed: the protocol still cannot make both sides finish atomically (two-generals problem); the TUI has no "pair again" key yet (delete the contact and add it again there).

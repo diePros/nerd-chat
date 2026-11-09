@@ -31,6 +31,12 @@ interface ChatBackend {
     /** The phone's network went away (`false`) or came back (`true`): with it gone tor's network is switched off, coming back is delayed by a random few seconds. */
     fun networkChanged(up: Boolean) {}
 
+    /** Forget the keys of a contact (and give it fresh keys of our own) so that it can be paired AGAIN; name and conversation stay. For a pairing that only finished on one side. The caller has asked the user to confirm. */
+    fun repairContact(contactId: Int) {}
+
+    /** Throw away a finished pairing without saving it (the other side did not finish). Answer of the in-person question, third choice. */
+    fun discardPairing() {}
+
     /** Delete a contact and everything kept about it (keys, conversation, history). The caller has already asked the user to confirm. */
     fun deleteContact(contactId: Int) {}
 

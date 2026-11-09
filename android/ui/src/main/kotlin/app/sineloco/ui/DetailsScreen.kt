@@ -24,7 +24,9 @@ import app.sineloco.model.Link
 
 /** The "nerd panel" of the desktop GUI, for one contact: safety number, connection, address, role. */
 @Composable
-fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, onStartVerify: () -> Unit, onConfirmVerify: (Boolean) -> Unit, onDelete: () -> Unit = {}) {
+fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, onStartVerify: () -> Unit, onConfirmVerify: (Boolean) -> Unit, onDelete: () -> Unit = {}, onPairAgain: () -> Unit = {}) {
+    var confirmRepair by remember { mutableStateOf(false) }
+    if (confirmRepair) RepairDialog(contact.name, onConfirm = { confirmRepair = false; onPairAgain() }, onCancel = { confirmRepair = false })
     var confirmDelete by remember { mutableStateOf(false) }
     if (verifyNumber != null) VerifyDialog(verifyNumber, onConfirmVerify)
     if (confirmDelete) DeleteDialog(contact.name, onConfirm = { confirmDelete = false; onDelete() }, onCancel = { confirmDelete = false })
@@ -57,6 +59,7 @@ fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, o
                 if (contact.onionShort.isNotEmpty()) Row3("Address", contact.onionShort)
                 Row3("Role", if (contact.weHost) "You host for this contact while online" else "You only dial this contact")
             }
+            if (contact.paired) androidx.compose.material3.OutlinedButton(onClick = { confirmRepair = true }, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("Pair again…") }
             androidx.compose.material3.OutlinedButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("Remove this contact", color = SineTheme.colors.danger) }
         }
     }
@@ -73,6 +76,17 @@ private fun VerifyDialog(number: String, onResult: (Boolean) -> Unit) {
         } },
         confirmButton = { TextButton(onClick = { onResult(true) }) { Text("They match") } },
         dismissButton = { TextButton(onClick = { onResult(false) }) { Text("They differ") } },
+    )
+}
+
+@Composable
+private fun RepairDialog(name: String, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Pair again with $name?") },
+        text = { Text("Use this when pairing only worked on ONE of the two devices. This phone forgets $name's keys and makes new keys of its own for this contact; the name and the conversation stay. Both of you then pair again.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Pair again") } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Keep") } },
     )
 }
 

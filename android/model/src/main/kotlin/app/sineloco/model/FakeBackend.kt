@@ -37,6 +37,8 @@ class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true, pe
     }
 
     override fun deleteContact(contactId: Int) { s.update { st -> st.copy(chats = st.chats.filter { it.contact.id != contactId }, messages = st.messages - contactId) } }
+    override fun repairContact(contactId: Int) { s.update { st -> st.copy(chats = st.chats.map { if (it.contact.id == contactId) it.copy(contact = it.contact.copy(paired = false, trust = Trust.Unverified)) else it }) } }
+    override fun discardPairing() { s.update { it.copy(pairingWaiting = false, torOffer = null) } }
     override fun goOfflineNow() { s.value = s.value.copy(online = false, tor = TorState.Off) }
     override fun lock() { if (s.value.stage == Stage.Ready) s.value = s.value.copy(stage = Stage.Unlock, locked = true) }
     override fun panic() { panicked = true; s.value = AppState(stage = Stage.Wiped) }

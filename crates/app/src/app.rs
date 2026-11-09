@@ -1769,11 +1769,37 @@ impl App {
             Prompt::JoinCode(addr) => { let _ = text; self.start_join(addr) }
             Prompt::InPerson => {
                 let Some((id, contact, sn)) = self.pending_pair.take() else { return };
+                // "x": DISCARD. The last message of a pairing is the offering side's, so it can be lost: then THIS side finished and the other one failed. The user sees that on the
+                // other device and throws this half away; nothing is saved, the contact stays unpaired and can be paired again at once.
+                if text.trim().eq_ignore_ascii_case("x") { drop(contact); self.ok("Discarded: nothing was saved. Pair again."); return; }
                 let mut contact = contact;
                 if !text.trim().eq_ignore_ascii_case("y") { contact.downgrade_to_unverified(); }
                 self.finish_pair(id, contact, sn);
             }
         }
+    }
+
+    /// Forget the keys of the selected contact so that it can be paired AGAIN (name, conversation and history stay): for a pairing that only finished on one side, or a contact whose
+    /// other side lost its keys. The engine stops serving it; nothing of the old peer is kept. The caller has asked the user to confirm.
+    pub fn repair_selected(&mut self) -> bool {
+        let Some(i) = self.vf.as_ref().and_then(|v| (self.sel < v.store.contacts.len()).then_some(self.sel)) else { self.err(self.say(NO_CONTACT, NO_CONTACT_GUI)); return false };
+        let (id, had_peer) = { let c = &self.vf().store.contacts[i]; (c.id, c.peer.is_some()) };
+        if !had_peer { self.err("This contact is not paired yet."); return false; }
+        if let Some(e) = &self.engine { e.remove(id); }
+        self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); self.inbox.remove(&id);
+        let c = &mut self.vf().store.contacts[i];
+        // FRESH keys of our own for this contact as well: whoever completed the old pairing (the other half of a one-sided pairing, or someone who should never have) holds our old
+        // bundle, our onion address and the client-authorisation key made from it. The new pairing must not be reachable through any of that.
+        let old_identity = std::mem::replace(&mut c.identity, ContactIdentity::generate());
+        let saved = (c.peer.take(), c.trust, c.adv_can_host.take(), c.next_transport.take(), c.peer_old.take(), old_identity);
+        c.trust = Trust::Unverified;
+        if !self.save() {
+            let c = &mut self.vf().store.contacts[i];
+            c.peer = saved.0; c.trust = saved.1; c.adv_can_host = saved.2; c.next_transport = saved.3; c.peer_old = saved.4; c.identity = saved.5;
+            return false;
+        }
+        self.ok("The keys of this contact were forgotten. Pair again.");
+        true
     }
 
     // ---------- verify ----------
@@ -2353,7 +2379,7 @@ impl App {
                     }
                     Err(ExchangeError::PairingFailed | ExchangeError::ProofFailed) =>
                         self.err("PAIRING FAILED: wrong code or someone interfered. The code is burned; start over with a fresh one."),
-                    Err(e) => self.err(format!("Pairing failed: {e}")),
+                    Err(e) => { let tail = self.say("If the other device says it PAIRED, answer its question with x (discard) there and pair again: the last message of a pairing can get lost.", "If the other device says it PAIRED, choose Discard there and pair again: the last message of a pairing can get lost."); self.err(format!("Pairing failed: {e}. {tail}")); }
                 }
             }
         }
@@ -3971,6 +3997,38 @@ mod tests {
         a.err("WARNING: no counter file"); a.poll();
         a.status_seen.1 = Instant::now() - Duration::from_secs(3600); a.poll();
         assert!(a.status.starts_with("WARNING"), "a warning is not expired");
+    }
+
+    #[test]
+    fn pairing_again_forgets_the_peer_and_gives_the_contact_fresh_keys_of_our_own() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        add_peer(&mut a, "bob");
+        let before = a.vf.as_ref().unwrap().store.contacts[0].identity.onion_public();
+        a.sel = 0;
+        assert!(a.repair_selected(), "{}", a.status);
+        let c = &a.vf.as_ref().unwrap().store.contacts[0];
+        assert!(c.peer.is_none() && c.trust == Trust::Unverified && c.name == "bob");
+        assert_ne!(c.identity.onion_public(), before, "our old onion address and keys are not reused");
+        assert!(!a.repair_selected(), "an unpaired contact has nothing to forget");
+    }
+
+    #[test]
+    fn discarding_a_finished_pairing_saves_nothing_and_leaves_the_contact_pairable() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        add(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        let other = ContactIdentity::generate();
+        let mine = Bundle::from_identity(&a.vf.as_ref().unwrap().store.contacts[0].identity);
+        let ic = ImportedContact::from_file(Bundle::from_identity(&other));
+        let _ = mine;
+        a.pending_pair = Some((id, ic, "11111 22222".into()));
+        a.handle(Key::Char('P'));
+        assert_eq!(a.screen, Screen::Prompt(Prompt::InPerson));
+        a.input = "x".into(); a.handle(Key::Enter);
+        assert!(a.pending_pair.is_none() && a.vf.as_ref().unwrap().store.contacts[0].peer.is_none(), "nothing was saved: {}", a.status);
+        assert!(a.status.contains("Discarded"));
     }
 
     #[test]
