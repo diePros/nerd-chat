@@ -31,6 +31,11 @@ Only after the GUI exists. Known constraints to solve first, nothing built:
 - no swap/`mlock` story comparable to a live Linux; panic wipe semantics differ (process death vs RAM remanence),
 - distribution outside the big app stores (F-Droid style, reproducible builds, signed releases).
 
+## Candidates from the Session comparison (docs/COMPARISON_SESSION.md, not scheduled)
+Offline delivery without a stranger (encrypted vault outbox first, an optional self-hosted mailbox onion service later), rekeying inside a long
+connection, expiry for what we do keep, an encrypted vault export for a new phone, plain-language background-mode explanations (no FCM),
+audit readiness with a written "decisions we will not trade" note, pairwise fan-out if groups ever come, and keeping Tor swappable.
+
 ## Smaller UI ideas (after the overhaul)
 Idle auto-lock for the privacy screen, an optional password-protected privacy screen, per-contact drafts, in-line cursor editing of the draft,
 search in the conversation.
