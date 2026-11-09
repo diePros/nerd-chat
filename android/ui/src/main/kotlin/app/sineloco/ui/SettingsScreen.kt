@@ -50,6 +50,7 @@ fun SettingsScreen(
                 is TorState.Failed -> Text("Tor could not start: ${tor.reason}", color = SineTheme.colors.danger, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
                 is TorState.Bootstrapping -> Text("Tor is starting: ${tor.percent}%", color = SineTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
                 TorState.Ready -> Text("Tor is connected.", color = SineTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
+                TorState.NoNetwork -> Text("No network. Tor is paused and resumes by itself when one is back.", color = SineTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
                 TorState.Off -> {}
             }
             PersistPicker(persist, onPersist)

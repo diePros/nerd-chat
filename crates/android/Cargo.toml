@@ -18,6 +18,7 @@ sine-loco-store = { path = "../store" }
 sine-loco-vault = { path = "../vault" }
 jni = "0.21"
 zeroize = "1"
+getrandom = "0.3"
 
 [dev-dependencies]
 sine-loco-vault = { path = "../vault", features = ["insecure-test-kdf"] }

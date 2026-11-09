@@ -9,6 +9,8 @@
     -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- only to be told WHEN the phone's network goes away or comes back (ConnectivityManager callback): tor is paused meanwhile -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- the foreground service that keeps the app reachable (ConnectionService), its Android 14 type, and the notification it must show (Android 13+ asks the user) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />

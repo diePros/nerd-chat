@@ -17,6 +17,8 @@ pub struct Extra<'a> {
     pub purge: Option<(usize, usize)>,
     /// the user switched offline on purpose (no automatic reconnect)
     pub user_offline: bool,
+    /// the phone has a usable network (the Kotlin side tells; false: tor's network is disabled and the app waits)
+    pub network_up: bool,
 }
 
 pub fn trust_str(t: Trust) -> &'static str {
@@ -65,6 +67,7 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     w.f_bool("ram_only", app.is_ram_only());
     w.f_str("persist", match app.persist() { Persist::Off => "off", Persist::Outbox => "outbox", Persist::Day => "day", Persist::Week => "week" });
     w.f_bool("user_offline", x.user_offline);
+    w.f_bool("network_up", x.network_up);
 
     let (online, pct, fail) = match &app.online {
         Online::Offline => ("offline", 0, None),

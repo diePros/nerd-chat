@@ -52,6 +52,7 @@ fun TorChip(tor: TorState, online: Boolean, modifier: Modifier = Modifier, onBar
         tor is TorState.Ready -> "Tor connected" to MaterialTheme.colorScheme.primary
         tor is TorState.Bootstrapping -> "Tor ${tor.percent}%" to SineTheme.colors.muted
         tor is TorState.Failed -> "Tor failed" to SineTheme.colors.danger
+        tor is TorState.NoNetwork -> "No network" to SineTheme.colors.muted
         else -> "Tor off" to SineTheme.colors.muted
     }
     val tint = if (onBar) SineTheme.colors.onBar else base

@@ -93,6 +93,27 @@ pub fn kill_spawned() {
     }
 }
 
+/// Tell every tor WE spawned whether its network may be used (`SETCONF DisableNetwork=0|1`), over a FRESH control connection (the engine owns its own, and tor accepts several).
+/// Returns how many tors were told. Used when the phone's network goes away or comes back: with the network disabled tor keeps its circuits' state and, above all, does not mark its
+/// guards unreachable and move on to more of them (the real privacy cost of an unstable network), nor burn battery on doomed attempts. Fails per tor, never panics.
+pub fn set_network(enabled: bool) -> Result<usize, TorError> {
+    let targets: Vec<PathBuf> = LIVE.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, d)| d.clone()).collect();
+    let mut told = 0;
+    let mut last_err = None;
+    for dir in targets {
+        let r = (|| -> Result<(), TorError> {
+            let (stream, _) = super::open_control(&Addr::Unix(dir.join("ctl")), Duration::from_secs(5))?;
+            let mut c = super::control::Controller::new(stream);
+            // the endpoint is the unix socket inside OUR 0700 directory of OUR tor: verified by construction (spawn mode)
+            c.authenticate(&super::control::AuthPref { password: None, cookie_path: Some(dir.join("cookie")), peer_verified: true })?;
+            c.command(if enabled { "SETCONF DisableNetwork=0" } else { "SETCONF DisableNetwork=1" })?;
+            Ok(())
+        })();
+        match r { Ok(()) => told += 1, Err(e) => last_err = Some(e) }
+    }
+    match (told, last_err) { (0, Some(e)) => Err(e), _ => Ok(told) }
+}
+
 /// (running, dead): how many of the tors we spawned are alive. A zombie counts as dead. `/proc/<pid>/stat` is readable for our own children, also on Android.
 pub fn spawned_status() -> (usize, usize) {
     let v = LIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -214,6 +235,56 @@ mod tests {
     use super::*;
     /// the registry of live tors is process-wide: the tests that use it run one at a time
     static REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn set_network_sends_setconf_disablenetwork_over_a_fresh_authenticated_control_connection() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("ramtor-test");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cookie"), [7u8; 32]).unwrap();
+        let l = UnixListener::bind(dir.join("ctl")).unwrap();
+        let cookie_path = dir.join("cookie");
+        let server = std::thread::spawn(move || {
+            use hmac::{Hmac, KeyInit, Mac};
+            let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (s, _) = l.accept().unwrap();
+                let mut w = s.try_clone().unwrap();
+                let mut r = BufReader::new(s);
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap() == 0 { break; }
+                    let line = line.trim().to_string();
+                    if line.starts_with("PROTOCOLINFO") {
+                        w.write_all(format!("250-PROTOCOLINFO 1\r\n250-AUTH METHODS=COOKIE,SAFECOOKIE COOKIEFILE=\"{}\"\r\n250-VERSION Tor=\"0.4.9.16\"\r\n250 OK\r\n", cookie_path.display()).as_bytes()).unwrap();
+                    } else if let Some(cn_hex) = line.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
+                        // the server side of SAFECOOKIE: prove that we know the cookie
+                        let cn: Vec<u8> = (0..cn_hex.len() / 2).map(|i| u8::from_str_radix(&cn_hex[2 * i..2 * i + 2], 16).unwrap()).collect();
+                        let (cookie, sn) = ([7u8; 32], [9u8; 32]);
+                        let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(b"Tor safe cookie authentication server-to-controller hash").unwrap();
+                        m.update(&cookie); m.update(&cn); m.update(&sn);
+                        w.write_all(format!("250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n", hex(&m.finalize().into_bytes()), hex(&sn)).as_bytes()).unwrap();
+                    } else { w.write_all(b"250 OK\r\n").unwrap(); }
+                    seen.push(line);
+                    if seen.last().is_some_and(|l| l.starts_with("SETCONF")) { break; }
+                }
+            }
+            seen
+        });
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        LIVE.lock().unwrap().push((child.id(), dir.clone()));
+        assert_eq!(set_network(false).unwrap(), 1);
+        assert_eq!(set_network(true).unwrap(), 1);
+        LIVE.lock().unwrap().retain(|(p, _)| *p != child.id());
+        let _ = child.kill(); let _ = child.wait();
+        let seen = server.join().unwrap();
+        assert!(seen.iter().any(|l| l == "SETCONF DisableNetwork=1") && seen.iter().any(|l| l == "SETCONF DisableNetwork=0"), "{seen:?}");
+        assert!(seen.iter().any(|l| l.starts_with("AUTHENTICATE ")), "the connection authenticated first: {seen:?}");
+    }
 
     #[test]
     fn a_kill_that_happens_before_the_start_reaches_the_spawn_is_noticed() {

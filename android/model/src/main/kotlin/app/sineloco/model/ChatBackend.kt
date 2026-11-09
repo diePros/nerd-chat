@@ -28,6 +28,9 @@ interface ChatBackend {
     /** The way out for a user in a hurry (notification button, lock screen): offline NOW, no password, no question; a tor that is still starting is cancelled. */
     fun goOfflineNow()
 
+    /** The phone's network went away (`false`) or came back (`true`): with it gone tor's network is switched off, coming back is delayed by a random few seconds. */
+    fun networkChanged(up: Boolean) {}
+
     /** Ask the core for the current state without changing anything: the first thing every call does is the lock's deadline check, so this is how a wake-up makes a timed-out lock erase itself before anything is shown. */
     fun refresh() {}
 

@@ -27,6 +27,7 @@ class SineLocoApp : Application() {
         super.onCreate()
         backend = if (resources.getBoolean(R.bool.sineloco_demo)) FakeBackend(hasVault = false) else rust()
         watchConnection()
+        if (backend !is FakeBackend) watchNetwork()
         lockWhenScreenGoesOff()
     }
 
@@ -46,6 +47,23 @@ class SineLocoApp : Application() {
         keys.ensureKeys(System.currentTimeMillis() / 1000)
         EraseJobService.schedule(this)
         return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys)
+    }
+
+    /**
+     * Tells the core when the phone's default network goes away or comes back (Wi-Fi <-> mobile data, airplane mode, no signal). "Up" means the network has the INTERNET capability;
+     * it is deliberately NOT required to be "validated": a network that fails Android's own connectivity check (a captive portal, a censored network that still lets Tor through) must
+     * not keep Tor from trying. No socket of ours is opened here: this is only the system's notification. The core pauses tor while the network is down and resumes it after a random delay.
+     */
+    private fun watchNetwork() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                backend.networkChanged(caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET))
+            }
+            override fun onLost(network: android.net.Network) { backend.networkChanged(false) }
+        }
+        try { cm.registerDefaultNetworkCallback(callback) } catch (_: Exception) { return }
+        if (cm.activeNetwork == null) backend.networkChanged(false) // already no network when the app starts: the callback only reports changes
     }
 
     /**

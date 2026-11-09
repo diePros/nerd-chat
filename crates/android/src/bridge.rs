@@ -37,6 +37,11 @@ pub struct Bridge {
     purge: Option<(usize, usize)>,
     /// tor's runtime base inside the app's private storage (None without a tor executable)
     tor_base: Option<PathBuf>,
+    /// The phone's network, as the Kotlin side reports it. While it is DOWN tor's network is disabled (tor then neither marks its guards unreachable and moves on to more of them,
+    /// nor burns battery on doomed attempts). Coming back is delayed by a random 3-15 s: a flapping network must not make us re-announce ourselves in lock step with it.
+    network_up: bool,
+    network_up_at: Option<Instant>,
+    network_told: Option<Instant>,
 }
 
 impl Bridge {
@@ -71,7 +76,7 @@ impl Bridge {
         cfg.lock_timeout_secs = Some(8 * 3600);
         cfg.lock_max_attempts = Some(5);
         cfg.platform_keys = platform_keys;
-        Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None, tor_base })
+        Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None, tor_base, network_up: true, network_up_at: None, network_told: None })
     }
 
     pub fn app(&self) -> &App { &self.app }
@@ -99,6 +104,7 @@ impl Bridge {
     pub fn tick(&mut self) {
         self.app.lock_deadline_check();
         self.app.poll();
+        self.network_tick();
         // a tor that died on its own must show as NOT reachable (the automatic restart below then brings it back)
         let (alive, dead) = sine_loco_net::tor::spawn::spawned_status();
         if dead > 0 && alive == 0 { self.app.tor_died(); }
@@ -115,8 +121,24 @@ impl Bridge {
         }
     }
 
+    /// Apply what the phone's network is doing to our tor. Called every tick: the "down" state is re-asserted every few seconds, so a tor that starts (or restarts after dying) while
+    /// the network is down also gets its network disabled. Never opens any socket of its own: only the unix control socket of OUR tor.
+    fn network_tick(&mut self) {
+        let now = Instant::now();
+        if let Some(t) = self.network_up_at {
+            if now >= t {
+                self.network_up_at = None; self.network_up = true; self.network_told = None;
+                let _ = sine_loco_net::tor::spawn::set_network(true);
+            }
+        }
+        if !self.network_up && sine_loco_net::tor::spawn::spawned_status().0 > 0 && self.network_told.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(5)) {
+            self.network_told = Some(now);
+            let _ = sine_loco_net::tor::spawn::set_network(false);
+        }
+    }
+
     pub fn snapshot(&self, rejected: Option<&str>) -> Zeroizing<String> {
-        snapshot(&self.app, &Extra { rejected, purge: self.purge, user_offline: self.user_offline })
+        snapshot(&self.app, &Extra { rejected, purge: self.purge, user_offline: self.user_offline, network_up: self.network_up })
     }
 
     /// One operation; always answers with the new snapshot. `arg` is zeroizing text for the ops that take any.
@@ -240,6 +262,21 @@ impl Bridge {
                 if !self.in_main() { return Err(NOT_NOW); }
                 let p = match arg.as_str() { "off" => Persist::Off, "outbox" => Persist::Outbox, "day" => Persist::Day, "week" => Persist::Week, _ => return Err("unknown setting") };
                 self.app.set_persist(p);
+            }
+            // The phone's network went away / came back ("down" | "up"). Allowed in every state but Wiped: it only ever REDUCES activity or restores what the user asked for.
+            "net" => {
+                if self.app.screen == Screen::Wiped { return Err(NOT_NOW); }
+                match arg.as_str() {
+                    "down" => { self.network_up = false; self.network_up_at = None; self.network_told = None; } // applied by the next tick, within a few hundred ms
+                    "up" => {
+                        if !self.network_up && self.network_up_at.is_none() {
+                            let mut r = [0u8; 1];
+                            let _ = getrandom::fill(&mut r);
+                            self.network_up_at = Some(Instant::now() + Duration::from_secs(3 + (r[0] as u64 % 13)));
+                        }
+                    }
+                    _ => return Err("unknown network state"),
+                }
             }
             // from EVERY screen: the core closes an open prompt or the safety-number view first, and remembers the request while a derivation runs
             "lock" => { self.ensure_normal(); self.app.lock(); }
@@ -385,6 +422,25 @@ mod tests {
         call(&mut b, "secret", "wrong wrong wrong");
         let s = call(&mut b, "enter", "");
         assert!(s.contains("\"error\":true") && s.contains("Wrong password"), "a wrong password must be SHOWN as an error: {s}");
+    }
+
+    #[test]
+    fn the_network_going_away_is_remembered_and_coming_back_waits_a_random_moment() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        assert!(call(&mut b, "snapshot", "").contains("\"network_up\":true"));
+        assert!(call(&mut b, "net", "down").contains("\"network_up\":false"));
+        let s = call(&mut b, "net", "up");
+        assert!(s.contains("\"network_up\":false") && b.network_up_at.is_some(), "back, but only after a random 3-15 s: {s}");
+        let due = b.network_up_at.unwrap().duration_since(Instant::now());
+        assert!(due >= Duration::from_secs(2) && due <= Duration::from_secs(16), "{due:?}");
+        b.network_up_at = Some(Instant::now() - Duration::from_secs(1));
+        assert!(call(&mut b, "snapshot", "").contains("\"network_up\":true"));
+        // a new "down" cancels a pending "up"
+        call(&mut b, "net", "down"); call(&mut b, "net", "up");
+        call(&mut b, "net", "down");
+        assert!(b.network_up_at.is_none() && !b.network_up);
+        assert!(call(&mut b, "net", "sideways").contains("unknown network state"));
     }
 
     #[test]

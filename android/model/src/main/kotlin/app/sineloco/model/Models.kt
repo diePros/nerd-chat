@@ -47,6 +47,8 @@ sealed interface TorState {
     data class Bootstrapping(val percent: Int) : TorState
     data object Ready : TorState
     data class Failed(val reason: String) : TorState
+    /** the phone has no usable network: tor's network is switched off and the app waits (it resumes by itself) */
+    data object NoNetwork : TorState
 }
 
 /** Where the app is in its life: the lock screen, the vault creation steps, working (key derivation), the main app, or wiped. */

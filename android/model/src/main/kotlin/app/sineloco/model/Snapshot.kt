@@ -39,9 +39,9 @@ object Snapshot {
         }
         if (m.bool("privacy_locked")) return AppState(stage = Stage.Error, status = "The core is showing its privacy screen, which this app does not use.", statusIsError = true)
         val onlineKind = m.str("online")
+        val networkUp = m.bool("network_up") || m["network_up"] == null // a core that does not say: assume there is one
         val tor = when (onlineKind) {
-            "starting" -> TorState.Bootstrapping(m.int("online_pct"))
-            "online" -> TorState.Ready
+            "starting", "online" -> if (!networkUp) TorState.NoNetwork else if (onlineKind == "starting") TorState.Bootstrapping(m.int("online_pct")) else TorState.Ready
             "failed" -> TorState.Failed(m.str("online_error") ?: "failed")
             else -> TorState.Off
         }
