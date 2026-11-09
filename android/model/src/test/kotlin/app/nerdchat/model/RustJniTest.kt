@@ -18,7 +18,7 @@ class RustJniTest {
 
     private fun backend(dir: File): RustBackend {
         NativeBridge.load(lib!!.absolutePath)
-        return RustBackend(NativeBridge, dir.absolutePath, lowMem = true, torPath = null, historyDefault = Persist.Day, pollMillis = 20, pollMillisBusy = 20)
+        return RustBackend(NativeBridge, dir.absolutePath, lowMem = true, torPath = null, historyDefault = Persist.Day, keys = SoftwareKeys(), pollMillis = 20, pollMillisBusy = 20)
     }
 
     private fun await(b: RustBackend, what: String, max: Long = 90_000, ok: (AppState) -> Boolean): AppState = runBlocking {

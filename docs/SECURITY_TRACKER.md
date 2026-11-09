@@ -564,6 +564,10 @@ Code: `store/src/book.rs` (SBS6, `OutMsg`, caps), `chat/src/engine.rs` (`with_ou
 | CT-5 | a vault data key rotated on every sweep is NOT a crypto-erase: every old copy carries its own wrapped key and the same password opens it | INFO (design review) | deletion needs a key the password does not unlock: Android Keystore per epoch; Linux = best effort |
 | CT-6 | documentation said "nothing is written to disk" / "nothing is ever saved by itself" while the encrypted outbox can write unsent texts | FIXED (README, `save_selected` doc comment) | will change again when history exists |
 | CT-7 | the receiver confirms a text right after it is in RAM; with persistence a crash before the write loses a text the sender considers delivered | FIXED (confirmations wait for the tick's fsync when messages are kept) | durable-before-confirm: queue confirmations until the tick's fsync (plan stage 4) |
+| CT-8 | the Keystore binding has never run on a device; the JNI key callback has no host test | OPEN | first phone test: pair, send, restart, message still there; then check `AndroidKeystoreKeys.level` |
+| CT-9 | on a TEE-only phone deleting a Keystore key is not a hardware-grade erase | ACCEPTED (documented) | StrongBox phones give the real guarantee; the Settings text must say "best effort" where StrongBox is absent (not yet shown in the UI) |
+| CT-10 | the erase job trusts the wall clock: a clock moved forward destroys younger keys | ACCEPTED | loses history, never exposes it |
+| CT-11 | the history used to write an unusable (empty) wrapped key silently if the key store refused | FIXED | the write now fails and is retried; test `a_key_store_that_refuses_writes_nothing_and_loses_nothing` |
 
 ## Review 32 - adversarial review of the outbox, the Rust bridge and the Android app (six independent Opus reviewers, 2026-11-09; the sixth is the design review behind review 31)
 Reviewed at commit 6be6ddd, each in its own scratch copy; bugs were proved with failing tests before they were fixed. Fixed in the commit that follows 6be6ddd/e9a20fa.

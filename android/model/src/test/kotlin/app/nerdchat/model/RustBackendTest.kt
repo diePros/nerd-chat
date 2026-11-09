@@ -11,7 +11,7 @@ class RustBackendTest {
         val calls = CopyOnWriteArrayList<Pair<String, String?>>()
         var lastArrays = CopyOnWriteArrayList<CharArray>()
         val answer = """{"v":1,"screen":"main","status":"","error":false,"online":"offline","contacts":[],"chat":null,"detail":null,"alerts":[]}"""
-        override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Int): String = answer.replace("\"main\"", "\"unlock\"")
+        override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?): String = answer.replace("\"main\"", "\"unlock\"")
         var respond: (String) -> String = { answer }
         override fun call(op: String, arg: CharArray?): String { if (op != "snapshot") { calls += op to arg?.concatToString(); arg?.let { lastArrays += it } }; return respond(op) }
     }

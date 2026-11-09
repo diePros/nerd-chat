@@ -62,6 +62,10 @@ impl PlatformKeys for NoPlatformKeys {
     fn erase(&self, _: u32) {}
 }
 
+/// A job that knows nothing about the history (the Android erase job, which runs while the app is locked) may destroy the key of epoch `E` once
+/// `E + ERASE_AFTER_EPOCHS < the current epoch`. A bucket never outlives `the end of its epoch + the longest retention`: see the test `the_erase_job_bound_covers_the_longest_life`.
+pub const ERASE_AFTER_EPOCHS: u32 = 9;
+
 /// Time. `wall` = seconds since 1970 (the device clock, never a network clock); `mono` = monotonic seconds (a clock moved by hand does not move it).
 pub trait Clock: Send + Sync { fn wall(&self) -> u64; fn mono(&self) -> u64; }
 pub struct SystemClock(Instant);
@@ -84,7 +88,7 @@ impl State {
 pub struct Line { pub contact: [u8; 8], pub state: State, pub mid: Option<[u8; 8]>, pub text: Zeroizing<String> }
 impl Line { pub fn mine(&self) -> bool { self.state != State::Received } }
 
-struct Bucket { id: u32, epoch: u32, hk: Zeroizing<[u8; 32]>, msgs: Vec<Line> }
+struct Bucket { id: u32, epoch: u32, hk: Zeroizing<[u8; 32]>, /** the key wrapped by the platform: made once (a hardware key store is slow), reused at every write */ wrapped: Option<Vec<u8>>, msgs: Vec<Line> }
 
 /// What a sweep removed.
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -192,7 +196,7 @@ impl History {
             let Some(hk) = self.platform.unwrap(epoch, wrapped) else { lost = true; continue };
             let Some(pt) = unaead(&hk, &[BUCKET_AAD, &id.to_be_bytes()].concat(), ct) else { lost = true; continue };
             let Some(msgs) = parse_msgs(&pt) else { lost = true; continue };
-            self.buckets.push(Bucket { id, epoch, hk, msgs });
+            self.buckets.push(Bucket { id, epoch, hk, wrapped: Some(wrapped.to_vec()), msgs });
         }
         self.gen = gen; self.hwm = hwm; self.active = Some(slot);
         if lost { self.dirty = true; self.scrub_other = true; }
@@ -226,7 +230,7 @@ impl History {
         let epoch = ((id as u64 * BUCKET_SECS) / EPOCH_SECS) as u32;
         let mut hk = Zeroizing::new([0u8; 32]);
         getrandom::fill(&mut *hk).expect("OS RNG unavailable");
-        self.buckets.push(Bucket { id, epoch, hk, msgs: Vec::new() });
+        self.buckets.push(Bucket { id, epoch, hk, wrapped: None, msgs: Vec::new() });
         self.buckets.len() - 1
     }
 
@@ -326,7 +330,7 @@ impl History {
         if !self.dirty { self.file.set_modified(SystemTime::now()).map_err(io)?; return Ok(Tick::Touched); }
         let cap = self.slot_len - 24 - 16 - 20;
         if self.estimate() > cap { self.evict_to_fit(cap); }
-        let body = self.serialize();
+        let Some(body) = self.serialize() else { return Err(StoreError::Io("the platform key store could not protect a key: nothing was written".into())) };
         assert!(body.len() <= cap, "the estimate is an upper bound");
         let target = match self.active { Some(0) => 1, _ => 0 };
         let gen = self.gen + 1;
@@ -348,10 +352,12 @@ impl History {
         Ok(Tick::Wrote)
     }
 
-    fn serialize(&mut self) -> Zeroizing<Vec<u8>> {
+    /// `None` if the platform key store refused to wrap a bucket key: writing a bucket with an unusable key would lose it silently, so nothing is written (the data stays dirty and is retried).
+    fn serialize(&mut self) -> Option<Zeroizing<Vec<u8>>> {
         let mut v = Zeroizing::new(Vec::new());
         v.extend_from_slice(&(self.buckets.len() as u16).to_be_bytes());
-        for b in &self.buckets {
+        for b in &mut self.buckets {
+            if b.wrapped.is_none() { b.wrapped = Some(self.platform.wrap(b.epoch, &b.hk).filter(|w| !w.is_empty() && w.len() <= 4096)?); }
             let mut m = Zeroizing::new(Vec::new());
             m.extend_from_slice(&(b.msgs.len() as u16).to_be_bytes());
             for l in &b.msgs {
@@ -362,12 +368,12 @@ impl History {
                 m.extend_from_slice(l.text.as_bytes());
             }
             let ct = aead(&b.hk, &[BUCKET_AAD, &b.id.to_be_bytes()].concat(), &m);
-            let wrapped = self.platform.wrap(b.epoch, &b.hk).unwrap_or_default();
+            let wrapped = b.wrapped.as_deref().unwrap_or_default();
             v.extend_from_slice(&b.id.to_be_bytes()); v.extend_from_slice(&b.epoch.to_be_bytes());
-            v.extend_from_slice(&(wrapped.len() as u16).to_be_bytes()); v.extend_from_slice(&wrapped);
+            v.extend_from_slice(&(wrapped.len() as u16).to_be_bytes()); v.extend_from_slice(wrapped);
             v.extend_from_slice(&(ct.len() as u32).to_be_bytes()); v.extend_from_slice(&ct);
         }
-        v
+        Some(v)
     }
 
     /// A close upper bound of the serialized size without encrypting anything (so that eviction does not re-encrypt the whole file at every step).
@@ -442,6 +448,33 @@ mod tests {
             Some(Zeroizing::new(<[u8; 32]>::try_from(&pt[..]).ok()?))
         }
         fn erase(&self, epoch: u32) { self.keys.lock().unwrap().remove(&epoch); self.erased.lock().unwrap().push(epoch); }
+    }
+
+    /// A key store that refuses every wrap.
+    struct DeadKeys;
+    impl PlatformKeys for DeadKeys {
+        fn wrap(&self, _: u32, _: &[u8; 32]) -> Option<Vec<u8>> { None }
+        fn unwrap(&self, _: u32, _: &[u8]) -> Option<Zeroizing<[u8; 32]>> { None }
+        fn erase(&self, _: u32) {}
+    }
+
+    #[test]
+    fn the_erase_job_bound_covers_the_longest_life() {
+        // a bucket of epoch E ends by (E+1)*EPOCH and is deleted `retention` later; the job acts from epoch E + ERASE_AFTER + 1 on
+        let last_use = EPOCH_SECS + Persist::Week.retention_secs().unwrap();
+        let job_acts = (ERASE_AFTER_EPOCHS as u64 + 1) * EPOCH_SECS;
+        assert!(job_acts >= last_use + EPOCH_SECS, "at least a day of margin: {job_acts} vs {last_use}");
+    }
+
+    #[test]
+    fn a_key_store_that_refuses_writes_nothing_and_loses_nothing() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("hist.bin");
+        let clock = TestClock::new(T0);
+        let mut h = History::open(&p, SLOT, fk(), Arc::new(DeadKeys), clock.clone(), Persist::Day).unwrap();
+        h.push([1u8; 8], State::Received, None, "hello");
+        assert!(h.tick().is_err(), "a refused wrap must be an error, not a silently unreadable bucket");
+        assert!(h.tick().is_err(), "still dirty: retried");
+        assert_eq!(h.lines([1u8; 8]).len(), 1, "the line is still in memory");
     }
 
     const SLOT: usize = 64 * 1024;

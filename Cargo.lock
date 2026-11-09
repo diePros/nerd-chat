@@ -2078,6 +2078,7 @@ dependencies = [
  "jni 0.21.1",
  "nerd-chat-app",
  "nerd-chat-core",
+ "nerd-chat-store",
  "nerd-chat-vault",
  "tempfile",
  "zeroize",

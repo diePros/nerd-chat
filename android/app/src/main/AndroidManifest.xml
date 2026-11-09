@@ -2,9 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      NO permissions on purpose. This first build cannot reach the network at all (no INTERNET): it is the interface with a demo backend.
+      The only permission: RECEIVE_BOOT_COMPLETED, so that the key-erase job (EraseJobService) is rescheduled after a reboot. This build cannot reach the network at all (no INTERNET).
       INTERNET, FOREGROUND_SERVICE and POST_NOTIFICATIONS arrive together with the Tor integration (docs/ANDROID_PORT.md phase P1/P4).
     -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".NerdChatApp"
@@ -17,6 +18,11 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false">
+
+        <service
+            android:name=".EraseJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <activity
             android:name=".MainActivity"

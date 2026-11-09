@@ -10,13 +10,13 @@ import java.util.concurrent.Executors
  * (the key derivation, Tor start, incoming messages and confirmations all arrive by polling) and every answer replaces [state].
  */
 class RustBackend(
-    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Persist,
+    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Persist, keys: PlatformKeys? = null,
     private val pollMillis: Long = 250, private val pollMillisBusy: Long = 80,
 ) : ChatBackend {
     private val thread = Executors.newSingleThreadExecutor { Thread(it, "nerdchat-core").apply { isDaemon = true } }
     private val dispatcher = thread.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
-    private val s = MutableStateFlow(Snapshot.parse(native.init(vaultDir, lowMem, torPath, historyDefault.ordinal)))
+    private val s = MutableStateFlow(Snapshot.parse(native.init(vaultDir, lowMem, torPath, historyDefault.ordinal, keys)))
     override val state: StateFlow<AppState> = s
 
     @Volatile private var closed = false

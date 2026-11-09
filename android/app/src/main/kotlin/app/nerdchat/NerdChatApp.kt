@@ -33,6 +33,10 @@ class NerdChatApp : Application() {
         // Tor ships as libtor.so in the native library directory (the only place Android 10+ allows executing from); not bundled yet
         val tor = File(applicationInfo.nativeLibraryDir, "libtor.so").takeIf { it.canExecute() }?.path
         // Messages are kept for a day by default on the phone: the OS kills the app at will and the contact is rarely online at the same moment. The user chooses in Settings.
-        return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day)
+        // expired history keys: destroyed now, and by a job every ~6 hours (also while the phone is locked)
+        val keys = AndroidKeystoreKeys()
+        keys.eraseOlderThan(System.currentTimeMillis() / 1000)
+        EraseJobService.schedule(this)
+        return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys)
     }
 }

@@ -13,5 +13,6 @@
 //! (unwiped) copy when it builds the Java string, and the Java `String` cannot be wiped at all (known gap G1, docs/ANDROID_PORT.md; tracker BR-3).
 pub mod bridge;
 pub mod json;
+pub mod keys;
 pub mod snapshot;
 mod ffi;

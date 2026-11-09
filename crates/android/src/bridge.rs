@@ -23,6 +23,8 @@ pub struct Options {
     pub tor_path: Option<PathBuf>,
     /// what the encrypted outbox does until the user chooses (the phone turns it on: the OS kills the app at will); the user's choice is stored in the vault and wins
     pub persist_default: Persist,
+    /// the deletable key store for the history's bucket keys (the Android Keystore); None = keys are stored inside the encrypted history file (cannot be erased cryptographically)
+    pub platform_keys: Option<std::sync::Arc<dyn nerd_chat_store::history::PlatformKeys>>,
 }
 
 pub struct Bridge {
@@ -37,10 +39,10 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(dir: &Path, o: Options) -> Result<Self, String> {
-        Self::with_profile(dir, o.tor_path, if o.low_mem { Profile::LowMem } else { Profile::Strong }, o.persist_default)
+        Self::with_profile(dir, o.tor_path, if o.low_mem { Profile::LowMem } else { Profile::Strong }, o.persist_default, o.platform_keys)
     }
 
-    pub(crate) fn with_profile(dir: &Path, tor_path: Option<PathBuf>, profile: Profile, persist_default: Persist) -> Result<Self, String> {
+    pub(crate) fn with_profile(dir: &Path, tor_path: Option<PathBuf>, profile: Profile, persist_default: Persist, platform_keys: Option<std::sync::Arc<dyn nerd_chat_store::history::PlatformKeys>>) -> Result<Self, String> {
         // `--no-sandbox`: the core's file cleaner re-executes /proc/self/exe, which on Android is app_process, not us. The phone app exposes no file
         // feature, so the cleaner is never called; the isolated-process cleaner (docs/ANDROID_PORT.md 3.3) replaces this before files arrive.
         let _ = startup::startup(&["nerd-chat".into(), "--no-sandbox".into()]);
@@ -51,6 +53,7 @@ impl Bridge {
         cfg.tor.tor_path = tor_path.clone();
         cfg.can_host = true;
         cfg.persist_default = persist_default;
+        cfg.platform_keys = platform_keys;
         Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None })
     }
 
@@ -221,8 +224,8 @@ mod tests {
     use std::time::Duration;
 
     fn z(s: &str) -> Zeroizing<String> { Zeroizing::new(s.to_string()) }
-    fn bridge(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Off).unwrap() }
-    fn bridge_keep(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Day).unwrap() }
+    fn bridge(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Off, None).unwrap() }
+    fn bridge_keep(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Day, None).unwrap() }
     /// Run `op` and wait until the (threaded) key derivation is over.
     fn call(b: &mut Bridge, op: &str, arg: &str) -> String {
         let mut s = b.call(op, &z(arg));
@@ -338,7 +341,7 @@ mod tests {
     #[test]
     fn going_online_without_a_tor_executable_fails_with_a_message_instead_of_hanging() {
         let d = tempfile::tempdir().unwrap();
-        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off).unwrap();
+        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
         create(&mut b);
         // the bridge connects by itself because a tor path was configured: it must end in a visible failure, not a stuck "starting"
         let mut s = String::new();

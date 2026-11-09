@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 nerd-chat-app = { path = "../app", default-features = false }
 nerd-chat-core = { path = "../core" }
+nerd-chat-store = { path = "../store" }
 nerd-chat-vault = { path = "../vault" }
 jni = "0.21"
 zeroize = "1"
