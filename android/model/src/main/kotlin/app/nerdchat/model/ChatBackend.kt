@@ -3,19 +3,24 @@ package app.nerdchat.model
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * The contract between the Kotlin screens and the Rust core. The real implementation (JNI over `nerd-chat-app`, phase P2/P3 of
- * docs/ANDROID_PORT.md) is not written yet: [FakeBackend] stands in so the whole UI can be built and reviewed first.
+ * The contract between the Kotlin screens and the Rust core. [RustBackend] talks to the real core through JNI; [FakeBackend] stands in
+ * for previews, screenshots and demo builds.
+ *
+ * EVERYTHING IS STATE-DRIVEN: a call returns at once and the result shows up in [state] (the core derives keys on a worker thread,
+ * pairing waits for Tor, a message is confirmed seconds later). Never wait for a call, observe the state.
  *
  * Rules every implementation must keep:
- *  * secrets (the password) arrive as `CharArray` and the implementation wipes them; a line of chat arrives as `CharArray` too
- *    (the current screens still pass `String` for the draft: known gap G1, see android/README.md);
+ *  * secrets arrive as `CharArray` and the implementation wipes them; a line of chat arrives as `String` (known gap G1);
  *  * nothing here ever returns a timestamp, a read state or a typing state, because the core has none.
  */
 interface ChatBackend {
     val state: StateFlow<AppState>
 
-    /** Try to open the vault. The array is wiped before this returns. */
-    fun unlock(password: CharArray): Boolean
+    /**
+     * One password step. Which step it is depends on [AppState.stage]: unlock (the vault exists), choose a password (first run, minimum 12
+     * characters) or repeat it. The array is wiped before this returns.
+     */
+    fun submitPassword(password: CharArray)
 
     /** Panic: wipe memory and leave. The host process ends right after. */
     fun panic()
@@ -25,14 +30,34 @@ interface ChatBackend {
 
     fun setOnline(online: Boolean)
 
-    fun send(contactId: Int, text: String)
-
-    /** Opening a chat clears its unread counter. */
+    /** Select a contact and open the conversation with it (clears its unread counter). */
     fun open(contactId: Int)
 
-    fun createPairingOffer(): PairingOffer
+    /** Leave the conversation (back to the list). */
+    fun closeChat()
 
-    fun join(link: String, code: String): JoinResult
+    fun send(contactId: Int, text: String)
 
-    fun markVerified(contactId: Int)
+    // --- pairing over Tor ---
+    /** Create a contact with a fresh key pair (it has no peer yet) and select it. */
+    fun addContact(name: String)
+
+    /** Offer a pairing for the selected contact: [AppState.torOffer] appears when Tor has published the service. */
+    fun startOffer()
+
+    /** Join a pairing: the link by any channel, the code (10 digits, said aloud) as a secret. The array is wiped. */
+    fun joinWithLink(link: String, code: CharArray)
+
+    fun cancelPairing()
+
+    /** Answer the question that appears when [AppState.pairingWaiting]: did you exchange the code in person? */
+    fun answerInPerson(inPerson: Boolean)
+
+    // --- verification ---
+    /** Select the contact and open the safety-number comparison: [AppState.verifyNumber] appears. */
+    fun startVerify(contactId: Int)
+
+    fun confirmVerify(matches: Boolean)
+
+    fun acknowledgeAlert()
 }

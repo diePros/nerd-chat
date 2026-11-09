@@ -1809,6 +1809,8 @@ impl App {
 
     /// Was the pairing that just finished (or is waiting for the answer) made through Tor? Then the question is whether the code was HEARD by voice.
     pub fn pair_remote(&self) -> bool { self.pair_remote }
+    /// A pairing finished and waits for the user's in-person answer (`P`). Read-only: a front end uses it to show the question.
+    pub fn pairing_waiting(&self) -> bool { self.pending_pair.is_some() }
 
     /// The id of the selected contact (a front end compares it with `TorLink::contact`).
     pub fn selected_contact_id(&self) -> Option<[u8; 8]> { self.vf.as_ref()?.store.contacts.get(self.sel).map(|c| c.id) }

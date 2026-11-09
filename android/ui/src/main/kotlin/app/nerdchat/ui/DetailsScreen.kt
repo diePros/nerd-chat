@@ -20,7 +20,8 @@ import app.nerdchat.model.Link
 
 /** The "nerd panel" of the desktop GUI, for one contact: safety number, connection, address, role. */
 @Composable
-fun DetailsScreen(contact: Contact, onBack: () -> Unit, onVerified: () -> Unit) {
+fun DetailsScreen(contact: Contact, verifyNumber: String?, onBack: () -> Unit, onStartVerify: () -> Unit, onConfirmVerify: (Boolean) -> Unit) {
+    if (verifyNumber != null) VerifyDialog(verifyNumber, onConfirmVerify)
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AppBar {
             IconButton(onClick = onBack) { Icon(NerdIcons.Back, "Back", NerdTheme.colors.onBar) }
@@ -42,15 +43,30 @@ fun DetailsScreen(contact: Contact, onBack: () -> Unit, onVerified: () -> Unit) 
                     }
                 }
                 Text("Compare these numbers with your contact, in person or by phone. If they match, nobody is in between.", color = NerdTheme.colors.muted, fontSize = 13.sp, textAlign = TextAlign.Center)
-                if (!contact.verified) Button(onClick = onVerified, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("They match: mark as verified") }
+                if (!contact.paired) Text("Not paired yet: there is no safety number until pairing has finished.", color = NerdTheme.colors.muted, fontSize = 13.sp, textAlign = TextAlign.Center)
+                else if (!contact.verified) Button(onClick = onStartVerify, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("Compare the numbers…") }
             }
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row3("Connection", when (contact.link) { Link.Connected -> "Connected over Tor"; Link.Connecting -> "Connecting…"; Link.Offline -> "Not reachable" })
-                Row3("Address", contact.onionShort)
+                if (contact.onionShort.isNotEmpty()) Row3("Address", contact.onionShort)
                 Row3("Role", if (contact.weHost) "You host for this contact while online" else "You only dial this contact")
             }
         }
     }
+}
+
+@Composable
+private fun VerifyDialog(number: String, onResult: (Boolean) -> Unit) {
+    AlertDialog(
+        onDismissRequest = { onResult(false) },
+        title = { Text("Do the numbers match?") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(number, fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+            Text("Ask your contact to read THEIR screen to you, in person or by phone. Only if every group is identical is nobody in between.", color = NerdTheme.colors.muted, fontSize = 14.sp)
+        } },
+        confirmButton = { TextButton(onClick = { onResult(true) }) { Text("They match") } },
+        dismissButton = { TextButton(onClick = { onResult(false) }) { Text("They differ") } },
+    )
 }
 
 @Composable

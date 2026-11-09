@@ -5,29 +5,49 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 
 /**
- * In-memory stand-in for the Rust core: demo contacts, instant "unlock" with any non-empty password, deterministic behaviour (no timers:
- * call [confirmQueued] to simulate the contacts' apps confirming). Used by the previews, the screenshot tests and the first device runs.
+ * In-memory stand-in for the Rust core: demo contacts, instant behaviour, no timers (call [confirmQueued] to simulate the contacts' apps
+ * confirming). The first run has no vault: with `seed = true` the demo opens with any password of at least 12 characters (the same rule
+ * as the core), with any shorter one it explains why not. Used by previews, screenshot tests and demo builds.
  */
-class FakeBackend(seed: Boolean = true) : ChatBackend {
-    private val s = MutableStateFlow(if (seed) demoState() else AppState())
+class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true) : ChatBackend {
+    private val s = MutableStateFlow(
+        (if (seed) demoState() else AppState()).copy(stage = if (hasVault) Stage.Unlock else Stage.CreatePassword,
+            status = if (hasVault) "Enter your password to unlock." else "No vault found. Creating a NEW one (min 12 characters)."))
     override val state: StateFlow<AppState> = s
     private var nextId = 100L
+    private var firstPw: String? = null
+    private var pendingContact: Contact? = null
+    private var verifyFor: Int? = null
     var panicked = false; private set
     var purged = false; private set
 
-    override fun unlock(password: CharArray): Boolean {
-        val ok = password.isNotEmpty()
-        password.fill('\u0000')
-        if (ok) s.update { it.copy(unlocked = true, online = true, tor = TorState.Ready) }
-        return ok
+    private fun contacts() = s.value.chats
+
+    override fun submitPassword(password: CharArray) {
+        val pw = String(password); password.fill('\u0000')
+        when (s.value.stage) {
+            Stage.Unlock -> if (pw.isNotEmpty()) s.update { it.copy(stage = Stage.Ready, online = true, tor = TorState.Ready, status = "Unlocked.", statusIsError = false) }
+                else s.update { it.copy(status = "Wrong password or keyfile.", statusIsError = true) }
+            Stage.CreatePassword -> if (pw.length < 12) s.update { it.copy(status = "Too short: use at least 12 characters (a long passphrase).", statusIsError = true) }
+                else { firstPw = pw; s.update { it.copy(stage = Stage.ConfirmPassword, status = "Repeat the password.", statusIsError = false) } }
+            Stage.ConfirmPassword -> if (pw == firstPw) s.update { it.copy(stage = Stage.Ready, online = true, tor = TorState.Ready, status = "Vault created.", statusIsError = false) }
+                else { firstPw = null; s.update { it.copy(stage = Stage.CreatePassword, status = "Passwords did not match. Start again.", statusIsError = true) } }
+            else -> {}
+        }
     }
 
-    override fun panic() { panicked = true; s.value = AppState() }
-    override fun purge() { purged = true; s.value = AppState() }
+    override fun panic() { panicked = true; s.value = AppState(stage = Stage.Wiped) }
+    override fun purge() { purged = true; s.value = AppState(stage = Stage.Wiped) }
 
     override fun setOnline(online: Boolean) {
         s.update { it.copy(online = online, tor = if (online) TorState.Ready else TorState.Off) }
     }
+
+    override fun open(contactId: Int) {
+        s.update { st -> st.copy(chats = st.chats.map { if (it.contact.id == contactId) it.copy(unread = 0) else it }) }
+    }
+
+    override fun closeChat() {}
 
     override fun send(contactId: Int, text: String) {
         val t = text.trim()
@@ -46,40 +66,68 @@ class FakeBackend(seed: Boolean = true) : ChatBackend {
         }
     }
 
-    override fun open(contactId: Int) {
-        s.update { st -> st.copy(chats = st.chats.map { if (it.contact.id == contactId) it.copy(unread = 0) else it }) }
+    override fun addContact(name: String) {
+        val n = name.trim()
+        if (n.isEmpty()) { s.update { it.copy(status = "A contact needs a name.", statusIsError = true) }; return }
+        val c = Contact(contacts().size, n, Trust.Unverified, false, Link.Offline, emptyList(), "", false)
+        pendingContact = c
+        s.update { it.copy(chats = it.chats + ChatSummary(c, null, 0), status = "Contact created with a NEW keypair.", statusIsError = false) }
     }
 
-    override fun createPairingOffer() = PairingOffer(
-        link = "nerdchat:pair/" + "mxqfz3k7ayv2wbn5cdr4eh6jg2tup7lis3o5kqwn4yz6ahbvc3dfe6xi",
-        code = "4821-7390-52", expiresInSeconds = 300,
-    )
+    override fun startOffer() {
+        val c = pendingContact ?: return
+        s.update { it.copy(torOffer = TorOffer("nerdchat:pair/mxqfz3k7ayv2wbn5cdr4eh6jg2tup7lis3o5kqwn4yz6ahbvc3dfe6xi", "4821-7390-52", 300, c.name)) }
+    }
 
-    override fun join(link: String, code: String): JoinResult {
+    override fun joinWithLink(link: String, code: CharArray) {
+        val digits = code.count { it.isDigit() }; code.fill('\u0000')
         val id = link.trim().lowercase().removePrefix("nerdchat:pair/").removeSuffix(".onion")
-        if (id.length != 56) return JoinResult.Rejected("That link is not a Nerd-chat link (56 characters expected).")
-        if (code.filter { it.isDigit() }.length != 10) return JoinResult.Rejected("The code has 10 digits.")
-        val c = Contact(nextId.toInt(), "New contact", false, Link.Connecting, SAFETY, id.take(8) + "…", false)
-        nextId++
-        s.update { it.copy(chats = it.chats + ChatSummary(c, null, 0)) }
-        return JoinResult.Paired(c.id)
+        when {
+            id.length != 56 -> s.update { it.copy(status = "That link is not a Nerd-chat link (56 characters expected).", statusIsError = true) }
+            digits != 10 -> s.update { it.copy(status = "The code has 10 digits.", statusIsError = true) }
+            else -> s.update { it.copy(pairingWaiting = true, status = "Pairing finished: answer the in-person question.", statusIsError = false) }
+        }
     }
 
-    override fun markVerified(contactId: Int) {
-        s.update { st -> st.copy(chats = st.chats.map { if (it.contact.id == contactId) it.copy(contact = it.contact.copy(verified = true)) else it }) }
+    override fun cancelPairing() { s.update { it.copy(torOffer = null, pairingWaiting = false) } }
+
+    override fun answerInPerson(inPerson: Boolean) {
+        val trust = if (inPerson) Trust.Code else Trust.Unverified
+        s.update { st ->
+            val last = st.chats.lastOrNull()
+            st.copy(pairingWaiting = false, torOffer = null,
+                chats = if (last == null) st.chats else st.chats.dropLast(1) + last.copy(contact = last.contact.copy(paired = true, trust = trust, link = Link.Connecting)))
+        }
     }
+
+    override fun startVerify(contactId: Int) {
+        val c = contacts().firstOrNull { it.contact.id == contactId }?.contact ?: return
+        verifyFor = contactId
+        s.update { it.copy(verifyNumber = c.safetyNumber.joinToString(" ").ifEmpty { "48213 07791 36502 91844 20365 77018" }) }
+    }
+
+    override fun confirmVerify(matches: Boolean) {
+        val id = verifyFor; verifyFor = null
+        s.update { st ->
+            if (!matches || id == null) st.copy(verifyNumber = null, status = "Not verified.", statusIsError = false)
+            else st.copy(verifyNumber = null, status = "Verified: this contact's identity is confirmed.", statusIsError = false,
+                chats = st.chats.map { if (it.contact.id == id) it.copy(contact = it.contact.copy(trust = Trust.Verified)) else it })
+        }
+    }
+
+    override fun acknowledgeAlert() { s.update { it.copy(alerts = it.alerts.drop(1)) } }
 
     companion object {
         private val SAFETY = listOf("48213", "07791", "36502", "91844", "20365", "77018")
-        private fun c(id: Int, name: String, v: Boolean, l: Link, host: Boolean) = Contact(id, name, v, l, SAFETY.map { it.reversed() }, "k${id}mx4qz…", host)
+        private fun c(id: Int, name: String, t: Trust, l: Link, host: Boolean) = Contact(id, name, t, true, l, SAFETY.map { it.reversed() }, "k${id}mx4qz…", host)
 
         fun demoState(): AppState {
-            val mira = c(1, "Mira", true, Link.Connected, true)
-            val jonas = c(2, "Jonas", true, Link.Offline, false)
-            val li = c(3, "Aunt Li", false, Link.Connected, false)
-            val kofi = c(4, "Kofi", true, Link.Connecting, true)
+            val mira = c(0, "Mira", Trust.Verified, Link.Connected, true)
+            val li = c(1, "Aunt Li", Trust.Unverified, Link.Connected, false)
+            val jonas = c(2, "Jonas", Trust.Verified, Link.Offline, false)
+            val kofi = c(3, "Kofi", Trust.Verified, Link.Connecting, true)
             return AppState(
-                unlocked = false, tor = TorState.Off, online = false,
+                stage = Stage.Unlock, tor = TorState.Off, online = false,
                 chats = listOf(
                     ChatSummary(mira, "Same place as last time?", 2),
                     ChatSummary(li, "You: ok, I will check the code tonight", 0),
@@ -87,7 +135,7 @@ class FakeBackend(seed: Boolean = true) : ChatBackend {
                     ChatSummary(kofi, null, 0),
                 ),
                 messages = mapOf(
-                    1 to listOf(
+                    0 to listOf(
                         Message(1, false, "Did the new phone arrive?"),
                         Message(2, true, "Yes. Everything is set up, I used the short code like we agreed.", Delivery.Delivered),
                         Message(3, false, "Good. Nobody saw us exchanging it."),
@@ -95,7 +143,7 @@ class FakeBackend(seed: Boolean = true) : ChatBackend {
                         Message(5, false, "Same place as last time?"),
                         Message(6, false, "Bring the grey bag."),
                     ),
-                    3 to listOf(
+                    1 to listOf(
                         Message(10, false, "Is this the right app? My grandson installed it."),
                         Message(11, true, "Yes! Please check the number code with me when we talk.", Delivery.Delivered),
                         Message(12, true, "ok, I will check the code tonight", Delivery.Queued),

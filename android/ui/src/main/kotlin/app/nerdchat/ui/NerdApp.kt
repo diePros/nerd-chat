@@ -1,13 +1,16 @@
 package app.nerdchat.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.nerdchat.model.*
 
 private sealed interface Dest {
-    data object Unlock : Dest
     data class Main(val tab: Int) : Dest
     data class Chat(val id: Int) : Dest
     data class Details(val id: Int) : Dest
@@ -17,6 +20,9 @@ private sealed interface Dest {
  * The whole app. Platform things come in as parameters so these sources stay identical on the desktop preview and on Android:
  * [backHandler] (the system back button), [onCopy] (clipboard, marked sensitive by the host), [onExit] (end the process after panic/purge),
  * [onThemeChanged] (the host may remember the choice).
+ *
+ * Which screen shows is decided by the core's [AppState.stage]: anything but [Stage.Ready] is the lock / vault-creation screen, and
+ * [Stage.Wiped] (panic or purge happened) ends the process.
  */
 @Composable
 fun NerdApp(
@@ -30,45 +36,85 @@ fun NerdApp(
 ) {
     var palette by remember { mutableStateOf(initialPalette) }
     var mode by remember { mutableStateOf(initialMode) }
-    var dest by remember { mutableStateOf<Dest>(if (startAt != null) Dest.Main(startAt) else Dest.Unlock) }
-    var wrong by remember { mutableStateOf(false) }
+    var dest by remember { mutableStateOf<Dest>(Dest.Main(startAt ?: 0)) }
     val st by backend.state.collectAsState()
 
-    // a panic/purge empties the state: go back to the lock screen at once
-    LaunchedEffect(st.unlocked) { if (!st.unlocked && startAt == null) dest = Dest.Unlock }
-
-    backHandler(dest is Dest.Chat || dest is Dest.Details || (dest is Dest.Main && (dest as Dest.Main).tab != 0)) {
-        dest = when (val d = dest) { is Dest.Details -> Dest.Chat(d.id); is Dest.Chat -> Dest.Main(0); else -> Dest.Main(0) }
+    // a wipe (panic or purge) ends the process; leaving Ready for any other reason shows the lock screen again from the list
+    LaunchedEffect(st.stage) {
+        if (st.stage == Stage.Wiped) onExit()
+        if (st.stage != Stage.Ready) dest = Dest.Main(0)
     }
-    val panic = { backend.panic(); onExit() }
+
+    backHandler(st.stage == Stage.Ready && (dest is Dest.Chat || dest is Dest.Details || (dest is Dest.Main && (dest as Dest.Main).tab != 0))) {
+        dest = when (val d = dest) { is Dest.Details -> Dest.Chat(d.id); is Dest.Chat -> { backend.closeChat(); Dest.Main(0) }; else -> Dest.Main(0) }
+    }
+    val panic = { backend.panic() }
 
     NerdTheme(palette, mode) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            when (val d = dest) {
-                Dest.Unlock -> UnlockScreen(wrong) { pw -> if (backend.unlock(pw)) { wrong = false; dest = Dest.Main(0) } else wrong = true }
-                is Dest.Main -> Column(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(1f)) {
-                        when (d.tab) {
-                            0 -> ChatListScreen(st.chats, st.tor, st.online, onOpen = { backend.open(it); dest = Dest.Chat(it) }, onPair = { dest = Dest.Main(1) }, onLock = panic)
-                            1 -> PairScreen(backend::createPairingOffer, backend::join, onCopy, onPaired = { dest = Dest.Chat(it) })
-                            else -> SettingsScreen(palette, mode, st.online,
-                                onPalette = { palette = it; onThemeChanged(it, mode) }, onMode = { mode = it; onThemeChanged(palette, it) },
-                                onOnline = backend::setOnline, onLock = panic, onPurge = { backend.purge(); onExit() })
+            if (st.stage != Stage.Ready) {
+                if (st.stage == Stage.Wiped) Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+                else UnlockScreen(st.stage, st.status, st.statusIsError, backend::submitPassword)
+                return@Surface
+            }
+            Column(Modifier.fillMaxSize()) {
+                st.alerts.firstOrNull()?.let { AlertBanner(it, st.alerts.size - 1, backend::acknowledgeAlert) }
+                Box(Modifier.weight(1f)) {
+                    when (val d = dest) {
+                        is Dest.Main -> Column(Modifier.fillMaxSize()) {
+                            Box(Modifier.weight(1f)) {
+                                when (d.tab) {
+                                    0 -> ChatListScreen(st.chats, st.tor, st.online, onOpen = { backend.open(it); dest = Dest.Chat(it) }, onPair = { dest = Dest.Main(1) }, onLock = panic)
+                                    1 -> PairScreen(st,
+                                        onOffer = { name -> backend.addContact(name); backend.startOffer() },
+                                        onJoin = { name, link, code -> backend.addContact(name); backend.joinWithLink(link, code) },
+                                        onCancel = backend::cancelPairing, onCopy = onCopy)
+                                    else -> SettingsScreen(palette, mode, st.online, st.tor,
+                                        onPalette = { palette = it; onThemeChanged(it, mode) }, onMode = { mode = it; onThemeChanged(palette, it) },
+                                        onOnline = backend::setOnline, onLock = panic, onPurge = { backend.purge() })
+                                }
+                            }
+                            NavigationBar(containerColor = MaterialTheme.colorScheme.background) {
+                                listOf(Triple("Chats", NerdIcons.Chat, 0), Triple("Pair", NerdIcons.PersonAdd, 1), Triple("Settings", NerdIcons.Tune, 2)).forEach { (label, icon, i) ->
+                                    NavigationBarItem(selected = d.tab == i, onClick = { dest = Dest.Main(i) }, icon = { Icon(icon, label, LocalContentColor.current) }, label = { Text(label) })
+                                }
+                            }
                         }
-                    }
-                    NavigationBar(containerColor = MaterialTheme.colorScheme.background) {
-                        listOf(Triple("Chats", NerdIcons.Chat, 0), Triple("Pair", NerdIcons.PersonAdd, 1), Triple("Settings", NerdIcons.Tune, 2)).forEach { (label, icon, i) ->
-                            NavigationBarItem(selected = d.tab == i, onClick = { dest = Dest.Main(i) }, icon = { Icon(icon, label, LocalContentColor.current) }, label = { Text(label) })
-                        }
+                        is Dest.Chat -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
+                            ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) })
+                        } ?: run { dest = Dest.Main(0) }
+                        is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
+                            DetailsScreen(c, st.verifyNumber, onBack = { dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify)
+                        } ?: run { dest = Dest.Main(0) }
                     }
                 }
-                is Dest.Chat -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                    ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) })
-                } ?: run { dest = Dest.Main(0) }
-                is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                    DetailsScreen(c, onBack = { dest = Dest.Chat(c.id) }, onVerified = { backend.markVerified(c.id) })
-                } ?: run { dest = Dest.Main(0) }
             }
+            if (st.pairingWaiting) InPersonDialog(onAnswer = backend::answerInPerson)
         }
     }
+}
+
+@Composable
+private fun AlertBanner(text: String, more: Int, onAck: () -> Unit) {
+    Surface(color = NerdTheme.colors.warningContainer, contentColor = NerdTheme.colors.onWarningContainer) {
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(text, fontSize = 14.sp)
+                if (more > 0) Text("+$more more", fontSize = 12.sp)
+            }
+            TextButton(onClick = onAck) { Text("Got it", color = NerdTheme.colors.onWarningContainer) }
+        }
+    }
+}
+
+/** The question the core asks after a pairing: the answer decides the trust level (a "yes" for a code that travelled over a weak channel would be a lie). */
+@Composable
+private fun InPersonDialog(onAnswer: (Boolean) -> Unit) {
+    AlertDialog(
+        onDismissRequest = { onAnswer(false) },
+        title = { Text("Pairing finished") },
+        text = { Text("Did you exchange the code in person or by a voice call you trust? If it travelled in a message, answer No: you can verify the safety number later.") },
+        confirmButton = { TextButton(onClick = { onAnswer(true) }) { Text("Yes, in person") } },
+        dismissButton = { TextButton(onClick = { onAnswer(false) }) { Text("No") } },
+    )
 }

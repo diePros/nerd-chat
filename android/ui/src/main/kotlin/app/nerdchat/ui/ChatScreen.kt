@@ -103,6 +103,7 @@ fun DeliveryMark(d: Delivery?) {
     val col = NerdTheme.colors
     when (d) {
         Delivery.Queued -> Icon(NerdIcons.Check, "Queued", col.muted, 15.dp)
+        Delivery.Unconfirmed -> Text("?", color = col.muted, fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Delivery.Delivered -> Box(Modifier.width(21.dp).height(15.dp)) {
             Icon(NerdIcons.Check, "Delivered", col.delivered, 15.dp)
             Icon(NerdIcons.Check, null, col.delivered, 15.dp, Modifier.padding(start = 6.dp))

@@ -19,10 +19,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.nerdchat.model.Palette
 import app.nerdchat.model.Palettes
+import app.nerdchat.model.TorState
 
 @Composable
 fun SettingsScreen(
-    palette: Palette, mode: DarkMode, online: Boolean,
+    palette: Palette, mode: DarkMode, online: Boolean, tor: TorState = TorState.Off,
     onPalette: (Palette) -> Unit, onMode: (DarkMode) -> Unit, onOnline: (Boolean) -> Unit,
     onLock: () -> Unit, onPurge: () -> Unit,
 ) {
@@ -44,6 +45,12 @@ fun SettingsScreen(
 
             SectionLabel("Privacy")
             ToggleRow("Be reachable", "Runs Tor and your onion services so contacts can reach you. Off = nothing leaves this phone.", online, onOnline)
+            when (tor) {
+                is TorState.Failed -> Text("Tor could not start: ${tor.reason}", color = NerdTheme.colors.danger, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
+                is TorState.Bootstrapping -> Text("Tor is starting: ${tor.percent}%", color = NerdTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
+                TorState.Ready -> Text("Tor is connected.", color = NerdTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
+                TorState.Off -> {}
+            }
             InfoRow("Bridges", "Not configured. Needed where Tor is blocked (comes with the Tor integration).")
             InfoRow("Presence", "Online only while the app is open. A phone that is always on shows a daily pattern to anyone who knows your address.")
 

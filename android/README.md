@@ -4,18 +4,21 @@ The third native front end next to the terminal UI and the Linux GUI. Kotlin + J
 bubbles, delivery marks, a coloured top bar) with the project's privacy rules kept: **no timestamps, no read receipts, no typing
 indicators, no presence beyond "connected over Tor"** (docs/DELIVERY.md). Focus: anonymity on the network first.
 
-> **Status: interface only.** The screens run on `FakeBackend` (demo contacts, any non-empty password unlocks, nothing is stored,
-> nothing is sent). The bridge to the Rust core (`nerd-chat-app`) and the embedded Tor are NOT built yet: see `docs/ANDROID_PORT.md`.
-> This build declares **no permissions at all**, so it cannot reach the network.
+> **Status: the app runs on the real Rust core; Tor is not embedded yet.** The screens talk to `nerd-chat-app` through a JNI bridge
+> (`crates/android`): vault creation and unlock (the real Argon2 key derivation), contacts, the chat engine, pairing over Tor, verification,
+> panic and purge are the core's own code. What is missing is a `tor` executable: until `libtor.so` is bundled, going online fails with a
+> visible message, so nothing can be sent or received yet. The build declares **no permissions**, so it cannot reach the network at all.
+> `-Pdemo` builds an in-memory demo backend instead (no Rust, any 12+ character password) for UI work.
 
 Setting this up on a new machine (SDK, wrapper, signing, phone install, where to continue): **docs/ANDROID_DEV_SETUP.md**.
 
 ## Layout
 | Module | What | Builds without the Android SDK |
 |---|---|---|
-| `model/` | data model, the `ChatBackend` contract, `FakeBackend`, **colour palettes** and their contrast tests | yes |
+| `model/` | data model, the state-driven `ChatBackend` contract, `RustBackend` (JNI), `FakeBackend`, JSON snapshot parser, **colour palettes** and their contrast tests, and an end-to-end JNI test against the real core | yes (the JNI test needs `cargo`) |
 | `ui/` | all Compose screens as plain JVM Compose + a test that renders them to PNG | yes |
-| `app/` | the Android app: `MainActivity` (FLAG_SECURE, no backup, sensitive clipboard), manifest, icon. It compiles the **same source files as `ui/`** against androidx Compose | no (needs `ANDROID_HOME`) |
+| `app/` | the Android app: `MainActivity` (FLAG_SECURE, no backup, sensitive clipboard), manifest, icon. It compiles the **same source files as `ui/`** against androidx Compose, and builds + packages the Rust library for each ABI | no (needs `ANDROID_HOME`, the NDK and `cargo`) |
+| `../crates/android` | the Rust side: a command layer over the core's key-driven state machine, the JSON snapshot, two JNI exports | n/a (Rust) |
 
 Rule for `ui/src/main`: only APIs that exist in both JetBrains Compose (desktop) and androidx Compose. Platform things (back button,
 clipboard, process exit) are passed in by the host. The desktop compile therefore proves the Android sources too.
@@ -23,12 +26,21 @@ clipboard, process exit) are passed in by the host. The desktop compile therefor
 ## Build and test
 ```bash
 cd android
-./gradlew :model:test :ui:test                 # 11 tests; writes screenshots to ui/build/shots/
-ANDROID_HOME=~/android-sdk ./gradlew :app:assembleDebug     # app/build/outputs/apk/debug/app-debug.apk
+./gradlew :model:test :ui:test                 # 27 tests; builds the host bridge library and runs the REAL JNI end-to-end test; screenshots in ui/build/shots/
+ANDROID_HOME=~/android-sdk ./gradlew :app:assembleDebug     # builds libnerdchat_bridge.so for arm64-v8a + x86_64 with cargo and the NDK, packages it
 ANDROID_HOME=~/android-sdk ./gradlew :app:assembleRelease   # unsigned; sign with NERDCHAT_KEYSTORE* (see app/build.gradle.kts)
+./gradlew :app:assembleDebug -Pdemo                         # demo backend (in-memory), no Rust involved at runtime
+cargo test --workspace --locked                             # the Rust side, from the repository root
 ```
 Toolchain (verified 2026-11-09): Gradle 9.9.0 (wrapper), AGP 9.5.1, Kotlin 2.4.21, Compose BOM 2026.09.00 / Compose Multiplatform 1.12.2,
-compileSdk 37 (SDK platform `android-37.0`), minSdk 29, targetSdk 36, JDK 21.
+compileSdk 37 (SDK platform `android-37.0`), minSdk 29, targetSdk 36, NDK r29 (`29.0.14206865`), Rust 1.98.1 (`rust-toolchain.toml`), JDK 21.
+
+## How the app talks to the core
+`RustBackend` (Kotlin) -> `NativeBridge` (JNI, 2 functions: `nInit`, `nCall`) -> `Bridge::call(op, arg)` (Rust) -> `App::handle(Key)` (the same
+state machine as the terminal and the Linux GUI) -> a JSON snapshot back. All calls run on ONE thread; a ticker polls the core (key derivation,
+Tor start, incoming messages and confirmations arrive by polling). The bridge GUARDS what the screens may do: text reaches the core only where the
+core itself takes text, only an allowlist of one-letter commands exists (no quit, no files, no local link), and a message over the compose limit is
+refused instead of silently truncated. Passwords and the pairing code travel as `char[]` and are wiped on both sides.
 
 ## Changing the colours
 All palettes are in **`model/src/main/kotlin/app/nerdchat/model/Palettes.kt`**: one block per palette, light and dark scheme, plain hex.
@@ -47,5 +59,8 @@ arm64-v8a + x86_64 only.
   view that feeds IME text straight into the core's zeroizing buffers. Messages shown on screen also live in the JVM heap.
 - The APK contains one tiny native library (`libandroidx.graphics.path.so`, from Compose). On GrapheneOS apps with native code get
   hardened_malloc and memory tagging; not tested on a device.
-- Not run on a device or emulator (none available where this was built): the APK is built, linted and unit-tested only.
+- Not run on a device or emulator (none available where this was built). What IS run: the Rust core's tests, the same Kotlin code against the real core over JNI on a Linux JVM, and the APK build with its packaging checks.
+- **No Tor yet:** no `libtor.so`, no `INTERNET` permission, and the core refuses a Tor data directory that is not RAM-backed (Android has no tmpfs for apps): `--allow-disk` semantics must reach the transport first (docs/ANDROID_PORT.md 3.2).
+- **Files are off:** the core's file cleaner re-executes `/proc/self/exe`, which on Android is `app_process`; the bridge starts the core with `--no-sandbox` and exposes no file feature until the isolated-process cleaner exists.
 - No auto-lock on leaving the app, no foreground service, no notifications: they come with the Tor integration.
+- Contact ids are positions in the list (the core addresses contacts that way): they shift when a contact is deleted (deleting is not in the UI yet).
