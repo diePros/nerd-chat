@@ -223,9 +223,11 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// The vault directory must not be writable by others; a test directory inherits the umask of whoever runs the tests.
+    fn private(dir: &Path) { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap(); }
     fn z(s: &str) -> Zeroizing<String> { Zeroizing::new(s.to_string()) }
-    fn bridge(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Off, None).unwrap() }
-    fn bridge_keep(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Day, None).unwrap() }
+    fn bridge(dir: &Path) -> Bridge { private(dir); Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Off, None).unwrap() }
+    fn bridge_keep(dir: &Path) -> Bridge { private(dir); Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Day, None).unwrap() }
     /// Run `op` and wait until the (threaded) key derivation is over.
     fn call(b: &mut Bridge, op: &str, arg: &str) -> String {
         let mut s = b.call(op, &z(arg));
@@ -341,6 +343,7 @@ mod tests {
     #[test]
     fn going_online_without_a_tor_executable_fails_with_a_message_instead_of_hanging() {
         let d = tempfile::tempdir().unwrap();
+        private(d.path());
         let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
         create(&mut b);
         // the bridge connects by itself because a tor path was configured: it must end in a visible failure, not a stuck "starting"

@@ -1083,9 +1083,11 @@ impl App {
         if already { return self.err("This message is already saved."); }
         let sel = self.sel;
         if let Err(e) = self.vf().store.save_message(sel, mine, &text) { return self.err(format!("{e}")); }
+        self.error = false;
         if !self.save() { self.vf().store.contacts[sel].saved.pop(); return self.resync_note("may already contain this message"); }
         if let Some(l) = self.chats.get_mut(&id).and_then(|l| l.get_mut(pos)) { l.saved = true; }
         self.select = None;
+        if self.error { return; }   // the message IS saved, but save() left a warning (rollback counter not written): the success text must not hide it
         self.ok("Saved into the vault (encrypted with it, no timestamp). H lists saved messages. Whoever gets your vault AND password can read them.");
     }
 
@@ -3617,8 +3619,8 @@ mod tests {
         std::fs::set_permissions(&cdir, std::fs::Permissions::from_mode(0o500)).unwrap();      // the counter can no longer be written; the vault can
         a.handle(Key::Char('m')); a.handle(Key::Char('y'));
         std::fs::set_permissions(&cdir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(a.error && a.status.contains("SAVE FAILED") && a.status.contains("may already contain this message"), "{}", a.status);
-        assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.is_empty() && !a.chat_lines()[0].saved, "memory was rolled back");
+        assert!(a.error && a.status.contains("WARNING: saved, but the rollback-counter file could not be written"), "the success text must not hide the warning: {}", a.status);
+        assert!(a.vf.as_ref().unwrap().store.contacts[0].saved.len() == 1 && a.chat_lines()[0].saved, "the vault file holds the message, so memory keeps it");
     }
 
     #[test]
