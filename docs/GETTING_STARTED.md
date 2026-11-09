@@ -63,6 +63,9 @@ Then in Terminal 1: `I` -> `bob-for-alice.sbc`. In Terminal 2: `I` -> `alice-for
 Both now show **UNVERIFIED** and the SAME safety number. Press `v` on both, compare the digits, press `y`.
 Status turns **● verified**. (Real use: do NOT send the .sbc over just any channel: read docs/EXCHANGING_CONTACTS.md; compare the number by voice/in person.)
 
+## 4a. Pairing over Tor (no shared network)
+Both online (`o`), a contact added on each side (`n`). Terminal 1: `T` shows a link and a code once the service is published (up to a minute). Send the LINK to your partner (only), tell the CODE by voice. Terminal 2: `J`, paste the link, Enter, type the code, Enter. Both: `P`, answer whether you HEARD the code by voice. The service is removed as soon as the one connection arrived; `x` cancels.
+
 ## 4. Try local one-time-code pairing (no files)
 Add a fresh contact on each side (`n`), then:
 - Terminal 1: `l` -> Enter (127.0.0.1:0). The status line shows `Listening on 127.0.0.1:PORT - CODE: 12345-67890`.

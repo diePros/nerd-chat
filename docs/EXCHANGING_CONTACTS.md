@@ -4,7 +4,7 @@ A **contact file** (also called a bundle, `.sbc`) is what you give someone so th
 send one over a chat app, e-mail or social network.
 
 ## The short version
-1. **Best: no file at all.** Use one-time-code pairing (`l` / `c`, see GETTING_STARTED.md §4). Pairing over Tor, which needs no shared network, is planned.
+1. **Best: no file at all.** Use one-time-code pairing. Over Tor (`T` creates a link and a code, `J` joins with them; works anywhere, no shared network; the GUI calls it "Over the internet") or on one network (`l` / `c`, see GETTING_STARTED.md §4). Send the LINK to your partner only, and tell the CODE by voice or in person, never in the same message.
 2. **Next best: hand it over in person**, on a USB stick or by connecting the two computers directly. Delete the file afterwards.
 3. **If you must send it remotely**, use the safest channel you have (see the table), and then ALWAYS compare the safety number on a
    DIFFERENT channel: by voice or in person, never in the same chat the file travelled through.
