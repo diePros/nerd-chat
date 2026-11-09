@@ -1,5 +1,6 @@
-# Once the onion mirror runs, add a line "  Onion-Location: http://YOURADDRESS.onion/" inside the /* block below.
+# Onion-Location tells Tor Browser that this site is also reachable as an onion service.
 /*
+  Onion-Location: http://j7d4dmhvcrcquvt2cah754dteh3djtla5qhk6tpeof54xh5myahhiiad.onion/
   Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   Referrer-Policy: no-referrer

@@ -126,10 +126,9 @@ After the repository rename, change `REPO` in `/etc/sineloco-mirror.conf` and th
 
 ## Tell visitors about it
 
-Once it works, add this line inside the `/*` block of `public/_headers` and redeploy the Worker.
-Tor Browser then offers "onion available" on the clearnet site:
-
-    Onion-Location: http://YOURADDRESS.onion/
+`site/public/_headers` carries `Onion-Location: http://<address>.onion/`, so Tor Browser offers
+"onion available" on the clearnet site. If the address ever changes (new key), change that line and redeploy
+the Worker (the GitHub Action does it on push).
 
 ## What the checksums do and do not prove
 
