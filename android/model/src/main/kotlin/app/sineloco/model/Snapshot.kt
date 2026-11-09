@@ -75,7 +75,7 @@ object Snapshot {
         val offer = m.obj("tor_offer")?.let { TorOffer(it.str("link") ?: "", it.str("code") ?: "", it.int("expires_in"), it.str("for")) }
         return AppState(
             stage = stage, locked = m.bool("locked"), status = m.str("status") ?: "", statusIsError = m.bool("error"), pwChars = m.int("pw_chars"),
-            tor = tor, online = online, userOffline = m.bool("user_offline"), chats = contacts, messages = messages, torOffer = offer,
+            tor = tor, online = online, userOffline = m.bool("user_offline"), stopping = onlineKind == "stopping", chats = contacts, messages = messages, torOffer = offer,
             pairingWaiting = m.bool("pairing_waiting"), verifyNumber = m.str("verify_number"),
             alerts = m.list("alerts").mapNotNull { it.str("text") }, rejected = m.str("rejected"), persist = when (m.str("persist")) { "outbox" -> Persist.Outbox; "day" -> Persist.Day; "week" -> Persist.Week; else -> Persist.Off }, promptOpen = m.str("screen") == "prompt",
         )

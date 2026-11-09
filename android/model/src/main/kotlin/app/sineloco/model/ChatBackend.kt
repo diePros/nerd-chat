@@ -28,6 +28,9 @@ interface ChatBackend {
     /** The way out for a user in a hurry (notification button, lock screen): offline NOW, no password, no question; a tor that is still starting is cancelled. */
     fun goOfflineNow()
 
+    /** Ask the core for the current state without changing anything: the first thing every call does is the lock's deadline check, so this is how a wake-up makes a timed-out lock erase itself before anything is shown. */
+    fun refresh() {}
+
     /** A real lock: the app keeps running (tor, messages arrive) but shows only the password prompt ([Stage.Unlock] with [AppState.locked]) and the core hands out no contact or message data until the password is typed again. */
     fun lock()
 

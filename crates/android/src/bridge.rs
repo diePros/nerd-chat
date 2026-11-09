@@ -67,6 +67,9 @@ impl Bridge {
         }
         cfg.can_host = true;
         cfg.persist_default = persist_default;
+        // the real lock of the phone app: erase from memory after 8 hours locked, and after 5 wrong passwords (files stay: this is a panic, not a purge)
+        cfg.lock_timeout_secs = Some(8 * 3600);
+        cfg.lock_max_attempts = Some(5);
         cfg.platform_keys = platform_keys;
         Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None, tor_base })
     }
@@ -94,6 +97,7 @@ impl Bridge {
     /// Poll the core and, like the GUI, connect by itself once the vault is open (only when a tor executable is configured; never after
     /// the user switched offline on purpose; a failed start is retried with a growing delay).
     pub fn tick(&mut self) {
+        self.app.lock_deadline_check();
         self.app.poll();
         // a tor that died on its own must show as NOT reachable (the automatic restart below then brings it back)
         let (alive, dead) = sine_loco_net::tor::spawn::spawned_status();
@@ -117,6 +121,8 @@ impl Bridge {
 
     /// One operation; always answers with the new snapshot. `arg` is zeroizing text for the ops that take any.
     pub fn call(&mut self, op: &str, arg: &Zeroizing<String>) -> Zeroizing<String> {
+        // first of all: a locked app whose time is up erases itself before it answers anything (also when this call is a lock request or a snapshot)
+        self.app.lock_deadline_check();
         let rejected = self.run(op, arg).err();
         self.tick();
         self.snapshot(rejected)
@@ -308,7 +314,7 @@ mod tests {
         let s = call(&mut b, "lock", "");
         assert!(s.contains("\"screen\":\"unlock\"") && s.contains("\"locked\":true"), "locked from the prompt: {s}");
         assert!(!s.contains("Mira") && !s.contains("integrity") && s.contains("\"alerts\":[]"), "{s}");
-        assert!(s.contains("\"status\":\"Locked. Enter the vault password.\""), "{s}");
+        assert!(s.contains("Locked. Enter the vault password. The app erases itself from memory after 8 h locked."), "{s}");
         assert!(s.contains("\"tor_offer\":null") && s.contains("\"verify_number\":null"), "{s}");
     }
 
@@ -329,9 +335,9 @@ mod tests {
     #[test]
     fn reconnecting_under_the_lock_never_types_into_the_password_and_offline_needs_no_password() {
         let d = tempfile::tempdir().unwrap();
-        private(d.path());
-        // a tor path that does not exist: the test must never start the host's real tor
-        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
+        // a tor path that does not exist: the test must never start the host's real tor. The vault directory is INSIDE the temp dir: tor's runtime base is created next to it
+        let vault_dir = d.path().join("vault");
+        let mut b = Bridge::with_profile(&vault_dir, Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
         create(&mut b);
         b.started = true;
         call(&mut b, "lock", "");
@@ -483,7 +489,7 @@ mod tests {
     fn going_online_without_a_tor_executable_fails_with_a_message_instead_of_hanging() {
         let d = tempfile::tempdir().unwrap();
         private(d.path());
-        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
+        let mut b = Bridge::with_profile(&d.path().join("vault"), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
         create(&mut b);
         // the bridge connects by itself because a tor path was configured: it must end in a visible failure, not a stuck "starting"
         let mut s = String::new();

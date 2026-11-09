@@ -160,6 +160,7 @@ fn private_dir(cfg: &SpawnConfig) -> Result<PathBuf, TorError> {
 impl SpawnedTor {
     pub fn start(cfg: &SpawnConfig) -> Result<Self, TorError> {
         let generation = cfg.generation.unwrap_or_else(generation);
+        if self::generation() != generation { return Err(TorError::Other("cancelled".into())); } // cancelled before anything was created
         let dir = private_dir(cfg)?;
         let result = (|| {
             let rc = torrc(&dir, std::process::id(), &cfg.extra_torrc)?;

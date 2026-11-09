@@ -48,11 +48,14 @@ class SineLocoApp : Application() {
         return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys)
     }
 
-    /** Screen off (power button, timeout) locks the app, whatever is in front: the next look at the phone meets the password prompt. */
+    /**
+     * Screen off (power button, timeout) locks the app, whatever is in front: the next look at the phone meets the password prompt. Screen ON runs the same call: if the lock's
+     * time is up (the phone may have slept for hours), the core erases itself before anything is drawn (every call starts with the deadline check).
+     */
     private fun lockWhenScreenGoesOff() {
         registerReceiver(object : android.content.BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: android.content.Intent?) { backend.lock() }
-        }, android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_OFF))
+        }, android.content.IntentFilter().apply { addAction(android.content.Intent.ACTION_SCREEN_OFF); addAction(android.content.Intent.ACTION_SCREEN_ON) })
     }
 
     /**
@@ -77,7 +80,10 @@ class SineLocoApp : Application() {
                 kotlinx.coroutines.runBlocking {
                     backend.state.collect { st ->
                         // Failed counts: the bridge restarts tor by itself, and a service that stopped on a failure could not be started again from the background (Android 12+)
-                        val want = !st.userOffline && (st.online || st.tor is TorState.Failed) && (st.stage == Stage.Ready || st.locked || (st.stage == Stage.Working && running))
+                        // while tor is being shut down (`stopping`) the service stays: a frozen half-shutdown would leave the onion services published
+                        val want = st.stopping || (!st.userOffline && (st.online || st.tor is TorState.Failed) && (st.stage == Stage.Ready || st.locked || (st.stage == Stage.Working && running)))
+                        // the core erased itself (timed-out lock, too many wrong passwords, panic) with no screen to react: end the process
+                        if (st.stage == Stage.Wiped) main.post { wipeAndExit() }
                         if (want != running) {
                             running = want
                             main.post { if (want) ConnectionService.start(this@SineLocoApp) else ConnectionService.stop(this@SineLocoApp) }

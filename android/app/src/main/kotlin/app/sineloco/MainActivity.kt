@@ -65,6 +65,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Coming back: ask the core for its state, which runs the lock's deadline check first (a timed-out lock has erased itself and the screen shows the first-unlock prompt). */
+    override fun onStart() {
+        super.onStart()
+        (application as SineLocoApp).backend.refresh()
+    }
+
     /** Leaving the screen (home, recents, another app) locks the app: it keeps running, but whoever opens it next needs the password. A rotation is not leaving. */
     override fun onStop() {
         super.onStop()

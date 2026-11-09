@@ -24,7 +24,7 @@ sine-loco-sandbox = { path = "../sandbox" }
 ratatui = { version = "0.30", optional = true }
 zeroize = "1"
 getrandom = "0.3"
-rustix = { version = "1", features = ["process", "thread", "event", "fs"] }
+rustix = { version = "1", features = ["process", "thread", "event", "fs", "time"] }
 
 [dev-dependencies]
 ratatui = "0.30"  # the renderer is compiled in the tests so that every screen test runs with and without the `terminal-ui` feature

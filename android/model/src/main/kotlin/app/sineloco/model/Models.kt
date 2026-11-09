@@ -75,6 +75,8 @@ data class AppState(
     val online: Boolean = false,
     /** the user chose offline (not a failure): nothing may keep the app running or reachable */
     val userOffline: Boolean = false,
+    /** tor is being shut down (an orderly teardown takes a few seconds): the process must stay alive and awake until it is over */
+    val stopping: Boolean = false,
     val chats: List<ChatSummary> = emptyList(),
     /** lines of the OPEN chat only (the core keeps nothing else on screen), keyed by contact id */
     val messages: Map<Int, List<Message>> = emptyMap(),

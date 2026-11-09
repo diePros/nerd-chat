@@ -74,6 +74,7 @@ class RustBackend(
     // to lock and never refuses, so there is no banner either.
     override fun lock() { op("lock") }
     override fun goOfflineNow() { op("offline_now") }
+    override fun refresh() { op("snapshot") }
     override fun panicBlocking(timeoutMillis: Long) {
         closed = true // stop the polling first: a poll after the wipe would only show the wiped screen
         // a real bound: the blocking native call runs on the core thread, and THIS thread gives up waiting after the timeout (a coroutine timeout cannot interrupt a blocking call)

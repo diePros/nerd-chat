@@ -71,6 +71,12 @@ pub struct Config {
     pub platform_keys: Option<Arc<dyn PlatformKeys>>,
     /// The clock retention is measured with (tests inject one).
     pub clock: Option<Arc<dyn Clock>>,
+    /// Seconds since boot INCLUDING suspend (CLOCK_BOOTTIME), replaceable in tests. `std::time::Instant` stops while the phone sleeps: a 4-hour timeout would last a day.
+    pub boot_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// The REAL lock (`lock()`) erases the app from memory (a panic: the files stay) after this long locked. `None`: never (the terminal and desktop front ends have no real lock).
+    pub lock_timeout_secs: Option<u64>,
+    /// ... and after this many wrong passwords typed on the lock screen (counted when Enter is pressed, before the check, so that leaving mid-check hides nothing). `None`: unlimited.
+    pub lock_max_attempts: Option<u32>,
 }
 
 impl Config {
@@ -79,7 +85,7 @@ impl Config {
     pub fn with_test_transport(mut self, f: TransportFactory) -> Self { self.transport = Some(f); self }
 
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, persist_default: Persist::Off, grid: Duration::from_secs(5), history_slot: sine_loco_store::history::SLOT_LEN, platform_keys: None, clock: None }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, persist_default: Persist::Off, grid: Duration::from_secs(5), history_slot: sine_loco_store::history::SLOT_LEN, platform_keys: None, clock: None, boot_clock: None, lock_timeout_secs: None, lock_max_attempts: None }
     }
 }
 
@@ -384,6 +390,10 @@ pub struct App {
     lock_pending: bool,
     /// Lets a start that is under way know that it was cancelled.
     start_cancel: Option<Arc<AtomicBool>>,
+    /// When (boot seconds) the lock was requested: the timeout runs from the REQUEST, also when it had to wait for a derivation (`lock_pending`).
+    locked_since: Option<u64>,
+    /// Wrong-password attempts typed on the lock screen since the last right one.
+    lock_attempts: u32,
     /// The locked screen's own message is an error (wrong password, delay): the ONLY error bit the locked snapshot may carry.
     lock_err: bool,
     /// The ONLY status text the locked screen may show (set by the lock itself, never by events, alerts or contact names).
@@ -434,7 +444,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, start_cancel: None, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, start_cancel: None, locked_since: None, lock_attempts: 0, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -786,7 +796,7 @@ impl App {
         }
         // chat: engine first (it owns identity clones and sockets), then every message and the half-typed line
         if let Some(e) = self.engine.take() { e.shutdown_within(Duration::from_millis(400)); }
-        self.start_rx = None;
+        self.drop_start();
         self.stop_rx = None;
         self.started_ids.clear();
         self.started_outbox.clear();
@@ -832,7 +842,8 @@ impl App {
         self.input.shrink_to_fit();
         self.status.clear();
         self.sel = 0;
-        self.lock_auth = false; self.lock_pending = false; self.lock_msg.clear();
+        self.lock_auth = false; self.lock_pending = false; self.lock_msg.clear(); self.locked_since = None; self.lock_attempts = 0;
+        if let Some(c) = self.start_cancel.take() { c.store(true, Ordering::SeqCst); } // a start under way (an external tor, which there is nothing to kill) must not create onion services after a panic
         self.screen = Screen::Wiped;
     }
 
@@ -959,12 +970,12 @@ impl App {
         match msg {
             KdfMsg::LockChecked(Ok(())) if self.lock_pending => {
                 // the password was right, but the user left the screen while it was being checked: the lock stays
-                self.lock_pending = false; self.failures = 0; self.locked_until = None;
-                self.screen = back; self.lock_msg = "Locked. Enter the vault password.".into(); self.lock_err = false;
+                self.lock_pending = false; self.failures = 0; self.locked_until = None; self.lock_attempts = 0;
+                self.screen = back; self.lock_msg = self.locked_text(); self.lock_err = false;
             }
             KdfMsg::LockChecked(Ok(())) => {
                 // the password was right: that is all this derivation was for; the running state stays exactly as it is
-                self.lock_auth = false; self.locked = false; self.failures = 0; self.locked_until = None;
+                self.lock_auth = false; self.locked = false; self.failures = 0; self.locked_until = None; self.lock_attempts = 0; self.locked_since = None;
                 self.screen = back; self.mode = Mode::Normal; self.lock_msg.clear();
                 self.ok("Unlocked.");
             }
@@ -976,6 +987,8 @@ impl App {
                     self.lock_msg = "Wrong password or keyfile.".into();
                 } else { self.lock_msg = format!("Cannot check the password: {e}"); }
                 self.lock_err = true;
+                // the LAST allowed wrong password erases the app right away (not at the next attempt, which a delay could keep from ever being typed)
+                if matches!(e, sine_loco_vault::VaultError::WrongCredentials) && self.cfg.lock_max_attempts.is_some_and(|n| self.lock_attempts >= n) { self.panic_wipe(); }
             }
             KdfMsg::Opened(Ok((vf, info))) => {
                 self.vf = Some(vf);
@@ -1030,7 +1043,7 @@ impl App {
     pub fn lock(&mut self) {
         if self.cfg.path.is_none() { return; }
         // a derivation is running (the first unlock, or the LOCK'S OWN password check): remember the request, it is applied when the work is over
-        if self.screen == Screen::Working { self.lock_pending = true; return; }
+        if self.screen == Screen::Working { self.lock_pending = true; let t = self.boot_secs(); self.locked_since.get_or_insert(t); return; }
         if self.locked || self.vf.is_none() { return; }
         match self.screen {
             Screen::Wiped | Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Working => return,
@@ -1041,11 +1054,32 @@ impl App {
             Screen::Help => self.screen = Screen::Main,
         }
         self.lock_pending = false;
+        let t = self.boot_secs(); self.locked_since.get_or_insert(t);
         self.locked = true; self.lock_auth = true;
         self.screen = Screen::Main;
         self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
         self.pw.clear(); self.input.clear(); self.code_buf.clear();
-        self.lock_msg = "Locked. Enter the vault password.".into(); self.lock_err = false;
+        self.lock_msg = self.locked_text(); self.lock_err = false;
+    }
+
+    fn boot_secs(&self) -> u64 {
+        match &self.cfg.boot_clock { Some(f) => f(), None => rustix::time::clock_gettime(rustix::time::ClockId::Boottime).tv_sec.max(0) as u64 }
+    }
+
+    /// The lock screen's text; it says when the app erases itself, so that nobody is surprised.
+    fn locked_text(&self) -> String {
+        let mut t = "Locked. Enter the vault password.".to_string();
+        if let Some(h) = self.cfg.lock_timeout_secs { t.push_str(&format!(" The app erases itself from memory after {} locked.", if h % 3600 == 0 { format!("{} h", h / 3600) } else { format!("{} min", h.div_ceil(60)) })); }
+        t
+    }
+
+    /// Called at the start of EVERY operation and every tick (not only when something changes): a locked app whose time is up erases itself from memory before anything else is
+    /// answered. The clock includes suspend, so a phone that slept for hours is caught the moment anything touches the app. Returns `true` when it wiped.
+    pub fn lock_deadline_check(&mut self) -> bool {
+        let (Some(limit), Some(since)) = (self.cfg.lock_timeout_secs, self.locked_since) else { return false };
+        if !(self.lock_auth() || self.lock_pending) || self.boot_secs().saturating_sub(since) < limit { return false; }
+        self.panic_wipe();
+        true
     }
     pub fn lock_auth(&self) -> bool { self.locked && self.lock_auth }
     /// The only status text the locked screen may show.
@@ -1061,6 +1095,9 @@ impl App {
                 if let Some(t) = self.locked_until {
                     if Instant::now() < t { self.lock_msg = format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1); self.lock_err = true; self.pw.clear(); return Action::None; }
                 }
+                // counted NOW, before the check: a screen-off or a kill in the middle of it must not hide a guess
+                if self.cfg.lock_max_attempts.is_some_and(|n| self.lock_attempts >= n) { self.panic_wipe(); return Action::Panic; }
+                self.lock_attempts += 1;
                 let Some(check) = self.vf.as_ref().map(|v| v.credential_check()) else { return Action::None };
                 let pw = Zeroizing::new(self.pw.as_bytes().to_vec());
                 self.pw.clear();
@@ -1942,7 +1979,7 @@ impl App {
                 // killing tor ends the start thread's bootstrap with an error that goes nowhere (its channel is dropped); a tor it spawns a moment later is killed by the generation check
                 if let Some(c) = self.start_cancel.take() { c.store(true, Ordering::SeqCst); }
                 sine_loco_net::tor::spawn::kill_spawned();
-                self.start_rx = None;
+                self.drop_start();
                 self.online = Online::Offline;
                 self.ok("Cancelled: tor stopped, you are offline.");
                 true
@@ -1961,7 +1998,7 @@ impl App {
                 if self.pair_ctl.as_ref().is_some_and(|c| c.tor.is_some()) { self.cancel_pairing(); } // the pairing service lives in the engine's Tor: it goes with it
                 // tear down on a worker so the UI (and the panic key) stay responsive while onion services are removed
                 let (tx, rx) = channel();
-                if let Some(e) = self.engine.take() { thread::spawn(move || { e.shutdown(); let _ = tx.send(()); }); } else { let _ = tx.send(()); }
+                if let Some(e) = self.engine.take() { thread::spawn(move || { e.shutdown(); sine_loco_net::tor::spawn::kill_spawned(); let _ = tx.send(()); }); } else { let _ = tx.send(()); }
                 self.stop_rx = Some(rx);
                 self.online = Online::Stopping;
                 self.linked.clear();
@@ -1969,9 +2006,16 @@ impl App {
                 self.ok("Going offline: closing connections and removing onion services...");
                 true
             }
-            Online::Stopping | Online::Offline => true,
+            Online::Stopping => { if force { sine_loco_net::tor::spawn::kill_spawned(); } true }
+            Online::Offline => true,
             Online::Failed(_) => { self.online = Online::Offline; true }
         }
+    }
+
+    /// Forget a start under way: whatever the start thread already sent (an Engine) is dropped on a thread, never here (an Engine's drop waits up to 3 s for its workers).
+    fn drop_start(&mut self) {
+        let Some(rx) = self.start_rx.take() else { return };
+        while let Ok(m) = rx.try_recv() { if let StartMsg::Ready(e) = m { thread::spawn(move || drop(e)); } }
     }
 
     /// What is true once the engine is gone for any reason: what is not in the history may or may not have arrived (what IS kept is sent again next time).
@@ -3813,6 +3857,70 @@ mod tests {
         assert!(matches!(a.screen, Screen::Prompt(_)));
         a.lock();
         assert!(a.lock_auth() && a.screen == Screen::Main && a.contacts_len() == 1);
+    }
+
+    #[test]
+    fn a_locked_app_erases_itself_when_the_time_is_up_counted_from_the_request_and_the_clock_includes_sleep() {
+        use std::sync::atomic::AtomicU64;
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(1_000));
+        let mut c = cfg(Some(d.path().join("v")));
+        c.lock_timeout_secs = Some(100);
+        let n2 = now.clone(); c.boot_clock = Some(Arc::new(move || n2.load(Ordering::SeqCst)));
+        let mut a = open_app(c);
+        add(&mut a, "bob");
+        assert!(!a.lock_deadline_check(), "not locked: no deadline");
+        a.lock();
+        assert!(a.lock_auth() && a.lock_msg().contains("erases itself"), "{}", a.lock_msg());
+        now.store(1_099, Ordering::SeqCst);
+        assert!(!a.lock_deadline_check() && a.lock_auth(), "99 s: still locked");
+        now.store(1_101, Ordering::SeqCst);
+        assert!(a.lock_deadline_check(), "101 s: erased");
+        assert_eq!(a.screen, Screen::Wiped);
+        assert_eq!(a.contacts_len(), 0, "nothing of the vault is left in memory");
+    }
+
+    #[test]
+    fn the_time_limit_runs_from_the_lock_request_even_when_it_had_to_wait_for_a_derivation() {
+        use std::sync::atomic::AtomicU64;
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(0));
+        let mut c = cfg(Some(d.path().join("v")));
+        c.lock_timeout_secs = Some(50);
+        let n2 = now.clone(); c.boot_clock = Some(Arc::new(move || n2.load(Ordering::SeqCst)));
+        let mut a = open_app(c);
+        a.screen = Screen::Working;           // some derivation is running
+        a.lock();
+        assert!(a.lock_pending && !a.lock_auth(), "only remembered");
+        now.store(60, Ordering::SeqCst);
+        assert!(a.lock_deadline_check(), "the clock started at the REQUEST, not when it could be applied");
+    }
+
+    #[test]
+    fn too_many_wrong_passwords_on_the_lock_screen_erase_the_app_from_memory_counting_each_enter() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(Some(d.path().join("v")));
+        c.lock_max_attempts = Some(2);
+        let mut a = open_app(c);
+        add(&mut a, "bob");
+        a.lock();
+        type_str(&mut a, "wrong wrong wrong"); a.handle(Key::Enter);
+        assert!(a.lock_auth(), "one wrong attempt is allowed");
+        type_str(&mut a, "wrong again again"); a.handle(Key::Enter);
+        assert_eq!(a.screen, Screen::Wiped, "the second wrong password erases the app");
+        assert_eq!(a.contacts_len(), 0);
+        // a right password in between resets the count
+        let d2 = tempfile::tempdir().unwrap();
+        let mut c2 = cfg(Some(d2.path().join("v")));
+        c2.lock_max_attempts = Some(2);
+        let mut b = open_app(c2);
+        b.lock();
+        type_str(&mut b, "wrong wrong wrong"); b.handle(Key::Enter);
+        type_str(&mut b, "correct horse battery"); b.handle(Key::Enter);
+        assert!(!b.locked, "{}", b.lock_msg());
+        b.lock();
+        type_str(&mut b, "wrong wrong wrong"); b.handle(Key::Enter);
+        assert!(b.lock_auth(), "the count started again from zero");
     }
 
     #[test]
