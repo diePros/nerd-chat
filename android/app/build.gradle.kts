@@ -102,8 +102,8 @@ dependencies {
 
 // A RELEASE must ship exactly the libtor.so that scripts/build-tor-android.sh produced and that was pinned in android/libtor.sha256 (reproducible build, checked by the script).
 // A debug build only warns (you may be testing a tor you just rebuilt). Update the pin file in the same commit as a deliberate tor upgrade.
-val verifyLibtor by tasks.registering {
-    group = "verification"; description = "libtor.so in src/main/jniLibs must match android/libtor.sha256"
+fun registerVerifyLibtor(name: String, strict: Boolean) = tasks.register(name) {
+    group = "verification"; description = "libtor.so in src/main/jniLibs must match android/libtor.sha256 (strict: fail, else warn)"
     val pins = layout.projectDirectory.file("../libtor.sha256").asFile
     val libs = layout.projectDirectory.dir("src/main/jniLibs").asFile
     doLast {
@@ -119,8 +119,11 @@ val verifyLibtor by tasks.registering {
         }
         if (problems.isNotEmpty()) {
             val msg = "libtor.so does not match android/libtor.sha256:\n  " + problems.joinToString("\n  ")
-            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) throw GradleException(msg) else logger.warn("WARNING: $msg")
+            if (strict) throw GradleException(msg) else logger.warn("WARNING: $msg")
         }
     }
 }
-tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(verifyLibtor) }
+val verifyLibtorStrict = registerVerifyLibtor("verifyLibtorStrict", true)
+val verifyLibtorLoose = registerVerifyLibtor("verifyLibtorLoose", false)
+// decided per VARIANT by the task's own name (a task name given on the command line such as `assemble` or `build` also builds the release variant): release is strict, everything else warns
+tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(if (name.contains("Release")) verifyLibtorStrict else verifyLibtorLoose) }

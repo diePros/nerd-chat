@@ -136,7 +136,7 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 pub enum Online { Offline, Starting(u8), Online, Stopping, Failed(String) }
 
 /// Result of the (slow, memory-hard) vault key derivation done on a worker thread.
-enum KdfMsg { Opened(Result<(VaultFile, OpenInfo), StoreError>), Created(Result<VaultFile, StoreError>) }
+enum KdfMsg { Opened(Result<(VaultFile, OpenInfo), StoreError>), Created(Result<VaultFile, StoreError>), LockChecked(Result<(), sine_loco_vault::VaultError>) }
 
 enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 
@@ -379,6 +379,10 @@ pub struct App {
     pub locked: bool,
     /// With `locked`: this is a REAL lock (`lock()`), not the privacy screen. The app keeps running underneath; the screen takes the vault password, and the check re-derives the vault key.
     lock_auth: bool,
+    /// A lock was requested while the screen could not take it (a key derivation is running): it is applied the moment the app is back on the main screen.
+    lock_pending: bool,
+    /// The ONLY status text the locked screen may show (set by the lock itself, never by events, alerts or contact names).
+    lock_msg: String,
     /// Lines scrolled up from the newest message (the UI clamps what it can show).
     pub scroll: usize,
     /// Message cursor (`m` in a chat): index counted from the NEWEST message (0 = newest). While set, `y`/Enter saves that message.
@@ -425,7 +429,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -504,6 +508,7 @@ impl App {
         if !matches!(self.online, Online::Online) { return; }
         if let Some(e) = self.engine.take() { thread::spawn(move || drop(e)); }
         self.linked.clear(); self.offers.clear(); self.accepted.clear();
+        self.engine_gone();
         self.online = Online::Failed("tor stopped unexpectedly (the system may have ended it)".into());
         self.err("Tor stopped unexpectedly: you are NOT reachable. Restarting it.");
     }
@@ -765,6 +770,9 @@ impl App {
         // tor first, and for good: killing it ends every connection and onion service at once and removes its directory (guards, consensus times, cookie), without waiting
         // for the engine's orderly shutdown or a Drop that a process kill would skip
         sine_loco_net::tor::spawn::kill_spawned();
+        // the secrets that matter most go FIRST: the bounded waits below can be cut short by the process being killed right after this call
+        self.vf = None; self.history = None;
+        self.pw.clear(); self.pw2.clear(); self.code_buf.clear(); self.inbox.clear(); self.cfg.keyfile = None;
         // Stop pairing workers FIRST (they hold identity clones and the code), give them a moment to drop them.
         if let Some(c) = self.pair_ctl.take() {
             c.cancel();
@@ -819,7 +827,7 @@ impl App {
         self.input.shrink_to_fit();
         self.status.clear();
         self.sel = 0;
-        self.lock_auth = false;
+        self.lock_auth = false; self.lock_pending = false; self.lock_msg.clear();
         self.screen = Screen::Wiped;
     }
 
@@ -944,12 +952,19 @@ impl App {
         self.kdf_creating = false;
         let back = std::mem::replace(&mut self.kdf_back, Screen::Unlock);
         match msg {
-            KdfMsg::Opened(Ok((vf, _))) if self.lock_auth => {
-                // the password was right: that is all this derivation was for. The freshly opened copy is dropped (zeroized); the running state stays as it is
-                drop(vf);
+            KdfMsg::LockChecked(Ok(())) => {
+                // the password was right: that is all this derivation was for; the running state stays exactly as it is
                 self.lock_auth = false; self.locked = false; self.failures = 0; self.locked_until = None;
-                self.screen = back; self.mode = Mode::Normal;
+                self.screen = back; self.mode = Mode::Normal; self.lock_msg.clear();
                 self.ok("Unlocked.");
+            }
+            KdfMsg::LockChecked(Err(e)) => {
+                self.screen = back;
+                if matches!(e, sine_loco_vault::VaultError::WrongCredentials) {
+                    self.failures += 1;
+                    if self.failures >= 3 { self.locked_until = Some(Instant::now() + Duration::from_secs(5u64 << (self.failures - 3).min(6))); }
+                    self.lock_msg = "Wrong password or keyfile.".into();
+                } else { self.lock_msg = format!("Cannot check the password: {e}"); }
             }
             KdfMsg::Opened(Ok((vf, info))) => {
                 self.vf = Some(vf);
@@ -998,16 +1013,31 @@ impl App {
     }
 
     /// A REAL lock, unlike the privacy screen: the engine and tor keep running (messages still arrive), but nothing is shown and nothing can be done until the vault password is
-    /// typed again. The check is the vault's own memory-hard derivation (no password or hash is kept in RAM for it), with the same delays after wrong guesses as the unlock screen.
-    /// Not possible without a password (a RAM-only vault).
+    /// typed again. The check re-derives the key from the vault's in-memory header (no file is read, no password or hash is kept), with the same delays after wrong guesses as the
+    /// unlock screen. Works from EVERY screen: an open prompt or the safety-number view is closed first (nothing is applied by closing it), and while a key derivation or other
+    /// work is running the lock is remembered and applied the moment that is over. Not possible without a password (a RAM-only vault).
     pub fn lock(&mut self) {
-        if self.screen != Screen::Main || self.locked || self.cfg.path.is_none() || self.vf.is_none() { return; }
+        if self.cfg.path.is_none() || self.locked { return; }
+        // a derivation is running (the first unlock included, when no vault is open yet): remember the request, it is applied when the work is over
+        if self.screen == Screen::Working { self.lock_pending = true; return; }
+        if self.vf.is_none() { return; }
+        match self.screen {
+            Screen::Wiped | Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Working => return,
+            Screen::Main => {}
+            Screen::Verify => self.key_verify(Key::Esc),
+            Screen::Prompt(_) => self.key_prompt(Key::Esc),
+            Screen::Help => self.screen = Screen::Main,
+        }
+        self.lock_pending = false;
         self.locked = true; self.lock_auth = true;
+        self.screen = Screen::Main;
         self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
-        self.pw.clear(); self.input.clear();
-        self.ok("Locked. Enter the vault password.");
+        self.pw.clear(); self.input.clear(); self.code_buf.clear();
+        self.lock_msg = "Locked. Enter the vault password.".into();
     }
     pub fn lock_auth(&self) -> bool { self.locked && self.lock_auth }
+    /// The only status text the locked screen may show.
+    pub fn lock_msg(&self) -> &str { &self.lock_msg }
 
     /// Privacy screen: nothing but unlock/quit (and the panic key, handled before this). With `lock_auth`: a password prompt.
     fn key_lock(&mut self, k: Key) -> Action {
@@ -1016,13 +1046,14 @@ impl App {
             if Self::secret_edit(&mut self.pw, k) { return Action::None; }
             if k == Key::Enter {
                 if let Some(t) = self.locked_until {
-                    if Instant::now() < t { self.err(format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1)); self.pw.clear(); return Action::None; }
+                    if Instant::now() < t { self.lock_msg = format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1); self.pw.clear(); return Action::None; }
                 }
-                let Some(path) = self.cfg.path.clone() else { return Action::None };
+                let Some(check) = self.vf.as_ref().map(|v| v.credential_check()) else { return Action::None };
                 let pw = Zeroizing::new(self.pw.as_bytes().to_vec());
                 self.pw.clear();
-                let (counter, keyfile) = (self.cfg.counter.clone(), self.cfg.keyfile.clone());
-                self.start_kdf(Screen::Main, move || KdfMsg::Opened(VaultFile::open(&path, counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice()))));
+                let kf = self.cfg.keyfile.clone();
+                self.lock_msg = "Checking the password...".into();
+                self.start_kdf(Screen::Main, move || KdfMsg::LockChecked(check.verify(&pw, kf.as_deref().map(|v| v.as_slice()))));
             }
             return Action::None;
         }
@@ -1877,14 +1908,38 @@ impl App {
     // ---------- going online + chat ----------
     fn toggle_online(&mut self) {
         match self.online.clone() {
-            Online::Starting(_) => self.err("Already starting; wait for it to finish."),
+            Online::Starting(_) => { self.go_offline(false); }
             Online::Stopping => self.err("Still shutting down; wait a moment."),
+            Online::Online => { self.go_offline(false); }
+            Online::Offline | Online::Failed(_) => self.start_online(),
+        }
+    }
+
+    /// Bring the engine up. A direct call, NOT a key press: the automatic restart and the Android bridge use this, because a synthetic key would land in whatever prompt is open
+    /// (the lock's password prompt included).
+    pub fn go_online(&mut self) {
+        if self.vf.is_some() && matches!(self.online, Online::Offline | Online::Failed(_)) { self.start_online(); }
+    }
+
+    /// Go offline; `true` when that is done or on its way. While tor is still STARTING the start is cancelled (tor is killed, whatever the start thread finds is dropped). With
+    /// `force` the question about texts the contact has not confirmed yet is skipped: the user wants out now (the notification button, the lock screen).
+    pub fn go_offline(&mut self, force: bool) -> bool {
+        match self.online.clone() {
+            Online::Starting(_) => {
+                // killing tor ends the start thread's bootstrap with an error that goes nowhere (its channel is dropped); a tor it spawns a moment later is killed by the generation check
+                sine_loco_net::tor::spawn::kill_spawned();
+                self.start_rx = None;
+                self.online = Online::Offline;
+                self.ok("Cancelled: tor stopped, you are offline.");
+                true
+            }
             Online::Online => {
                 // going offline throws away the engine's copies of texts the contact has not confirmed: say so first (second `o` goes)
                 let open = self.queued_not_kept(); // texts in the encrypted outbox are NOT lost by going offline
-                if open > 0 && !self.offline_armed {
+                if open > 0 && !self.offline_armed && !force {
                     self.offline_armed = true;
-                    return self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
+                    self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
+                    return false;
                 }
                 self.offline_armed = false;
                 if self.pair_ctl.as_ref().is_some_and(|c| c.tor.is_some()) { self.cancel_pairing(); } // the pairing service lives in the engine's Tor: it goes with it
@@ -1896,9 +1951,18 @@ impl App {
                 self.linked.clear();
                 self.offers.clear(); self.accepted.clear(); // no Disconnected events will arrive for the old engine's connections
                 self.ok("Going offline: closing connections and removing onion services...");
+                true
             }
-            Online::Offline | Online::Failed(_) => self.start_online(),
+            Online::Stopping | Online::Offline => true,
+            Online::Failed(_) => { self.online = Online::Offline; true }
         }
+    }
+
+    /// What is true once the engine is gone for any reason: what is not in the history may or may not have arrived (what IS kept is sent again next time).
+    fn engine_gone(&mut self) {
+        self.pending_confirms.clear();
+        let kept: HashSet<[u8; 8]> = self.history.as_ref().map(|h| h.all_queued_mids().into_iter().map(|(_, m)| m).collect()).unwrap_or_default();
+        for x in self.chats.values_mut().flatten().filter(|x| x.queued && !x.mid.is_some_and(|m| kept.contains(&m))) { x.queued = false; x.unconfirmed = true; }
     }
 
     fn start_online(&mut self) {
@@ -2044,9 +2108,7 @@ impl App {
                 Err(TryRecvError::Empty) => self.stop_rx = Some(rx),
                 _ => {
                     self.online = Online::Offline;
-                    // the engine's copy is gone: what is not in the history may or may not have arrived (what IS kept is sent again next time)
-                    let kept: HashSet<[u8; 8]> = self.history.as_ref().map(|h| h.all_queued_mids().into_iter().map(|(_, m)| m).collect()).unwrap_or_default();
-                    for x in self.chats.values_mut().flatten().filter(|x| x.queued && !x.mid.is_some_and(|m| kept.contains(&m))) { x.queued = false; x.unconfirmed = true; }
+                    self.engine_gone();
                     self.ok("Offline. Connections closed, onion services and credentials removed.");
                 }
             }
@@ -2183,6 +2245,7 @@ impl App {
         if let Some(m) = self.max_scroll.get() { self.scroll = self.scroll.min(m); } // 'g' before the first frame must not leave a huge offset
         self.poll_prep();
         self.poll_kdf();
+        if self.lock_pending && self.screen != Screen::Working { self.lock_pending = false; self.lock(); }
         self.poll_probe();
         self.poll_online();
         self.poll_link();
@@ -3691,7 +3754,7 @@ mod tests {
         assert_eq!(a.contacts_len(), 1, "a locked app does not delete contacts");
         a.pw.clear();
         type_str(&mut a, "wrong password!!"); a.handle(Key::Enter);
-        assert!(a.lock_auth() && a.error && a.status.contains("Wrong password"), "{}", a.status);
+        assert!(a.lock_auth() && a.lock_msg().contains("Wrong password"), "{}", a.lock_msg());
         assert_eq!(a.screen, Screen::Main);
         type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
         assert!(!a.locked && !a.lock_auth(), "{}", a.status);
@@ -3705,11 +3768,29 @@ mod tests {
         a.lock();
         for _ in 0..3 { type_str(&mut a, "nope nope nope nope"); a.handle(Key::Enter); }
         type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
-        assert!(a.lock_auth() && a.status.contains("Too many failures"), "the right password is refused during the delay: {}", a.status);
+        assert!(a.lock_auth() && a.lock_msg().contains("Too many failures"), "the right password is refused during the delay: {}", a.lock_msg());
         let mut r = App::new(cfg(None)); r.handle(Key::Enter);
         assert_eq!(r.screen, Screen::Main);
         r.lock();
         assert!(!r.locked, "nothing to unlock with: RAM-only vaults have no password");
+    }
+
+    #[test]
+    fn go_offline_cancels_a_start_asks_about_unconfirmed_texts_unless_forced_and_the_lock_applies_from_a_prompt() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        add(&mut a, "bob");
+        // a start in progress is cancelled, not refused
+        a.online = Online::Starting(10);
+        assert!(a.go_offline(false) && matches!(a.online, Online::Offline), "{}", a.status);
+        // a failed state goes offline without ceremony
+        a.online = Online::Failed("x".into());
+        assert!(a.go_offline(false) && matches!(a.online, Online::Offline));
+        // the lock works from an open prompt: the prompt is closed, nothing is applied
+        a.handle(Key::Char('n'));
+        assert!(matches!(a.screen, Screen::Prompt(_)));
+        a.lock();
+        assert!(a.lock_auth() && a.screen == Screen::Main && a.contacts_len() == 1);
     }
 
     #[test]

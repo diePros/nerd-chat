@@ -77,7 +77,7 @@ class SineLocoApp : Application() {
                 kotlinx.coroutines.runBlocking {
                     backend.state.collect { st ->
                         // Failed counts: the bridge restarts tor by itself, and a service that stopped on a failure could not be started again from the background (Android 12+)
-                        val want = (st.online || st.tor is TorState.Failed) && (st.stage == Stage.Ready || st.locked || (st.stage == Stage.Working && running))
+                        val want = !st.userOffline && (st.online || st.tor is TorState.Failed) && (st.stage == Stage.Ready || st.locked || (st.stage == Stage.Working && running))
                         if (want != running) {
                             running = want
                             main.post { if (want) ConnectionService.start(this@SineLocoApp) else ConnectionService.stop(this@SineLocoApp) }

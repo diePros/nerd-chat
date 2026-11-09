@@ -25,6 +25,9 @@ interface ChatBackend {
     /** Panic: wipe memory and leave. The host process ends right after. */
     fun panic()
 
+    /** The way out for a user in a hurry (notification button, lock screen): offline NOW, no password, no question; a tor that is still starting is cancelled. */
+    fun goOfflineNow()
+
     /** A real lock: the app keeps running (tor, messages arrive) but shows only the password prompt ([Stage.Unlock] with [AppState.locked]) and the core hands out no contact or message data until the password is typed again. */
     fun lock()
 

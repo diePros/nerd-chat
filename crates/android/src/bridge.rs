@@ -98,12 +98,13 @@ impl Bridge {
         // a tor that died on its own must show as NOT reachable (the automatic restart below then brings it back)
         let (alive, dead) = sine_loco_net::tor::spawn::spawned_status();
         if dead > 0 && alive == 0 { self.app.tor_died(); }
+        // (also while LOCKED: reconnecting needs no password. It is a direct call, never a key press: a key would land in the lock's password prompt)
         if !self.auto_online || self.app.screen != Screen::Main || self.user_offline { return; }
         match &self.app.online {
-            Online::Offline if !self.started => { self.started = true; self.ensure_normal(); self.app.handle(Key::Char('o')); }
+            Online::Offline if !self.started => { self.started = true; self.app.go_online(); }
             Online::Failed(_) => {
                 let due = *self.retry_at.get_or_insert_with(|| Instant::now() + Duration::from_secs((5u64 << self.retries.min(4)).min(60)));
-                if Instant::now() >= due { self.retry_at = None; self.retries = self.retries.saturating_add(1); self.ensure_normal(); self.app.handle(Key::Char('o')); }
+                if Instant::now() >= due { self.retry_at = None; self.retries = self.retries.saturating_add(1); self.app.go_online(); }
             }
             Online::Online => { self.retries = 0; self.retry_at = None; }
             _ => {}
@@ -206,12 +207,17 @@ impl Bridge {
                 self.user_offline = !want; self.started = true;
                 let on = matches!(self.app.online, Online::Online | Online::Starting(_));
                 if want != on {
-                    self.ensure_normal(); self.app.handle(Key::Char('o'));
-                    // the core may refuse (tor still starting) or ask for a second confirmation first (unconfirmed texts): then NOTHING changed, and the automatic restart
-                    // must not be told that the user went offline on purpose
-                    let moved = if want { matches!(self.app.online, Online::Online | Online::Starting(_)) } else { matches!(self.app.online, Online::Stopping | Online::Offline) };
+                    let moved = if want { self.app.go_online(); matches!(self.app.online, Online::Online | Online::Starting(_)) } else { self.app.go_offline(false) };
+                    // the core may ask for a second confirmation first (unconfirmed texts): then NOTHING changed, and the automatic restart must not be told that the user went offline
                     if !moved { self.user_offline = was; }
                 }
+            }
+            // The way out for a user in a hurry (the notification button, the lock screen): NO password and NO question. It is allowed in every state except a wiped app,
+            // because going offline only ever reduces exposure. A tor that is still starting is cancelled.
+            "offline_now" => {
+                if self.app.screen == Screen::Wiped { return Err(NOT_NOW); }
+                self.user_offline = true; self.started = true;
+                self.app.go_offline(true);
             }
             "hide" => {
                 if self.app.screen != Screen::Main { return Err(NOT_NOW); }
@@ -229,7 +235,8 @@ impl Bridge {
                 let p = match arg.as_str() { "off" => Persist::Off, "outbox" => Persist::Outbox, "day" => Persist::Day, "week" => Persist::Week, _ => return Err("unknown setting") };
                 self.app.set_persist(p);
             }
-            "lock" => { if !self.in_main() { return Err(NOT_NOW); } self.ensure_normal(); self.app.lock(); }
+            // from EVERY screen: the core closes an open prompt or the safety-number view first, and remembers the request while a derivation runs
+            "lock" => { self.ensure_normal(); self.app.lock(); }
             "panic" => { let _ = self.app.handle(Key::F12); }
             "purge" => {
                 if self.app.handle(Key::Purge) == Action::Purge {
@@ -286,6 +293,54 @@ mod tests {
         call(&mut b, "secret", PW);
         let s = call(&mut b, "enter", "");
         assert!(s.contains("\"screen\":\"main\"") && s.contains("\"locked\":false") && s.contains("Mira"), "{s}");
+    }
+
+    #[test]
+    fn the_lock_works_from_a_prompt_and_the_locked_snapshot_shows_only_the_locks_own_text() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        call(&mut b, "new_contact", "Mira");
+        call(&mut b, "cmd", "n"); // a prompt is open now
+        assert!(call(&mut b, "snapshot", "").contains("\"screen\":\"prompt\""));
+        // things an event could put on the screen
+        b.app.alerts.push(("Mira: received file failed its integrity check".into(), 1));
+        let s = call(&mut b, "lock", "");
+        assert!(s.contains("\"screen\":\"unlock\"") && s.contains("\"locked\":true"), "locked from the prompt: {s}");
+        assert!(!s.contains("Mira") && !s.contains("integrity") && s.contains("\"alerts\":[]"), "{s}");
+        assert!(s.contains("\"status\":\"Locked. Enter the vault password.\""), "{s}");
+        assert!(s.contains("\"tor_offer\":null") && s.contains("\"verify_number\":null"), "{s}");
+    }
+
+    #[test]
+    fn a_lock_requested_during_the_key_derivation_is_applied_when_it_ends() {
+        let d = tempfile::tempdir().unwrap();
+        { let mut b = bridge(d.path()); create(&mut b); }
+        let mut b2 = bridge(d.path());
+        call(&mut b2, "secret", PW);
+        b2.call("enter", &z(""));
+        call(&mut b2, "lock", "");
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        let mut s = String::new();
+        while std::time::Instant::now() < end { s = call(&mut b2, "snapshot", ""); if s.contains("\"locked\":true") { break; } std::thread::sleep(Duration::from_millis(50)); }
+        assert!(s.contains("\"locked\":true") && s.contains("\"screen\":\"unlock\""), "the vault must not end up unlocked in the background: {s}");
+    }
+
+    #[test]
+    fn reconnecting_under_the_lock_never_types_into_the_password_and_offline_needs_no_password() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        b.auto_online = true; b.started = true;
+        call(&mut b, "lock", "");
+        b.app.online = Online::Failed("test".into());
+        b.retry_at = Some(Instant::now() - Duration::from_secs(1));
+        let s = call(&mut b, "snapshot", "");
+        assert!(s.contains("\"pw_chars\":0"), "no synthetic key reached the password prompt: {s}");
+        assert!(!matches!(b.app.online, Online::Failed(_)), "the restart still ran under the lock");
+        let s = call(&mut b, "offline_now", "");
+        assert!(s.contains("\"user_offline\":true") && s.contains("\"locked\":true"), "{s}");
+        assert!(matches!(b.app.online, Online::Offline | Online::Stopping), "offline needs no password");
     }
 
     #[test]

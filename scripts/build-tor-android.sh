@@ -12,6 +12,7 @@ API=29
 TOR=0.4.9.16;        TOR_SHA=6180e193152f4525bdca5475168419b2a2035b963c3c60162a187f86e6160e48
 SSL=3.5.9;           SSL_SHA=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 EVENT=2.1.12-stable; EVENT_SHA=92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb
+# The OpenSSL fingerprint is ALSO published on openssl-library.org (policies/general/artifact-signing-policy and /source), independent of the tarball that carries doc/fingerprints.txt.
 # PRIMARY key fingerprints that may sign each source (tor: David Goulet / Alexander Faeroey; OpenSSL: the project's release certificate, listed in its doc/fingerprints.txt;
 # libevent: Azat Khuzhin, named in libevent's Documentation/Developers.md). Pinned here, not fetched.
 TOR_SIGNERS="B74417EDDF22AC9F9E90F49142E86A2A11F48D36 1C1BC007A9F607AA8152C040BEA7B180B1491921"
@@ -26,12 +27,11 @@ case "$ABI" in
 esac
 BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 export PATH="$BIN:$PATH" ANDROID_NDK_ROOT="$NDK" SOURCE_DATE_EPOCH=1700000000 TZ=UTC LC_ALL=C
-mkdir -p "$WORK/bin"
 REALCC="$BIN/${TRIPLE}${API}-clang"
 export CC="$WORK/bin/${TRIPLE}${API}-clang" AR="$BIN/llvm-ar" RANLIB="$BIN/llvm-ranlib" STRIP="$BIN/llvm-strip" READELF="$BIN/llvm-readelf"
 umask 077
 mkdir -p -m 700 "$WORK"; [ "$(stat -c %u "$WORK")" = "$(id -u)" ] || { echo "$WORK is not ours" >&2; exit 1; }
-mkdir -p "$WORK/src" "$WORK/bin"; rm -rf "$WORK/$ABI"; mkdir -p "$WORK/$ABI"
+mkdir -p -m 700 "$WORK/src" "$WORK/bin"; rm -rf "$WORK/$ABI"; mkdir -p "$WORK/$ABI"
 # the path-hiding flags live in a compiler WRAPPER, not in CFLAGS: OpenSSL and tor print their CFLAGS into the binary, and these flags name the builder's directories
 printf '#!/bin/sh\nexec "%s" -ffile-prefix-map="%s"=/build -fdebug-prefix-map="%s"=/build -ffile-prefix-map="%s"=/ndk "$@"\n' "$REALCC" "$WORK" "$WORK" "$NDK" > "$CC"; chmod 700 "$CC"
 
@@ -44,8 +44,11 @@ fetch() { # name url
 # gpg_ok <signature> <signed file> <allowed primary fingerprints>: a GOOD signature whose PRIMARY key is on the list
 gpg_ok() {
   local out; out="$(gpg --batch --status-fd 1 --verify "$1" "$2" 2>/dev/null || true)"
+  # an expired or revoked key (EXPKEYSIG, EXPSIG, REVKEYSIG) or a bad signature is never acceptable, even though gpg also prints VALIDSIG for some of them
+  grep -qE '^\[GNUPG:\] (BADSIG|EXPKEYSIG|EXPSIG|REVKEYSIG|ERRSIG)' <<<"$out" && return 1
+  grep -q '^\[GNUPG:\] GOODSIG' <<<"$out" || return 1
   local fpr; for fpr in $3; do
-    echo "$out" | grep -q "^\[GNUPG:\] VALIDSIG .* $fpr\$" && return 0
+    grep -q "^\[GNUPG:\] VALIDSIG .* $fpr\$" <<<"$out" && return 0
   done
   return 1
 }
@@ -96,8 +99,10 @@ grep -q "__stack_chk_fail" <<<"$syms" || { echo "CHECK FAILED: no stack protecto
 grep -q "BIND_NOW" <<<"$dyn" || { echo "CHECK FAILED: no BIND_NOW"; fail=1; }
 grep -q "GNU_RELRO" <<<"$seg" || { echo "CHECK FAILED: no RELRO"; fail=1; }
 grep "GNU_STACK" <<<"$seg" | grep -q "RWE" && { echo "CHECK FAILED: executable stack"; fail=1; }
-grep LOAD <<<"$seg" | grep -qv "0x4000" && { echo "CHECK FAILED: LOAD segments not 16 KB aligned"; fail=1; }
+grep LOAD <<<"$seg" | awk '{print $NF}' | grep -qvx "0x4000" && { echo "CHECK FAILED: LOAD segments not 16 KB aligned"; fail=1; }
 if [ "$ABI" = arm64-v8a ]; then grep -q "BTI" <<<"$("$READELF" -n "$LIB")" || { echo "CHECK FAILED: no BTI note"; fail=1; }; fi
+# x86_64 exists for the EMULATOR only (no phone is x86_64): its CET note is missing (OpenSSL's assembly objects carry none, so the linker drops it), reported, not fatal
+if [ "$ABI" = x86_64 ]; then grep -q "IBT" <<<"$("$READELF" -n "$LIB")" || echo "NOTE: no IBT (CET) property in the x86_64 binary (emulator-only ABI, arm64 has BTI and PAC)"; fi
 STR="$(strings "$LIB")"   # a variable, not a pipe: `grep -q` closing the pipe early would make a pipefail shell report "not found"
 for s in "$HOME" "$(id -un)" "$WORK" "$ROOT" "$NDK"; do [ -n "$s" ] && [ "$s" != / ] && grep -qF "$s" <<<"$STR" && { echo "CHECK FAILED: the binary contains '$s'"; fail=1; }; done
 [ "$fail" = 0 ] || { rm -f "$LIB"; echo "libtor.so removed: fix the build" >&2; exit 1; }

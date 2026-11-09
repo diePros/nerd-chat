@@ -73,8 +73,15 @@ pub fn torrc(dir: &Path, owning_pid: u32, extra: &[String]) -> Result<String, To
 static LIVE: std::sync::Mutex<Vec<(u32, PathBuf)>> = std::sync::Mutex::new(Vec::new());
 
 /// SIGKILL every tor we spawned and delete its directory (state with guard fingerprints, consensus times, cookie), right now. For panic and purge.
+/// Bumped by every kill: a start that began before it and spawns tor AFTER it (a panic or a cancel that raced the start) sees the change and kills its own tor at once.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn kill_spawned() {
-    let v = std::mem::take(&mut *LIVE.lock().unwrap_or_else(|e| e.into_inner()));
+    let v = {
+        let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::mem::take(&mut *live)
+    };
     for (pid, dir) in v {
         if let Some(p) = rustix::process::Pid::from_raw(pid as i32) { let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL); }
         let _ = fs::remove_dir_all(&dir);
@@ -147,6 +154,7 @@ fn private_dir(cfg: &SpawnConfig) -> Result<PathBuf, TorError> {
 
 impl SpawnedTor {
     pub fn start(cfg: &SpawnConfig) -> Result<Self, TorError> {
+        let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
         let dir = private_dir(cfg)?;
         let result = (|| {
             let rc = torrc(&dir, std::process::id(), &cfg.extra_torrc)?;
@@ -161,7 +169,15 @@ impl SpawnedTor {
             Ok(child)
         })();
         let child = match result { Ok(c) => c, Err(e) => { let _ = fs::remove_dir_all(&dir); return Err(e); } };
-        LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((child.id(), dir.clone()));
+        {
+            let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+            if GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                // a panic or a cancel happened while this start was under way: this tor must not live
+                let mut child = child; let _ = child.kill(); let _ = child.wait(); let _ = fs::remove_dir_all(&dir);
+                return Err(TorError::Other("cancelled".into()));
+            }
+            live.push((child.id(), dir.clone()));
+        }
         let mut me = Self { control: Addr::Unix(dir.join("ctl")), socks: Addr::Unix(dir.join("socks")), child, dir };
         // wait for the control socket to appear (tor exits early on a bad config)
         let end = Instant::now() + Duration::from_secs(30);

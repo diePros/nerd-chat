@@ -217,6 +217,9 @@ impl VaultFile {
         Ok(())
     }
 
+    /// The means to re-check the password against the vault IN MEMORY (the lock screen): no file is read, so a replaced or missing vault file changes nothing.
+    pub fn credential_check(&self) -> sine_loco_vault::CredentialCheck { self.vault.credential_check() }
+
     /// The oldest history-file generation that is acceptable (0: none known). A history file whose newest slot is older than this was put back from a copy.
     pub fn history_floor(&self) -> u64 { self.hist_gen }
 

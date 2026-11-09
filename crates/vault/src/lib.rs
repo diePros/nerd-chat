@@ -100,6 +100,21 @@ pub struct Vault {
     counter: u64,
 }
 
+/// What is needed to check a password against THIS vault without reading any file: the salt, the cost profile and the wrapped data key (encrypted). It holds no secret, is `Send`,
+/// and does the same memory-hard derivation as opening the vault, so it is as slow for a guesser as the unlock screen.
+#[derive(Clone)]
+pub struct CredentialCheck { profile: Profile, salt: [u8; SALT], wrapped: [u8; WRAPPED] }
+
+impl CredentialCheck {
+    pub fn verify(&self, pw: &[u8], keyfile: Option<&[u8]>) -> Result<(), VaultError> {
+        let okf = keyfile.map(keyfile_secret).transpose()?;
+        let k = kek(pw, okf.as_deref(), self.profile, &self.salt)?;
+        XChaCha20Poly1305::new((&*k).into())
+            .decrypt(XNonce::from_slice(&self.wrapped[..24]), Payload { msg: &self.wrapped[24..], aad: &aad_wrap(&self.salt) })
+            .map(|_| ()).map_err(|_| VaultError::WrongCredentials)
+    }
+}
+
 fn keyfile_secret(k: &[u8]) -> Result<Zeroizing<[u8; 32]>, VaultError> {
     if k.len() < MIN_KEYFILE_LEN { return Err(VaultError::WeakKeyfile); }
     let mut h = Blake2b::<U32>::new();
@@ -185,6 +200,8 @@ impl Vault {
 
     /// Save counter of the state last opened/sealed (rollback detection: show it to the user).
     pub fn counter(&self) -> u64 { self.counter }
+    /// The in-memory means to re-check the password (see [`CredentialCheck`]): the lock uses it instead of re-reading and re-opening the vault file.
+    pub fn credential_check(&self) -> CredentialCheck { CredentialCheck { profile: self.profile, salt: self.salt, wrapped: self.wrapped } }
 
     /// KDF profile this vault was opened/created with (offer an upgrade if it is `LowMem`).
     pub fn profile(&self) -> Profile { self.profile }
@@ -299,6 +316,16 @@ mod tests {
     use super::*;
     const P: Profile = Profile::InsecureTest;
     const KF: [u8; 32] = [7; 32];
+
+    #[test]
+    fn the_credential_check_accepts_only_the_right_password_and_keyfile_without_the_blob() {
+        let v = Vault::create(b"pw", Some(&KF), P).unwrap();
+        let c = v.credential_check();
+        assert!(c.verify(b"pw", Some(&KF)).is_ok());
+        assert!(matches!(c.verify(b"pw", Some(&[8; 32])), Err(VaultError::WrongCredentials)));
+        assert!(matches!(c.verify(b"nope", Some(&KF)), Err(VaultError::WrongCredentials)));
+        assert!(matches!(c.verify(b"pw", None), Err(VaultError::WrongCredentials)));
+    }
 
     #[test]
     fn roundtrip_and_counter() {

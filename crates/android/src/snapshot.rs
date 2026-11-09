@@ -51,7 +51,9 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     let (screen, prompt) = if app.lock_auth() && app.screen == Screen::Main { ("unlock", None) } else { screen_str(&app.screen) }; // a real lock looks like the unlock screen
     w.f_str("screen", screen);
     w.f_opt_str("prompt", prompt);
-    w.f_str("status", &app.status);
+    let locked = app.lock_auth();
+    // while locked the status line is the lock's own text: events, alerts and contact names must never reach the lock screen
+    w.f_str("status", if locked { app.lock_msg() } else { &app.status });
     w.f_bool("error", app.error);
     w.f_opt_str("rejected", x.rejected);
     // typed secrets: counts only
@@ -123,9 +125,9 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
         None => w.f_null("detail"),
     }
 
-    w.f_opt_str("verify_number", app.view_number());
+    w.f_opt_str("verify_number", app.view_number().filter(|_| !locked));
 
-    match &app.tor_offer {
+    match app.tor_offer.as_ref().filter(|_| !locked) {
         Some(o) => {
             w.f_obj("tor_offer");
             w.f_str("link", &o.link); w.f_str("code", &o.code);
@@ -135,10 +137,10 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
         }
         None => w.f_null("tor_offer"),
     }
-    w.f_bool("pairing_waiting", app.pairing_waiting());
+    w.f_bool("pairing_waiting", app.pairing_waiting() && !locked);
 
     w.f_arr("alerts");
-    for (text, count) in &app.alerts { w.arr_item_obj(); w.f_str("text", text); w.f_num("count", *count as i64); w.end_obj(); }
+    for (text, count) in app.alerts.iter().filter(|_| !locked) { w.arr_item_obj(); w.f_str("text", text); w.f_num("count", *count as i64); w.end_obj(); }
     w.end_arr();
 
     match x.purge {

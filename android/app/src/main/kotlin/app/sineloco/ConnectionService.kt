@@ -9,8 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.os.IBinder
 
 /**
@@ -29,14 +27,9 @@ class ConnectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val app = application as SineLocoApp
         if (intent?.action == ACTION_OFFLINE) {
-            // only ASK: the core refuses while tor is still starting (it cannot be cancelled yet) and asks for confirmation when texts are unconfirmed. The service ends when the
-            // state really says offline ([SineLocoApp.watchConnection]), never before. If the core did not go offline, the reason (and the confirmation) is in the app: open it.
-            app.backend.setOnline(false)
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (app.backend.state.value.online) {
-                    try { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)) } catch (_: Exception) { }
-                }
-            }, 1200)
+            // offline NOW: no password (it works while the app is locked, which it always is when this button is used), no question about unconfirmed texts, and a tor that is still
+            // starting is cancelled. The service ends when the state really says offline ([SineLocoApp.watchConnection]).
+            app.backend.goOfflineNow()
             return START_NOT_STICKY
         }
         try {

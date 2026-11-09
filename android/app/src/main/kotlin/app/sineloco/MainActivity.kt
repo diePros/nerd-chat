@@ -42,6 +42,11 @@ class MainActivity : ComponentActivity() {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
             }
         }
+        // Back from the first screen only sends the app away AND locks it (consistently on every Android version: from 12 on the system would otherwise just move the task to the back
+        // without finishing it, and the screen would stay readable). Inner screens handle Back themselves (the Compose BackHandler runs first).
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { (application as SineLocoApp).backend.lock(); moveTaskToBack(true) }
+        })
         val prefs = getSharedPreferences("look", Context.MODE_PRIVATE) // only the colour choice: nothing sensitive
         val palette = Palettes.byId(prefs.getString("palette", null))
         val mode = runCatching { DarkMode.valueOf(prefs.getString("mode", null) ?: "") }.getOrDefault(DarkMode.System)
@@ -67,7 +72,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Leaving the app for good (back from the first screen, swipe-away from the recent apps, exit) ends the session in EVERY state: wipe, then die. Without this an unlocked
+     * Leaving the app for good (swipe-away from the recent apps, exit) ends the session in EVERY state: wipe, then die. (Back no longer finishes: it locks. Anything else that
+     * finishes the activity, for instance another app starting it with CLEAR_TASK, also wipes: a denial of service at worst, never a leak.) Without this an unlocked
      * vault would stay in a cached process whenever the foreground service is not running (offline, failed start), and the launcher icon would open it without a password.
      * A rotation or other configuration change is not leaving.
      */
