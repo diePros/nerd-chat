@@ -55,5 +55,5 @@ fn pairing_over_the_real_tor_network_through_the_screens() {
     // the one-shot service must be gone: a second dial of the same link must fail
     b.handle(Key::Char('n')); typed(&mut b, "carol"); b.handle(Key::Enter);
     b.handle(Key::Char('J')); typed(&mut b, &link); b.handle(Key::Enter); typed(&mut b, &code); b.handle(Key::Enter);
-    assert!(pump(&mut [&mut a, &mut b], 200, |x| x[1].error && !x[1].status.is_empty() && x[1].status.contains("failed")), "a second dial must fail: {}", b.status);
+    assert!(pump(&mut [&mut a, &mut b], 200, |x| x[1].error && x[1].status.contains("new link")), "a second dial must fail with a clear message: {}", b.status);
 }
