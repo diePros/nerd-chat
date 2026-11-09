@@ -47,15 +47,37 @@ function json(body: unknown, status: number, cacheControl: string): Response {
   });
 }
 
+// What GitHub said when it refused us (its own message, never our token), for the Worker log.
+async function refusal(res: Response, path: string): Promise<string> {
+  let message = "";
+  try {
+    const body = (await res.json()) as { message?: unknown };
+    message = typeof body.message === "string" ? body.message.slice(0, 200) : "";
+  } catch {
+    /* not JSON */
+  }
+  const left = res.headers.get("x-ratelimit-remaining");
+  const sso = res.headers.get("x-github-sso") ? " (SSO required)" : "";
+  return `github ${path || "/"} -> ${res.status}${sso}${left !== null ? ` (rate limit left: ${left})` : ""}${message ? `: ${message}` : ""}`;
+}
+
 async function gh(env: Env, path: string): Promise<unknown> {
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": "sine-loco-site",
-    "X-GitHub-Api-Version": "2022-11-28",
+  const call = (withToken: boolean) => {
+    const headers: Record<string, string> = {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "sine-loco-site",
+      "X-GitHub-Api-Version": "2022-11-28",
+    };
+    if (withToken && env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN.trim()}`;
+    return fetch(`https://api.github.com/repos/${env.REPO}${path}`, { headers });
   };
-  if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
-  const res = await fetch(`https://api.github.com/repos/${env.REPO}${path}`, { headers });
-  if (!res.ok) throw new Error(`github ${path} -> ${res.status}`);
+  let res = await call(true);
+  if (env.GITHUB_TOKEN && (res.status === 401 || res.status === 403)) {
+    // A bad, expired or unapproved token must not take the panel down: say why, then try without it.
+    console.error(JSON.stringify({ msg: "github refused the token, retrying without it", detail: await refusal(res, path) }));
+    res = await call(false);
+  }
+  if (!res.ok) throw new Error(await refusal(res, path));
   return res.json();
 }
 
