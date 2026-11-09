@@ -51,7 +51,7 @@ pub fn run() -> eframe::Result {
 
     let mut g = Gui::from_args(&args, started.swap);
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_title("Nerd-chat"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_title("Nerd-chat").with_app_id("nerd-chat"),
         ..Default::default()
     };
     g.frames = 0;

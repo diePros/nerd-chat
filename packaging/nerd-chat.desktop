@@ -8,4 +8,4 @@ Icon=nerd-chat
 Terminal=false
 Categories=Network;InstantMessaging;Chat;
 Keywords=chat;tor;private;secure;
-StartupWMClass=Nerd-chat
+StartupWMClass=nerd-chat

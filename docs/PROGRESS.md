@@ -85,3 +85,6 @@ GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phas
 
 ## BUG FIXED: first run started RAM-only (2026-11-09, found by the owner)
 After the first-run dialog the GUI created the app core WITHOUT the vault path, so nothing was saved (the sidebar said "RAM only", the dialog said otherwise). Fixed in `crates/gui/src/shell.rs` (`path = Some(..)` in the new-vault branch) with a regression test (`first_run_gives_the_app_the_default_vault_path_not_ram_only`, verified to fail without the fix). Lesson: the screenshot demo runs with `--ram`, so no test had covered the real default path. TODO: an end-to-end GUI test that creates a vault under a temporary HOME, closes and reopens it.
+
+## Window icon (2026-11-09)
+On Wayland the compositor finds the icon through the window's app id, which must equal the .desktop file name: the GUI now sets `app_id = "nerd-chat"` (matches `nerd-chat.desktop`, `StartupWMClass=nerd-chat`). Reported by the owner (default Wayland icon showed).
