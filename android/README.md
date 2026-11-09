@@ -8,6 +8,8 @@ indicators, no presence beyond "connected over Tor"** (docs/DELIVERY.md). Focus:
 > nothing is sent). The bridge to the Rust core (`nerd-chat-app`) and the embedded Tor are NOT built yet: see `docs/ANDROID_PORT.md`.
 > This build declares **no permissions at all**, so it cannot reach the network.
 
+Setting this up on a new machine (SDK, wrapper, signing, phone install, where to continue): **docs/ANDROID_DEV_SETUP.md**.
+
 ## Layout
 | Module | What | Builds without the Android SDK |
 |---|---|---|

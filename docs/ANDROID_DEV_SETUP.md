@@ -1,0 +1,98 @@
+# Android development setup (continue on your laptop)
+
+Everything below was done and verified on 2026-11-09 in a Linux cloud container. Commands are for Linux/macOS; on Windows use WSL2 (the
+Rust side already assumes Linux) or Android Studio's own SDK manager. What is NOT verified is flagged "untested".
+
+## 1. Where the work is
+| Thing | Where |
+|---|---|
+| Android app (Kotlin) | branch `claude/stoic-hopper-i5rqlk`, folder `android/` (commit `26f92f2`) |
+| Assessment, plan, decisions | `docs/ANDROID_PORT.md` (same branch) |
+| Rust core with the UI-agnostic `nerd-chat-app` crate and the Linux GUI | branch `next` (NOT merged into the branch above) |
+| `main` | the old TUI-only state |
+
+The Android branch was cut from `main`, so it does not contain `crates/app` or `crates/gui`. The first real integration step (the Rust bridge)
+needs `next`: merge or rebase the Android branch onto `next` first (`git fetch origin && git checkout claude/stoic-hopper-i5rqlk && git merge origin/next`;
+neither `android/` nor `docs/ANDROID_PORT.md` exists on `next`, so a conflict is unlikely).
+
+```bash
+git clone https://github.com/diePros/nerd-chat && cd nerd-chat
+git checkout claude/stoic-hopper-i5rqlk
+```
+
+## 2. Tools you need
+| Tool | Version used | Notes |
+|---|---|---|
+| JDK | 21 (Temurin/OpenJDK) | the build targets Java 17 bytecode; any JDK 17+ runs Gradle |
+| Gradle | **9.9.0 via the wrapper** (`android/gradlew`) | do not use a system Gradle; AGP 9.5.1 refuses anything below 9.6 |
+| Android SDK | platform `android-37.0`, build-tools `36.0.0` | see 3 |
+| Rust | 1.98.1 (`rust-toolchain.toml`) | only for the future bridge (`aarch64-linux-android` target); not needed for the Kotlin app today |
+| Python 3 + Pillow | optional | only to recreate the contact sheets in `android/design/` |
+
+Android Studio (current stable) can open `android/` directly and brings its own SDK manager; if you use it, install the same platform and
+build-tools versions and skip step 3. Untested: opening the project in Android Studio (the build was only run from the command line).
+
+## 3. Install the Android SDK from the command line
+```bash
+mkdir -p ~/android-sdk/cmdline-tools
+# download "Command line tools only" for your OS from https://developer.android.com/studio#command-line-tools-only
+unzip commandlinetools-*.zip -d /tmp/cmdtools && mv /tmp/cmdtools/cmdline-tools ~/android-sdk/cmdline-tools/latest
+export ANDROID_HOME=$HOME/android-sdk
+yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --licenses   # YOU accept Google's licence here
+$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+```
+Put `export ANDROID_HOME=$HOME/android-sdk` in your shell profile (or create `android/local.properties` with `sdk.dir=/home/you/android-sdk`;
+it is git-ignored). **Without either of them, `settings.gradle.kts` leaves out the `:app` module** on purpose, so `:model` and `:ui` still build and test.
+
+## 4. Everyday commands (run in `android/`)
+```bash
+./gradlew :model:test :ui:test                       # 11 tests; screenshots land in ui/build/shots/
+./gradlew :app:assembleDebug                         # app/build/outputs/apk/debug/app-debug.apk (~30 MB, debuggable)
+./gradlew :app:assembleRelease                       # app/build/outputs/apk/release/app-release-unsigned.apk (~2 MB, R8-shrunk)
+./gradlew :app:lintDebug                             # report in app/build/reports/lint-results-debug.html (warnings only today)
+```
+The first run downloads Gradle 9.9.0, the plugins and about a gigabyte of dependencies. **If it fails with HTTP 429 from Maven Central, just rerun**
+(it resumes from the cache); that happened repeatedly behind the cloud proxy and is unlikely on a normal connection.
+
+### Install on a phone
+```bash
+# phone: Settings > About phone > tap "Build number" 7 times > Developer options > USB debugging on (GrapheneOS: same path)
+$ANDROID_HOME/platform-tools/adb devices
+$ANDROID_HOME/platform-tools/adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+Untested: nothing has been installed on a device or an emulator yet. First things to look at on a real phone: the lock screen, keyboard
+behaviour in the message field (this is gap G1), light/dark switching, rotation (the activity handles config changes itself, state is kept),
+the blank recent-apps thumbnail. The demo backend accepts any non-empty password and stores nothing.
+
+### Signing a release (never commit keys)
+```bash
+keytool -genkeypair -v -keystore ~/nerdchat-release.jks -alias nerdchat -keyalg RSA -keysize 4096 -validity 10000
+export NERDCHAT_KEYSTORE=$HOME/nerdchat-release.jks NERDCHAT_KEYSTORE_PASSWORD='...' NERDCHAT_KEY_ALIAS=nerdchat
+./gradlew :app:assembleRelease      # now signed; verify: $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+```
+Untested: the signed path (only the unsigned release build was run). Keep the keystore backed up offline: losing it means users cannot update.
+
+## 5. How the project is wired (so you do not rediscover it)
+- `model/` pure Kotlin JVM: data, `ChatBackend` interface, `FakeBackend`, palettes. `ui/` plain JVM Compose (JetBrains Compose Multiplatform 1.12.2, desktop artifacts)
+  so screens compile and render PNGs without the Android SDK. `app/` the Android application.
+- **`app/` compiles the same source files as `ui/`** (`sourceSets.getByName("main").kotlin.directories.add("../ui/src/main/kotlin")` in `app/build.gradle.kts`).
+  Rule for `ui/src/main`: only APIs present in both toolkits; platform things (back button, clipboard, exit) are parameters of `NerdApp`.
+- **Version coupling, learned the hard way:** current Compose (BOM 2026.09.00 = 1.12) needs compileSdk 37 and AGP 9.1+; AGP 9.5.1 needs Gradle 9.6+;
+  AGP 9 has built-in Kotlin, so do NOT apply `org.jetbrains.kotlin.android`, and put extra Kotlin source dirs under `android { sourceSets ... kotlin.directories }`
+  (the old `java.srcDir` and `kotlin { sourceSets }` forms silently do nothing or fail). Keep the desktop Compose Multiplatform version and the androidx BOM on the same minor (1.12.x).
+- `settings.gradle.kts` always adds `google()` (needed for androidx and AGP) and includes `:app` only when an SDK is found.
+- Screenshots: `ui/src/test/.../ShotsTest.kt` renders with Skia headlessly (`ImageComposeScene`, internal Compose API; it may need an `@OptIn` change after Compose updates).
+- Change colours only in `model/.../Palettes.kt`; the contrast test guards them (`android/README.md`).
+
+## 6. Where to continue (in this order)
+1. Install the debug APK on a real phone (ideally a Pixel with GrapheneOS) and note what looks or feels wrong: that feedback is the cheapest next step.
+2. Merge `next` into the Android branch and add the Rust bridge: a `cdylib` crate wrapping `nerd-chat-app`, JNI (or UniFFI) into a `RustBackend : ChatBackend`,
+   replacing `FakeBackend()` in `NerdChatApp.kt`. Prerequisite one-liner: `crates/net/src/tor/spawn.rs:44`, `st.f_type as i64` (Android's `statfs` type), so that `net`, `exchange`, `chat` and `app` compile for `aarch64-linux-android`
+   (checked with `cargo check --target aarch64-linux-android`; `cargo-ndk` and NDK r27+ are untested here).
+3. Embedded Tor per `docs/ANDROID_PORT.md` section 3.2 (this is the anonymity-critical part; gate: a real onion round trip phone to desktop), then the foreground service, then the isolated-process cleaner.
+4. Replace `SecureField` (gap G1) with an input that never builds a Kotlin `String` for secrets.
+5. Wire the APK into `scripts/release.sh` and its SHA256SUMS (no new channel), and decide the signing-key custody.
+
+## 7. Cloud-session leftovers you do not need
+The SDK in the cloud container (`~/android-sdk`), the Gradle caches and all build output are not in git and disappear with the container. Everything needed to rebuild is in the repository
+plus the steps above.
