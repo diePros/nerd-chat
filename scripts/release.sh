@@ -34,7 +34,10 @@ mkdir -p "$debroot/DEBIAN" "$debroot/usr/bin" "$docdir"
 install -m 0755 "$bin" "$debroot/usr/bin/nerd-chat"
 install -m 0644 LICENSE "$docdir/copyright"
 install -m 0644 README.md SECURITY.md docs/GETTING_STARTED.md docs/BUILD_AND_RUN.md "$docdir/"
-gzip -9n < CHANGELOG.md > "$docdir/changelog.gz"; chmod 0644 "$docdir/changelog.gz"
+gzip -9n < CHANGELOG.md > "$docdir/CHANGELOG.md.gz"; chmod 0644 "$docdir/CHANGELOG.md.gz"   # not Debian changelog syntax: do not call it changelog.gz
+mkdir -p "$debroot/usr/share/man/man1" "$debroot/usr/share/lintian/overrides"
+gzip -9n < packaging/nerd-chat.1 > "$debroot/usr/share/man/man1/nerd-chat.1.gz"; chmod 0644 "$debroot/usr/share/man/man1/nerd-chat.1.gz"
+printf '%s\n' '# the binary is statically linked on purpose (musl): nothing to link against' 'nerd-chat: shared-library-lacks-prerequisites [usr/bin/nerd-chat]' > "$debroot/usr/share/lintian/overrides/nerd-chat"; chmod 0644 "$debroot/usr/share/lintian/overrides/nerd-chat"
 size=$(du -sk "$debroot/usr" | cut -f1)
 cat > "$debroot/DEBIAN/control" <<CTL
 Package: nerd-chat
@@ -80,7 +83,9 @@ install -m 0644 packaging/nerd-chat.desktop "$gdeb/usr/share/applications/nerd-c
 install -m 0644 packaging/nerd-chat.svg "$gdeb/usr/share/icons/hicolor/scalable/apps/nerd-chat.svg"
 install -m 0644 LICENSE "$gdoc/copyright"
 install -m 0644 README.md SECURITY.md docs/GETTING_STARTED.md docs/EXCHANGING_CONTACTS.md "$gdoc/"
-gzip -9n < CHANGELOG.md > "$gdoc/changelog.gz"; chmod 0644 "$gdoc/changelog.gz"
+gzip -9n < CHANGELOG.md > "$gdoc/CHANGELOG.md.gz"; chmod 0644 "$gdoc/CHANGELOG.md.gz"
+mkdir -p "$gdeb/usr/share/man/man1"
+gzip -9n < packaging/nerd-chat-gui.1 > "$gdeb/usr/share/man/man1/nerd-chat-gui.1.gz"; chmod 0644 "$gdeb/usr/share/man/man1/nerd-chat-gui.1.gz"
 gsize=$(du -sk "$gdeb/usr" | cut -f1)
 cat > "$gdeb/DEBIAN/control" <<CTL
 Package: nerd-chat-gui
