@@ -2,7 +2,7 @@
 //! side (control replies, PROTOCOLINFO, GETINFO values, SOCKS5 replies) must never panic, never loop, never allocate without bound.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use nerd_chat_net::tor::{control::Controller, socks};
+use sine_loco_net::tor::{control::Controller, socks};
 use std::io::{Cursor, Read, Write};
 
 /// What the "server" says (the fuzz input); everything we send is swallowed.

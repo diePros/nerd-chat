@@ -13,7 +13,7 @@ pub struct Startup {
 /// Run FIRST in `main`. In the file-cleaning helper process this never returns.
 pub fn startup(args: &[String]) -> Startup {
     if crate::cleaner::is_worker_invocation(args) { crate::cleaner::worker_main(); }
-    if !args.iter().any(|a| a == "--no-sandbox") { nerd_chat_strip::set_cleaner(crate::cleaner::sandboxed_clean); }
+    if !args.iter().any(|a| a == "--no-sandbox") { sine_loco_strip::set_cleaner(crate::cleaner::sandboxed_clean); }
     let warnings = crate::hardening::harden();
     DONE.store(true, Ordering::SeqCst);
     Startup { warnings, swap: crate::hardening::swap_problem() }

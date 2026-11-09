@@ -21,7 +21,7 @@ pub enum StoreError {
     #[error("stored data is corrupt")]
     Corrupt,
     #[error("vault: {0}")]
-    Vault(#[from] nerd_chat_vault::VaultError),
+    Vault(#[from] sine_loco_vault::VaultError),
     #[error("file i/o: {0}")]
     Io(String),
     #[error("a vault already exists at that path (refusing to overwrite)")]

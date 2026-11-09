@@ -1,8 +1,8 @@
 //! LIVE test (needs `tor` in PATH and Internet): two apps, each with its OWN spawned Tor, pair over the real Tor network through the
 //! real screens: offer (public one-shot onion service, link shown only after the descriptor was uploaded) and join (SOCKS dial).
-//!   cargo test -p nerd-chat-app --test live_pairing -- --ignored --nocapture
-use nerd_chat_app::app::{App, Config, Key, Online, Screen};
-use nerd_chat_vault::Profile;
+//!   cargo test -p sine-loco-app --test live_pairing -- --ignored --nocapture
+use sine_loco_app::app::{App, Config, Key, Online, Screen};
+use sine_loco_vault::Profile;
 use std::{thread, time::{Duration, Instant}};
 
 fn typed(a: &mut App, s: &str) { for c in s.chars() { a.handle(Key::Char(c)); } }
@@ -29,7 +29,7 @@ fn pump(apps: &mut [&mut App], secs: u64, mut done: impl FnMut(&[&mut App]) -> b
 #[test]
 #[ignore = "needs tor and network"]
 fn pairing_over_the_real_tor_network_through_the_screens() {
-    nerd_chat_app::startup::startup(&[]); // what every front end runs first
+    sine_loco_app::startup::startup(&[]); // what every front end runs first
     let mut a = new_app(); a.handle(Key::Char('n')); typed(&mut a, "bob"); a.handle(Key::Enter);
     let mut b = new_app(); b.handle(Key::Char('n')); typed(&mut b, "alice"); b.handle(Key::Enter);
     a.handle(Key::Char('o')); b.handle(Key::Char('o'));

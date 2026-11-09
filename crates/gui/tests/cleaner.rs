@@ -1,8 +1,8 @@
 //! The GUI binary's cleaning helper process (same checks as crates/tui/tests/cleaner.rs; the GUI has no --strip command): it works, refuses what it must, and really runs under hard resource limits.
-use nerd_chat_strip::wire;
+use sine_loco_strip::wire;
 use std::{io::{Read, Write}, process::{Command, Stdio}};
 
-const EXE: &str = env!("CARGO_BIN_EXE_nerd-chat-gui");
+const EXE: &str = env!("CARGO_BIN_EXE_sine-loco-gui");
 
 fn run_worker(request: &[u8]) -> (Vec<u8>, bool) {
     let mut c = Command::new(EXE).arg("--clean-worker").env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
@@ -14,15 +14,15 @@ fn run_worker(request: &[u8]) -> (Vec<u8>, bool) {
 
 #[test]
 fn the_helper_cleans_and_refuses_like_the_in_process_cleaner() {
-    let (out, ok) = run_worker(&wire::encode_request(nerd_chat_strip::Mode::PlainText, "hi\u{200B}there\u{202E}".as_bytes()));
+    let (out, ok) = run_worker(&wire::encode_request(sine_loco_strip::Mode::PlainText, "hi\u{200B}there\u{202E}".as_bytes()));
     assert!(ok);
     let c = wire::decode_response(&out).unwrap();
     assert_eq!(String::from_utf8(c.data).unwrap(), "hi?there?".replace('?', "")); // invisible/bidi characters are removed
-    let (out, ok) = run_worker(&wire::encode_request(nerd_chat_strip::Mode::Auto, b"MZ not an image"));
+    let (out, ok) = run_worker(&wire::encode_request(sine_loco_strip::Mode::Auto, b"MZ not an image"));
     assert!(ok);
-    assert!(matches!(wire::decode_response(&out), Err(nerd_chat_strip::StripError::Unsupported)));
+    assert!(matches!(wire::decode_response(&out), Err(sine_loco_strip::StripError::Unsupported)));
     let (out, ok) = run_worker(&[9, 9, 9]); // garbage request
-    assert!(ok && matches!(wire::decode_response(&out), Err(nerd_chat_strip::StripError::Refused(_))));
+    assert!(ok && matches!(wire::decode_response(&out), Err(sine_loco_strip::StripError::Refused(_))));
 }
 
 #[test]

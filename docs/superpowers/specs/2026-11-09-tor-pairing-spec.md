@@ -27,14 +27,14 @@ streams come into existence**.
   listener are wiped/unlinked at the same moments.
 - Exactly ONE inbound connection is accepted; a second connection attempt is closed unread. The accepted stream goes to
   `PairingOffer::accept` with the usual deadline.
-- **Link** = the onion service id (56 base32 characters) wrapped as `nerdchat:pair/<id>`. It is public information, safe to send
+- **Link** = the onion service id (56 base32 characters) wrapped as `sineloco:pair/<id>`. It is public information, safe to send
   over any channel: whoever has it can only burn the single attempt (denial of service), not succeed without the code.
 - **Code** = the existing 10 digits (`4821-7390`), told in person or by phone. Link and code must travel over **different**
   channels; the UI says so. A party who sees both can win the one guess (and this is the documented weakness, as in the same-network pairing).
 - **TTL:** 10 minutes (the descriptor needs time to be published; the same-network offer keeps 5 minutes). One offer, one attempt.
 
 ### 3.2 The dial (join side, role B)
-- The joiner enters the link and the code. The link is parsed strictly (`nerdchat:pair/` + 56 base32 characters, a valid v3 id
+- The joiner enters the link and the code. The link is parsed strictly (`sineloco:pair/` + 56 base32 characters, a valid v3 id
   checksum, nothing else), then the SOCKS5 CONNECT goes to `<id>.onion:<virtual port>` through the joiner's Tor with a **fresh
   stream-isolation token** per attempt. Retry with backoff for up to 3 minutes while Tor reports "descriptor unavailable" (the
   offer's service needs about 10-60 seconds to be reachable); stop at the first protocol-level answer, success or failure.
@@ -83,7 +83,7 @@ Is 10 minutes right? Should the link carry a checksum beyond the onion id's own?
 **M3.** Cancel/panic must interrupt Tor streams: `Stream` gets `shutdown()`; the raw socket is registered with the pairing control BEFORE the SOCKS handshake; cancel is checked after connect and before the protocol starts; going offline or an engine shutdown ends the worker with a clear message. A worker that outlives a panic must not send our bundle.
 **M4.** No engine command. `Transport::pair_host_fn()` is cloned out at engine start (like `dial_fn`); it opens its own authenticated control connection and returns a `PairHost` that owns that connection, a one-shot listener and the receiver. Dropping it closes the connection, so Tor removes the non-detached service on cancel, panic, crash or kill. The acceptor accepts ONE connection and then closes the listener; an unverified local connection does not consume the offer.
 **M5.** The real public `ADD_ONION` is the probe for "may I offer": a 510 shows "your Tor cannot create the pairing service; ask the other person to offer". The advertised `can_host` bit is never changed by a pairing. The joiner needs SOCKS only.
-**M6.** The link is the bare 56-character onion id (it looks like random text and names no app). The parser accepts the bare id, `nerdchat:pair/<id>` and `<id>.onion`, trims whitespace and lowercases before the strict v3 check (checksum, version).
+**M6.** The link is the bare 56-character onion id (it looks like random text and names no app). The parser accepts the bare id, `sineloco:pair/<id>` and `<id>.onion`, trims whitespace and lowercases before the strict v3 check (checksum, version).
 **L2 (command shape).** A separate typed method, no key and no auth parameter: `ADD_ONION NEW:ED25519-V3 Flags=DiscardPK,MaxStreamsCloseCircuit MaxStreams=1 PoWDefensesEnabled=1 Port=<p>,<target>` (fallback without the PoW option on a 5xx), never `Detach`, `NonAnonymous` or `ClientAuthV3`; the returned ServiceID is validated; with `DiscardPK` the process never holds the key. The existing refusal of `ADD_ONION` without client authorization stays unchanged: an empty slice never means "public".
 **L1/L3.** The descriptor can stay on HSDirs for up to ~3 h after removal (documented). The local socket gets a random name. **L4** The joiner distinguishes: SOCKS 0xF0/0xF1 (retry within the window), 0xF2/0xF3/0xF7 after an earlier success (offer gone), EOF before the first frame (offer used or cancelled: does not count toward the joiner's lockout). **L5** After any failure the joiner's code is cleared and a new offer is needed. **L6** For remote pairing the trust question reads "Did you hear the code by voice from this person (not as text)?"; only yes gives `CodeAuthenticated`. **L7** Pairing needs the app online; that makes the user visible online to all contacts for that time (stated in the UI).
 **I1/I2.** Nothing is derived from the code (no client auth, no key, no checksum). Binding the onion id into the SPAKE2 transcript is optional hardening, done if cheap.

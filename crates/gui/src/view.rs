@@ -1,8 +1,8 @@
-//! Drawing and input mapping. Everything shown is read from the app core (`nerd-chat-app`); everything the user does becomes the same
+//! Drawing and input mapping. Everything shown is read from the app core (`sine-loco-app`); everything the user does becomes the same
 //! `Key` events the terminal version uses, so the two front ends cannot drift apart.
 use eframe::egui::{self, Align2, Color32, Event, RichText, Stroke};
-use nerd_chat_app::app::{App, Key, Mode, Online, Pane, Prompt, Screen};
-use nerd_chat_core::trust::Trust;
+use sine_loco_app::app::{App, Key, Mode, Online, Pane, Prompt, Screen};
+use sine_loco_core::trust::Trust;
 
 #[cfg(feature = "demo")]
 pub mod demo;
@@ -111,7 +111,7 @@ pub fn refused(ui: &mut egui::Ui, msg: &str) -> bool {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.heading("Nerd-chat cannot start");
+            ui.heading("Sine Loco cannot start");
             ui.add_space(12.0);
             ui.add_sized([560.0, 0.0], egui::Label::new(msg).wrap());
             ui.add_space(16.0);
@@ -125,7 +125,7 @@ pub enum Choice { None, Continue, Quit }
 
 pub fn first_run_text(path: &std::path::Path, tails: bool) -> String {
     let mut s = format!("Your vault (your contacts and keys, encrypted with your password) will be created here:\n\n{}\n\nThat is on THIS computer's disk. Backups and sync tools that copy your home folder will copy it too, and a restored backup brings back an old vault. To keep it elsewhere (a USB stick, or Persistent Storage on Tails), quit and start the program with --vault PATH.", path.display());
-    if tails { s.push_str("\n\nThis looks like Tails: your home folder is ERASED when you shut down, so this vault would be gone after the next restart. Use the Persistent Storage instead (--vault ~/Persistent/nerd-chat.vault)."); }
+    if tails { s.push_str("\n\nThis looks like Tails: your home folder is ERASED when you shut down, so this vault would be gone after the next restart. Use the Persistent Storage instead (--vault ~/Persistent/sine-loco.vault)."); }
     s
 }
 
@@ -134,7 +134,7 @@ pub fn first_run(ui: &mut egui::Ui, text: &str, tails: bool) -> Choice {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.heading("Welcome to Nerd-chat");
+            ui.heading("Welcome to Sine Loco");
             ui.add_space(12.0);
             ui.add_sized([620.0, 0.0], egui::Label::new(text).wrap());
             ui.add_space(18.0);
@@ -262,7 +262,7 @@ fn status_bar(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
 
 fn contacts(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
     ui.add_space(4.0);
-    ui.heading("Nerd-chat");
+    ui.heading("Sine Loco");
     ui.label(RichText::new(if app.is_ram_only() { "RAM only: nothing is saved" } else { "vault open" }).color(MUTED).small());
     ui.separator();
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -517,7 +517,7 @@ fn unverified_notice(ui: &mut egui::Ui, name: &str) -> NoticeChoice {
 }
 
 /// The open offer over Tor: the link goes to ONE person over any channel, the code only by voice. (No clipboard: the link is shown in groups to read or retype.)
-fn offer_card(ui: &mut egui::Ui, name: &str, o: &nerd_chat_app::app::TorLink, cmds: &mut Cmds) {
+fn offer_card(ui: &mut egui::Ui, name: &str, o: &sine_loco_app::app::TorLink, cmds: &mut Cmds) {
     ui.add_space(6.0);
     ui.label(RichText::new(format!("1. Send this link to {name} only (any way you like, but not to a group):")).strong());
     let l: &str = &o.link;
@@ -541,10 +541,10 @@ pub fn settings(ctx: &egui::Context, app: &mut App, open: &mut bool, hidden: &mu
         match entry {
             Some(p) => {
                 let mut h = *hidden;
-                if ui.checkbox(&mut h, "Hide Nerd-chat from the application menu").changed() {
+                if ui.checkbox(&mut h, "Hide Sine Loco from the application menu").changed() {
                     match crate::menu::set_hidden(p, h) { Ok(()) => { *hidden = h; note.clear(); } Err(e) => *note = e }
                 }
-                ui.label(RichText::new("Hiding writes a small file in your user folder (it shows that the program is installed); showing it again removes the file. The program still starts with the command nerd-chat-gui.").color(MUTED).small());
+                ui.label(RichText::new("Hiding writes a small file in your user folder (it shows that the program is installed); showing it again removes the file. The program still starts with the command sine-loco-gui.").color(MUTED).small());
             }
             None => { ui.label(RichText::new("No home folder found: the menu entry cannot be changed.").color(MUTED)); }
         }
@@ -560,10 +560,10 @@ pub fn settings(ctx: &egui::Context, app: &mut App, open: &mut bool, hidden: &mu
         ui.label(RichText::new("Messages on this computer").strong());
         let mut p = app.persist();
         let before = p;
-        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Off, "Keep nothing (messages exist only in memory)");
-        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Outbox, "Keep only unsent messages until they arrive");
-        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Day, "Keep all messages for about a day");
-        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Week, "Keep all messages for about a week");
+        ui.radio_value(&mut p, sine_loco_app::app::Persist::Off, "Keep nothing (messages exist only in memory)");
+        ui.radio_value(&mut p, sine_loco_app::app::Persist::Outbox, "Keep only unsent messages until they arrive");
+        ui.radio_value(&mut p, sine_loco_app::app::Persist::Day, "Keep all messages for about a day");
+        ui.radio_value(&mut p, sine_loco_app::app::Persist::Week, "Keep all messages for about a week");
         if p != before { app.set_persist(p); }
         ui.label(RichText::new("Kept messages are encrypted in a separate file next to your vault and only written every few seconds. Anyone with this computer and your password can read what is kept; a deleted message may survive in the disk's storage (an overwrite does not reach copy-on-write file systems or an SSD's spare blocks). Texts never carry a timestamp.").color(MUTED).small());
         ui.separator();
@@ -573,7 +573,7 @@ pub fn settings(ctx: &egui::Context, app: &mut App, open: &mut bool, hidden: &mu
         if ui.add_enabled(*purge_ok, egui::Button::new(RichText::new("Purge everything and exit").color(Color32::WHITE)).fill(Color32::from_rgb(140, 40, 40))).clicked() { purge = true; }
         ui.separator();
         ui.label(RichText::new("About").strong());
-        ui.label(format!("Nerd-chat {}. Unaudited software: read SECURITY.md before you rely on it.", env!("CARGO_PKG_VERSION")));
+        ui.label(format!("Sine Loco {}. Unaudited software: read SECURITY.md before you rely on it.", env!("CARGO_PKG_VERSION")));
         ui.label(RichText::new("Messages exist only in memory unless you keep unsent ones in the encrypted outbox. There is no screen-reader support on purpose: a screen reader would receive a copy of every message. The panic button wipes everything and exits.").color(MUTED).small());
         ui.add_space(8.0);
         if ui.button("Close").clicked() { *open = false; *purge_ok = false; }

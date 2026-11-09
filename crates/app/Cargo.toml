@@ -1,6 +1,6 @@
 [package]
 publish = false
-name = "nerd-chat-app"
+name = "sine-loco-app"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -13,14 +13,14 @@ terminal-ui = ["dep:ratatui"]
 test-transport = []
 
 [dependencies]
-nerd-chat-core = { path = "../core" }
-nerd-chat-vault = { path = "../vault" }
-nerd-chat-store = { path = "../store" }
-nerd-chat-exchange = { path = "../exchange" }
-nerd-chat-net = { path = "../net" }
-nerd-chat-chat = { path = "../chat" }
-nerd-chat-strip = { path = "../strip" }
-nerd-chat-sandbox = { path = "../sandbox" }
+sine-loco-core = { path = "../core" }
+sine-loco-vault = { path = "../vault" }
+sine-loco-store = { path = "../store" }
+sine-loco-exchange = { path = "../exchange" }
+sine-loco-net = { path = "../net" }
+sine-loco-chat = { path = "../chat" }
+sine-loco-strip = { path = "../strip" }
+sine-loco-sandbox = { path = "../sandbox" }
 ratatui = { version = "0.30", optional = true }
 zeroize = "1"
 getrandom = "0.3"
@@ -28,5 +28,5 @@ rustix = { version = "1", features = ["process", "thread", "event", "fs"] }
 
 [dev-dependencies]
 ratatui = "0.30"  # the renderer is compiled in the tests so that every screen test runs with and without the `terminal-ui` feature
-nerd-chat-vault = { path = "../vault", features = ["insecure-test-kdf"] }
+sine-loco-vault = { path = "../vault", features = ["insecure-test-kdf"] }
 tempfile = "3"

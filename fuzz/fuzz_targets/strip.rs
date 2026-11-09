@@ -2,7 +2,7 @@
 //! Invariants: never panic (the release profile aborts the process), and cleaning is idempotent: whatever we output must clean to itself.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use nerd_chat_strip::{clean, wire, Mode};
+use sine_loco_strip::{clean, wire, Mode};
 
 fuzz_target!(|d: &[u8]| {
     for mode in [Mode::Auto, Mode::PlainText] {

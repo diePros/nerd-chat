@@ -5,7 +5,7 @@
 //!         first cell yields a confirmed session (a replayed msg1 can never get there).
 //! The caller sets read/write timeouts on the stream (Tor streams, sockets) and rate limits via `HandshakeGuard`.
 use crate::{guard::{HandshakeGuard, Verdict}, NetError};
-use nerd_chat_core::{
+use sine_loco_core::{
     bundle::Bundle,
     identity::ContactIdentity,
     message::Signed,
@@ -142,7 +142,7 @@ mod tests {
     /// classical keys but not its ML-KEM key, even if that impostor ignores its own failure and sends a first cell anyway.
     #[test]
     fn responder_rejects_an_impostor_holding_only_the_classical_keys() {
-        use nerd_chat_core::session::Handshake;
+        use sine_loco_core::session::Handshake;
         let p = pair();
         let mut bytes = p.a.secret_bytes().to_vec();
         bytes[64..128].copy_from_slice(&[0x5a; 64]); // same signing/DH keys, different ML-KEM seed

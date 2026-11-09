@@ -1,6 +1,6 @@
 //! Application framing inside one signed message body: `kind(1) | payload`.
 //! Long texts are split into chunks (a body is at most `MAX_BODY` bytes); the receiver reassembles with hard caps.
-use nerd_chat_core::message::MAX_BODY;
+use sine_loco_core::message::MAX_BODY;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const KIND_TEXT_FINAL: u8 = 1;
@@ -127,8 +127,8 @@ impl Assembler {
                 if self.buf.len() + payload.len() > MAX_TEXT_BYTES { self.reset(); return Err(ProtoError::TooLong); }
                 self.buf.extend_from_slice(payload);
                 if matches!(kind, KIND_TEXT_CONT | KIND_TEXT_ID_CONT) { return Ok(Incoming::Ignored); }
-                // peer text can never steer a terminal or spoof direction (see `nerd_chat_core::text`)
-                let r = std::str::from_utf8(&self.buf).map(nerd_chat_core::text::sanitize).map_err(|_| ProtoError::BadUtf8);
+                // peer text can never steer a terminal or spoof direction (see `sine_loco_core::text`)
+                let r = std::str::from_utf8(&self.buf).map(sine_loco_core::text::sanitize).map_err(|_| ProtoError::BadUtf8);
                 let id = self.id;
                 self.reset();
                 r.map(|t| Incoming::Text(t, id))

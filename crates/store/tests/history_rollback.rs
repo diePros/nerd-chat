@@ -1,6 +1,6 @@
 //! R33-8: an OLDER copy of the history file put back is noticed through the counter file.
-use nerd_chat_store::{history::{History, NoPlatformKeys, Persist, State, SystemClock}, StoreError, VaultFile};
-use nerd_chat_vault::Profile;
+use sine_loco_store::{history::{History, NoPlatformKeys, Persist, State, SystemClock}, StoreError, VaultFile};
+use sine_loco_vault::Profile;
 use std::{fs, sync::Arc};
 
 fn open(p: &std::path::Path, vf: &VaultFile) -> Result<History, StoreError> {

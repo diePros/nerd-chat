@@ -1,10 +1,10 @@
-# Nerd-chat GUI (release 0.2) — design
+# Sine Loco GUI (release 0.2) — design
 
 Status: DRAFT for approval. Nothing of this is built. Decisions made by the project owner are marked **[decided]**; everything else
 is a call made by the author of this document, marked **[call]**, and can be overruled.
 
 ## 1. Intent
-Nerd-chat today is a terminal program. It is built for people at high risk, but only people who are comfortable in a terminal can use
+Sine Loco today is a terminal program. It is built for people at high risk, but only people who are comfortable in a terminal can use
 it. The GUI makes the same app usable by regular people. **[decided]** It must be *understandable by instinct*: someone who has used
 any chat app should find their way without a manual, and without having to know what Tor, an onion address or a safety number is.
 
@@ -56,7 +56,7 @@ it: the terminal version stays fully maintained, because it is the one that runs
 
 ## 5. Architecture
 ### 5.1 A UI-agnostic core crate (prerequisite)
-Move the state machine out of `crates/tui/src/app.rs` (3,300 lines incl. tests) into a new crate `crates/app` (`nerd-chat-app`) with no
+Move the state machine out of `crates/tui/src/app.rs` (3,300 lines incl. tests) into a new crate `crates/app` (`sine-loco-app`) with no
 terminal and no GUI dependency: screens and modes, vault access, engine events, pairing, the Tor hosting probe, the panic/purge logic.
 - **As built (phase 1/2, a deliberate deviation):** input stays the core's existing `Key` interface; the GUI maps widgets to the same `Key`s (and reads the same public state), so there is ONE state machine with ONE set of tests and no new entry points. Passwords, the pairing code and the message draft are therefore held only by the core's zeroizing buffers; the GUI never gives them to the toolkit. A real command layer (`Command::OpenChat(id)`, ...) is optional later work.
 - Output is a **view model** (read-only queries like today's `contact_rows`, `chat_lines`, `online_label`, `selected_detail`) plus a list of **notices** (alerts, status).
@@ -64,7 +64,7 @@ terminal and no GUI dependency: screens and modes, vault access, engine events, 
 - This step touches panic wipe, purge, the pairing worker and the probe: it is security-critical (reviewed by the strongest model, section 9).
 
 ### 5.2 Toolkit **[call]**
-A native Rust toolkit in a second binary `nerd-chat-gui`: **egui/eframe** (already a candidate in `docs/ROADMAP.md`). Reasons from reading its source (to be confirmed in the spike): it supports custom text buffers (`TextBuffer`), so the message composer and the password field can use zeroizing storage; clipboard support is a feature that can be left out; accessibility (AccessKit) is available; no web view, no JavaScript, no IPC to a backend. iced is the fallback if the spike shows a blocker (for example text-input copies that cannot be avoided).
+A native Rust toolkit in a second binary `sine-loco-gui`: **egui/eframe** (already a candidate in `docs/ROADMAP.md`). Reasons from reading its source (to be confirmed in the spike): it supports custom text buffers (`TextBuffer`), so the message composer and the password field can use zeroizing storage; clipboard support is a feature that can be left out; accessibility (AccessKit) is available; no web view, no JavaScript, no IPC to a backend. iced is the fallback if the spike shows a blocker (for example text-input copies that cannot be avoided).
 A **throwaway spike** comes first (section 8, phase 0), in a separate folder outside the workspace (D13): a window with a zeroizing text field, software rendering on a machine without a GPU, the linked libraries, a start on Tails (D12), and the D14 measurements (what copies of typed and shown text remain, and whether AccessKit has to be off for secret fields).
 
 ### 5.3 Pairing over Tor (new protocol, own spec) **[call]**
@@ -75,7 +75,7 @@ D7 needs a new way to pair: one device creates a temporary onion service and sho
 Contact list on the left, conversation in the middle, composer at the bottom, a status area with the connection state and the **offline switch** in one fixed place. An **inspector panel** (toggleable) shows what the terminal details view shows and more: safety number and fingerprints, onion address and hosting role, rotation state, per-transfer cleaning reports, per-contact settings (host-anyway, capability), alert history.
 
 ### 6.2 First run and unlocking
-- First run without a vault: a dialog (replaces the terminal confirmation): where the vault will be (`~/.local/share/nerd-chat/`), that it is on this computer's disk, that backups and sync tools copy it, a Tails warning, and a way to choose another place (USB stick, Persistent Storage). Remembering a chosen place leaves a marker on disk: **[call]** the choice is not remembered, and there is no recent-files list. The app asks again unless the default vault exists; `--vault PATH`, `--ram` and the other terminal options are honoured when the GUI is started from a terminal or from a launcher the user wrote, so a USB-stick user can make their own launcher (the menu entry itself carries no path).
+- First run without a vault: a dialog (replaces the terminal confirmation): where the vault will be (`~/.local/share/sine-loco/`), that it is on this computer's disk, that backups and sync tools copy it, a Tails warning, and a way to choose another place (USB stick, Persistent Storage). Remembering a chosen place leaves a marker on disk: **[call]** the choice is not remembered, and there is no recent-files list. The app asks again unless the default vault exists; `--vault PATH`, `--ram` and the other terminal options are honoured when the GUI is started from a terminal or from a launcher the user wrote, so a USB-stick user can make their own launcher (the menu entry itself carries no path).
 - Password creation and unlocking as today (12+ characters, optional keyfile, low-memory profile for low-RAM live systems, swap refusal with a plain explanation and an explicit override).
 
 ### 6.3 Going online **[decided D5]**
@@ -96,13 +96,13 @@ The *Check the code* screen shows the safety number big and readable, in groups,
 Files: send/receive with the existing cleaning helper and the plain report of what was removed. Key rotation, host-anyway and other advanced items live in the inspector, not on the main screen. **Panic**: a button (and F12 / Ctrl+\ shortcuts as today) that wipes and exits at once; purge behind the inspector with a confirmation. **Privacy screen**: documented as "hides the screen", not a lock, as in the terminal version. Text is always the sanitised text the engine delivers.
 
 ### 6.7 Installation and menu **[decided D4]**
-The .deb for the GUI installs a menu entry (`.desktop` file) named *Nerd-chat* with its own icon. A setting hides the entry: **[call]** implemented as a per-user override file in `~/.local/share/applications/` with `NoDisplay=true` (that file is itself a trace; the setting says so, and the docs mention the alternative of removing the package's menu file by hand or using the terminal package, which has no menu entry at all). The terminal package stays as it is. Packaging for the GUI is a separate, dynamically linked artifact in `scripts/release.sh`; the static terminal artifacts are unchanged.
+The .deb for the GUI installs a menu entry (`.desktop` file) named *Sine Loco* with its own icon. A setting hides the entry: **[call]** implemented as a per-user override file in `~/.local/share/applications/` with `NoDisplay=true` (that file is itself a trace; the setting says so, and the docs mention the alternative of removing the package's menu file by hand or using the terminal package, which has no menu entry at all). The terminal package stays as it is. Packaging for the GUI is a separate, dynamically linked artifact in `scripts/release.sh`; the static terminal artifacts are unchanged.
 
 ## 7. Security rules specific to the GUI
 - No clipboard by default (no clipboard feature in the toolkit build); an explicit "copy" is allowed only for the pairing link and the contact file text, with a notice.
 - Message text, passwords and the composer use zeroizing buffers; the spike proves the toolkit does not keep copies (undo history, per-frame layout caches, IME buffers). If it cannot, the toolkit decision is revisited.
 - No notifications that contain message text or names; no contact names in window titles; no thumbnails or recent-file entries that name the vault.
-- Core dumps off, not ptrace-readable, swap refusal and the sandboxed file-cleaning helper (which alone runs under `no_new_privs` and seccomp) as in the terminal version, all through `nerd_chat_app::startup::startup`; the GUI process itself parses no hostile files.
+- Core dumps off, not ptrace-readable, swap refusal and the sandboxed file-cleaning helper (which alone runs under `no_new_privs` and seccomp) as in the terminal version, all through `sine_loco_app::startup::startup`; the GUI process itself parses no hostile files.
 - Screenshots and screen-capture exposure are documented as outside what the app can control.
 - The panic path must work while the GUI is busy (probe, pairing, Tor start run on worker threads; the UI thread never blocks on I/O).
 

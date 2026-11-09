@@ -1,8 +1,8 @@
 //! DEVELOPER DEMO (cargo feature `demo`, never in a release build): two other accounts living in this process, linked to the real
 //! app core over the in-memory test network, so that every screen can be shown without Tor. It only presses the same keys a user would.
-use nerd_chat_app::app::{App, Config, Key, Screen};
-use nerd_chat_chat::{MemNet, Timing, Transport};
-use nerd_chat_vault::Profile;
+use sine_loco_app::app::{App, Config, Key, Screen};
+use sine_loco_chat::{MemNet, Timing, Transport};
+use sine_loco_vault::Profile;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 fn typed(app: &mut App, s: &str) { for c in s.chars() { app.handle(Key::Char(c)); } }
@@ -16,7 +16,7 @@ pub struct Demo { net: MemNet, peers: Vec<(&'static str, App)>, stage: u32, wait
 
 impl Demo {
     pub fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("nerd-chat-demo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sine-loco-demo-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         Demo { net: MemNet::new(), peers: vec![], stage: 0, wait: 0, dir }
     }

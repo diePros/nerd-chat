@@ -2072,175 +2072,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerd-chat-android"
-version = "0.1.0"
-dependencies = [
- "jni 0.21.1",
- "nerd-chat-app",
- "nerd-chat-core",
- "nerd-chat-store",
- "nerd-chat-vault",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-app"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.3.4",
- "nerd-chat-chat",
- "nerd-chat-core",
- "nerd-chat-exchange",
- "nerd-chat-net",
- "nerd-chat-sandbox",
- "nerd-chat-store",
- "nerd-chat-strip",
- "nerd-chat-vault",
- "ratatui",
- "rustix 1.1.6",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-chat"
-version = "0.1.0"
-dependencies = [
- "blake2 0.11.0",
- "getrandom 0.3.4",
- "nerd-chat-core",
- "nerd-chat-net",
- "nerd-chat-strip",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-core"
-version = "0.1.0"
-dependencies = [
- "blake2 0.11.0",
- "curve25519-dalek 4.1.3",
- "ed25519-dalek",
- "getrandom 0.3.4",
- "ml-kem",
- "sha2 0.11.1",
- "sha3",
- "snow",
- "thiserror 2.0.21",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-exchange"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "blake2 0.11.0",
- "chacha20poly1305",
- "curve25519-dalek 4.1.3",
- "getrandom 0.3.4",
- "nerd-chat-core",
- "nerd-chat-net",
- "spake2",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-gui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "nerd-chat-app",
- "nerd-chat-chat",
- "nerd-chat-core",
- "nerd-chat-net",
- "nerd-chat-strip",
- "nerd-chat-vault",
- "png",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-net"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "blake2 0.11.0",
- "getrandom 0.3.4",
- "hmac 0.13.0",
- "libc",
- "nerd-chat-core",
- "rustix 1.1.6",
- "sha2 0.11.1",
- "tempfile",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-sandbox"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "nerd-chat-store"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "getrandom 0.3.4",
- "libc",
- "nerd-chat-core",
- "nerd-chat-vault",
- "tempfile",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-strip"
-version = "0.1.0"
-dependencies = [
- "nerd-chat-core",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-tui"
-version = "0.1.0"
-dependencies = [
- "nerd-chat-app",
- "nerd-chat-core",
- "nerd-chat-net",
- "nerd-chat-store",
- "nerd-chat-strip",
- "nerd-chat-vault",
- "ratatui",
- "rustix 1.1.6",
- "signal-hook",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "nerd-chat-vault"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "blake2 0.11.0",
- "chacha20poly1305",
- "rand_core 0.6.4",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3517,6 +3348,175 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "sine-loco-android"
+version = "0.1.0"
+dependencies = [
+ "jni 0.21.1",
+ "sine-loco-app",
+ "sine-loco-core",
+ "sine-loco-store",
+ "sine-loco-vault",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-app"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "ratatui",
+ "rustix 1.1.6",
+ "sine-loco-chat",
+ "sine-loco-core",
+ "sine-loco-exchange",
+ "sine-loco-net",
+ "sine-loco-sandbox",
+ "sine-loco-store",
+ "sine-loco-strip",
+ "sine-loco-vault",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-chat"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.11.0",
+ "getrandom 0.3.4",
+ "sine-loco-core",
+ "sine-loco-net",
+ "sine-loco-strip",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-core"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.11.0",
+ "curve25519-dalek 4.1.3",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "ml-kem",
+ "sha2 0.11.1",
+ "sha3",
+ "snow",
+ "thiserror 2.0.21",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-exchange"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "blake2 0.11.0",
+ "chacha20poly1305",
+ "curve25519-dalek 4.1.3",
+ "getrandom 0.3.4",
+ "sine-loco-core",
+ "sine-loco-net",
+ "spake2",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-gui"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "png",
+ "sine-loco-app",
+ "sine-loco-chat",
+ "sine-loco-core",
+ "sine-loco-net",
+ "sine-loco-strip",
+ "sine-loco-vault",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-net"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "blake2 0.11.0",
+ "getrandom 0.3.4",
+ "hmac 0.13.0",
+ "libc",
+ "rustix 1.1.6",
+ "sha2 0.11.1",
+ "sine-loco-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "sine-loco-store"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.3.4",
+ "libc",
+ "sine-loco-core",
+ "sine-loco-vault",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-strip"
+version = "0.1.0"
+dependencies = [
+ "sine-loco-core",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-tui"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "rustix 1.1.6",
+ "signal-hook",
+ "sine-loco-app",
+ "sine-loco-core",
+ "sine-loco-net",
+ "sine-loco-store",
+ "sine-loco-strip",
+ "sine-loco-vault",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-vault"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "blake2 0.11.0",
+ "chacha20poly1305",
+ "rand_core 0.6.4",
+ "thiserror 2.0.21",
+ "zeroize",
+]
 
 [[package]]
 name = "siphasher"

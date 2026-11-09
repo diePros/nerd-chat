@@ -2,11 +2,11 @@
 //! the JNI surface stays two functions, and every operation is GUARDED: text only reaches the core where the core itself takes text
 //! (a typed letter anywhere else would be a one-key command, e.g. `q` or `o`), and only an allowlist of commands can be sent.
 use crate::snapshot::{snapshot, Extra};
-use nerd_chat_app::{
+use sine_loco_app::{
     app::{Action, App, Config, Key, Mode, Online, Pane, Persist, Prompt, Screen},
     startup, vault_path,
 };
-use nerd_chat_vault::Profile;
+use sine_loco_vault::Profile;
 use std::{path::{Path, PathBuf}, time::{Duration, Instant}};
 use zeroize::Zeroizing;
 
@@ -24,7 +24,7 @@ pub struct Options {
     /// what the encrypted outbox does until the user chooses (the phone turns it on: the OS kills the app at will); the user's choice is stored in the vault and wins
     pub persist_default: Persist,
     /// the deletable key store for the history's bucket keys (the Android Keystore); None = keys are stored inside the encrypted history file (cannot be erased cryptographically)
-    pub platform_keys: Option<std::sync::Arc<dyn nerd_chat_store::history::PlatformKeys>>,
+    pub platform_keys: Option<std::sync::Arc<dyn sine_loco_store::history::PlatformKeys>>,
 }
 
 pub struct Bridge {
@@ -42,10 +42,10 @@ impl Bridge {
         Self::with_profile(dir, o.tor_path, if o.low_mem { Profile::LowMem } else { Profile::Strong }, o.persist_default, o.platform_keys)
     }
 
-    pub(crate) fn with_profile(dir: &Path, tor_path: Option<PathBuf>, profile: Profile, persist_default: Persist, platform_keys: Option<std::sync::Arc<dyn nerd_chat_store::history::PlatformKeys>>) -> Result<Self, String> {
+    pub(crate) fn with_profile(dir: &Path, tor_path: Option<PathBuf>, profile: Profile, persist_default: Persist, platform_keys: Option<std::sync::Arc<dyn sine_loco_store::history::PlatformKeys>>) -> Result<Self, String> {
         // `--no-sandbox`: the core's file cleaner re-executes /proc/self/exe, which on Android is app_process, not us. The phone app exposes no file
         // feature, so the cleaner is never called; the isolated-process cleaner (docs/ANDROID_PORT.md 3.3) replaces this before files arrive.
-        let _ = startup::startup(&["nerd-chat".into(), "--no-sandbox".into()]);
+        let _ = startup::startup(&["sine-loco".into(), "--no-sandbox".into()]);
         vault_path::prepare_dir(dir)?;
         let path = dir.join(vault_path::FILE);
         if std::fs::symlink_metadata(&path).is_ok() { vault_path::check_existing(&path)?; }

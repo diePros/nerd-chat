@@ -1,4 +1,4 @@
-//! nerd-chat-core: identities, contact bundles, signed messages, fixed-size cells.
+//! sine-loco-core: identities, contact bundles, signed messages, fixed-size cells.
 #![forbid(unsafe_code)]
 
 pub mod bundle;

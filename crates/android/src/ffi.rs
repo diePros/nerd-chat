@@ -1,10 +1,10 @@
-//! JNI entry points for `app.nerdchat.model.NativeBridge`. The ONLY module with `unsafe_code` allowed: the exported symbols need
+//! JNI entry points for `app.sineloco.model.NativeBridge`. The ONLY module with `unsafe_code` allowed: the exported symbols need
 //! `#[no_mangle]`, which the compiler counts as unsafe. There is no `unsafe` block anywhere in this crate (the `jni` crate's safe API is used);
 //! `tests/hygiene.rs` keeps it that way.
 #![allow(unsafe_code)]
 
 use crate::bridge::{Bridge, Options};
-use nerd_chat_app::app::Persist;
+use sine_loco_app::app::Persist;
 use jni::{
     objects::{JCharArray, JObject, JString},
     sys::{jboolean, jint, jstring, JNI_TRUE},
@@ -28,10 +28,10 @@ fn err_json(msg: &str) -> String {
 
 /// `nInit(dir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
 #[no_mangle]
-pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, history_default: jint, keys: JObject<'l>) -> jstring {
+pub extern "system" fn Java_app_sineloco_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, history_default: jint, keys: JObject<'l>) -> jstring {
     let dir: String = match env.get_string(&dir) { Ok(s) => s.into(), Err(_) => return out(&mut env, &err_json("bad directory argument")) };
     let tor_path = if tor.is_null() { None } else { env.get_string(&tor).ok().map(|s| PathBuf::from(String::from(s))) };
-    let platform_keys: Option<std::sync::Arc<dyn nerd_chat_store::history::PlatformKeys>> = crate::keys::JniKeys::new(&env, &keys).map(|k| std::sync::Arc::new(k) as _);
+    let platform_keys: Option<std::sync::Arc<dyn sine_loco_store::history::PlatformKeys>> = crate::keys::JniKeys::new(&env, &keys).map(|k| std::sync::Arc::new(k) as _);
     let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(old) = g.as_mut() { old.wipe(); } // a second init must not leave a running core (or a half-written new vault) behind
     let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path, persist_default: match history_default { 1 => Persist::Outbox, 2 => Persist::Day, 3 => Persist::Week, _ => Persist::Off }, platform_keys }) {
@@ -47,7 +47,7 @@ pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: J
 /// `nCall(op: String, arg: CharArray?): String` -> the new snapshot. The char array is copied into zeroizing memory and the copy wiped;
 /// the CALLER wipes its own array.
 #[no_mangle]
-pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nCall<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, op: JString<'l>, arg: JCharArray<'l>) -> jstring {
+pub extern "system" fn Java_app_sineloco_model_NativeBridge_nCall<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, op: JString<'l>, arg: JCharArray<'l>) -> jstring {
     let op: String = match env.get_string(&op) { Ok(s) => s.into(), Err(_) => return out(&mut env, &err_json("bad operation")) };
     let text: Zeroizing<String> = if arg.is_null() { Zeroizing::new(String::new()) } else {
         let len = env.get_array_length(&arg).unwrap_or(0).max(0) as usize;

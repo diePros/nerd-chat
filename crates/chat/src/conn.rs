@@ -7,7 +7,7 @@ use crate::{
     proto::{self, Assembler, Incoming},
     transport::BoxStream,
 };
-use nerd_chat_core::{identity::ContactIdentity, session::{Session, WIRE_CELL_LEN}};
+use sine_loco_core::{identity::ContactIdentity, session::{Session, WIRE_CELL_LEN}};
 use std::{
     io::{ErrorKind, Read, Write},
     sync::{atomic::{AtomicBool, Ordering}, mpsc::{Receiver, Sender, TryRecvError}, Arc},
@@ -268,13 +268,13 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         }
                         if done.is_some() {
                             let x = inx.take().expect("set above");
-                            let mode = if x.o.mode == file::MODE_TEXT { nerd_chat_strip::Mode::PlainText } else { nerd_chat_strip::Mode::Auto };
+                            let mode = if x.o.mode == file::MODE_TEXT { sine_loco_strip::Mode::PlainText } else { sine_loco_strip::Mode::Auto };
                             match file::parse_stream(&x.buf) {
                                 Some(content) if file::hash(content) == x.o.hash => {
                                     // quarantine: re-clean ourselves, never trust the sender's cleaning
-                                    match nerd_chat_strip::clean_hooked(content, mode) {
+                                    match sine_loco_strip::clean_hooked(content, mode) {
                                         Ok(c) => {
-                                            let resanitised = c.data.len() != content.len() || (mode == nerd_chat_strip::Mode::Auto && !c.report.is_empty());
+                                            let resanitised = c.data.len() != content.len() || (mode == sine_loco_strip::Mode::Auto && !c.report.is_empty());
                                             let data = Zeroizing::new(c.data);
                                             if ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::File { id, data, format: c.format, report: c.report, resanitised } })).is_err() { break; }
                                         }

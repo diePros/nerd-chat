@@ -65,7 +65,7 @@ impl<'a> R<'a> {
         let n = self.u16()?;
         if n > MAX_LINE { return None; }
         let s = std::str::from_utf8(self.take(n)?).ok()?;
-        Some(s.chars().map(|c| if c.is_control() || nerd_chat_core::text::is_unsafe_char(c) { '?' } else { c }).collect())
+        Some(s.chars().map(|c| if c.is_control() || sine_loco_core::text::is_unsafe_char(c) { '?' } else { c }).collect())
     }
 }
 

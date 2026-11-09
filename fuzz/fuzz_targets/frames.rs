@@ -3,7 +3,7 @@
 //! frames (the reassembly state machine must survive any order).
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use nerd_chat_chat::{file, proto};
+use sine_loco_chat::{file, proto};
 
 fuzz_target!(|d: &[u8]| {
     let mut a = proto::Assembler::new();

@@ -1,8 +1,8 @@
 //! The visible state of the core as one JSON document (`"v": 1`). Only what a screen needs: passwords and the pairing code never appear
 //! (only how many characters were typed), chat lines only for the OPEN chat, like the Linux GUI.
 use crate::json::W;
-use nerd_chat_app::app::{App, Mode, Online, Pane, Persist, Prompt, Screen};
-use nerd_chat_core::trust::Trust;
+use sine_loco_app::app::{App, Mode, Online, Pane, Persist, Prompt, Screen};
+use sine_loco_core::trust::Trust;
 use std::time::Instant;
 use zeroize::Zeroizing;
 

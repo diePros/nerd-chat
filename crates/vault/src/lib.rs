@@ -201,7 +201,7 @@ impl Vault {
     /// A 32-byte key for another purpose (a file next to the vault), derived from the data key and a label: unknown to anyone without the password, and different per label.
     pub fn subkey(&self, label: &[u8]) -> Zeroizing<[u8; 32]> {
         let mut h = Blake2b::<U32>::new();
-        h.update(b"nerd-chat-vault-subkey-v1");
+        h.update(b"sine-loco-vault-subkey-v1");
         h.update((label.len() as u32).to_le_bytes());
         h.update(label);
         h.update(&**self.dk);

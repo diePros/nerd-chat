@@ -20,8 +20,8 @@ pub const BUCKET_SECS: u64 = 6 * 3600;
 pub const EPOCH_SECS: u64 = 24 * 3600;
 /// Default size of ONE slot (the file is two of them): 1 MiB, so the file is always 2 MiB whatever it holds.
 pub const SLOT_LEN: usize = 1 << 20;
-const SLOT_AAD: &[u8] = b"nerd-chat-history-slot-v1";
-const BUCKET_AAD: &[u8] = b"nerd-chat-history-bucket-v1";
+const SLOT_AAD: &[u8] = b"sine-loco-history-slot-v1";
+const BUCKET_AAD: &[u8] = b"sine-loco-history-bucket-v1";
 const MAX_TEXT: usize = 32 * 1024;
 /// At most this many messages per contact (the same as the chat view's cap).
 pub const MAX_LINES_PER_CONTACT: usize = 500;

@@ -141,7 +141,7 @@ CONFIRMED CORRECT against real tor: ADD_ONION syntax (V3Auth + ClientAuthV3 + ED
 | R5-I3 | Duplicate dependency versions (hmac/sha2/digest/base64/curve25519) | OPEN | add to cargo-deny (D-4) |
 
 ## Chat stage (self-notes before review 6)
-- New: `nerd-chat-chat` (proto, transport, conn, engine) + TUI chat screens, online/offline toggle, `--tor-*` flags.
+- New: `sine-loco-chat` (proto, transport, conn, engine) + TUI chat screens, online/offline toggle, `--tor-*` flags.
 - C6-roles FIXED (see role-negotiation notes below): a designated host that cannot host flips to dialing; a dialer lazily hosts after repeated failed dials.
 - C6-timing OPEN: 30 s keepalives + reconnect backoff are observable timing patterns; no constant-rate cover traffic.
 - C6-queued-label FIXED (cycle 33): when the engine hands the queue to a new connection it emits `Event::Flushed` and the UI drops the "(queued)" label. This means "handed to the live connection", NOT "read by the contact": there are still no delivery receipts, by design.
@@ -225,7 +225,7 @@ No Critical. Opus review integrated:
 | R9-L5 | peer-driven status spam / overwriting warnings | PARTIAL | max 6 notices/min per connection, 6 bad frames then disconnect (test). FIXED (cycle 14): integrity/refusal/unexpected-data notices are `alert`s kept in a sticky red bar until acknowledged with `z` (max 5, wiped on panic) |
 | R9-L6 | offer revealed exact length; decline timing is a presence oracle | PARTIAL | offer carries only the bucket (length inside the accepted stream). OPEN: manual vs auto-decline timing (documented) |
 | R9-I | TooLarge message, stale doc claims, single-key accept without contact name | FIXED | message says 8 MiB, docs rewritten, accept/decline status names the contact |
-| R9-open | fuzz harness / standalone strip / sandboxing | PARTIAL | DONE: deterministic mutation fuzz test (`mutated_inputs_never_panic`, 16k inputs per run), `nerd-chat --strip IN OUT`. FIXED (cycle 26): the parsers run in a helper process under a seccomp allowlist (`crates/sandbox`, one `unsafe` prctl call, user-approved) plus no_new_privs, rlimits, own session, kill-with-parent and a strict decoder for its answer (docs/FILE_SHARING.md). Reviewed by Opus (review 18, 31+ mutants, soundness of the single unsafe block confirmed), fixes in cycle 27. OPEN: x86_64 only (other targets refuse unless `--no-sandbox`), libFuzzer/cargo-fuzz target (needs nightly) |
+| R9-open | fuzz harness / standalone strip / sandboxing | PARTIAL | DONE: deterministic mutation fuzz test (`mutated_inputs_never_panic`, 16k inputs per run), `sine-loco --strip IN OUT`. FIXED (cycle 26): the parsers run in a helper process under a seccomp allowlist (`crates/sandbox`, one `unsafe` prctl call, user-approved) plus no_new_privs, rlimits, own session, kill-with-parent and a strict decoder for its answer (docs/FILE_SHARING.md). Reviewed by Opus (review 18, 31+ mutants, soundness of the single unsafe block confirmed), fixes in cycle 27. OPEN: x86_64 only (other targets refuse unless `--no-sandbox`), libFuzzer/cargo-fuzz target (needs nightly) |
 | R10-self | while testing the new CLI I found the save error path unlinked an EXISTING file the user tried to overwrite (TUI save and `--strip`) and an arithmetic overflow in the PNG size calculation (panic = abort would kill the app) | FIXED | create_new first, only remove a file we created; u128 arithmetic; regression tests |
 
 ## Review 10 — file sharing, round 2 (commits b60636e, 8f24120)
@@ -330,7 +330,7 @@ Verdict of the reviewer: the filter is exactly the intended allowlist (proved by
 | ID | Finding | Status | Notes |
 |---|---|---|---|
 | R19-M1 | a compromised parser can call `exit_group(4)` (allowed) and so FORGE the helper's "no sandbox here" exit code: the app would then advise `--no-sandbox` | FIXED | exit 4 is never taken at face value: a probe helper with a benign request must also exit 4, otherwise the message is "failed abnormally: may be an attack" without any advice to disable the sandbox; 3 unit tests (honest machine, forger, crash) |
-| R19-L1 | the `getppid()==init` orphan test refused legitimate setups (app as PID 1 in a container) and missed subreapers | FIXED | the parent passes its pid (`NERD_CHAT_PARENT`), the helper requires `getppid()` to equal it (skipped when started by hand) |
+| R19-L1 | the `getppid()==init` orphan test refused legitimate setups (app as PID 1 in a container) and missed subreapers | FIXED | the parent passes its pid (`SINE_LOCO_PARENT`), the helper requires `getppid()` to equal it (skipped when started by hand) |
 | R19-L2 | `tests/hygiene.rs` was evaded by spacing/comment/attribute/`#[path]` tricks | FIXED | token-based check on comment- and string-stripped source: exactly one `unsafe` token, `unsafe_code` exactly twice, no asm/extern/transmute/include/path/mod/static, single source file, no build script; 8 evasion variants verified to be caught |
 | R19-L3 | kernel tests for `execve` (loader died for another reason) and `ptrace` (TRACEME hung the run) could not detect an allowed syscall | FIXED | execve of a nonexistent path, PTRACE_PEEKDATA, bounded kill-and-poll; verified: allowing either syscall now fails the kernel test with code 77 |
 | R19-I | jump-bound check skipped JGE; tui test assumed exactly 1 filter; MAP_LOCKED permitted under a raised inherited RLIMIT_MEMLOCK; sandbox-check does not prove `--strip` used the helper | FIXED/INFO | JGE checked; the test compares against the runner's own filter count + 1; the helper sets RLIMIT_MEMLOCK=0; the last item stays (the separate `--clean-worker` probe checks the filter) |
@@ -358,10 +358,10 @@ Mutants that survived the review's mutation run (lock view drawing status/pairin
 Verdict of the reviewer: the refactor preserves behaviour, security and privacy (removed API had no callers, the pairing lockout was never global in the TUI, the connection-generation gating is identical, H1 intact, no wire/disk constant changed, 246 tests, test names identical).
 | ID | Finding | Status | Notes |
 |---|---|---|---|
-| R21-M1 | the rename script did chained boundary-free replacements: not idempotent, corrupted trees for overlapping names (`nerd-chats`, `a`, `core`...), swallowed a failing `cargo update` | FIXED | one regex pass with identifier boundaries, names must be >= 4 chars and neither contain nor be contained in the current one, refuses a name that already occurs in the tree, context decides kebab vs snake for single-word names, a failing `cargo update` restores `project-name.txt` and exits non-zero; verified: renaming through `kiwi-talk` -> `talk2chat` -> `symbolon` -> `nerd-chat` restores the tree byte for byte |
+| R21-M1 | the rename script did chained boundary-free replacements: not idempotent, corrupted trees for overlapping names (`sine-locos`, `a`, `core`...), swallowed a failing `cargo update` | FIXED | one regex pass with identifier boundaries, names must be >= 4 chars and neither contain nor be contained in the current one, refuses a name that already occurs in the tree, context decides kebab vs snake for single-word names, a failing `cargo update` restores `project-name.txt` and exits non-zero; verified: renaming through `kiwi-talk` -> `talk2chat` -> `symbolon` -> `sine-loco` restores the tree byte for byte |
 | R21-L1 | dangling reference to a renamed vendor patch file | FIXED | neutral name `vendor/snow/PATCH-NOTES.md` |
 | R21-L2 | the generic `ramtor-` RAM-directory sweep could delete a foreign tool's directory; stale pre-rename `seburity-` directories never swept | FIXED | only directories with OUR `owner.pid` of a dead process are removed (no timing-based branch any more), both prefixes |
-| R21-L3 | default vault path changed (`seburity.vault` -> `nerd-chat.vault`) | FIXED | falls back to an existing `./seburity.vault` with a note; the legacy names are frozen labels |
+| R21-L3 | default vault path changed (`seburity.vault` -> `sine-loco.vault`) | FIXED | falls back to an existing `./seburity.vault` with a note; the legacy names are frozen labels |
 | R21-L4/L5 | weakened identity-rotation assertion, stale doc comments | FIXED | assertion restored, comments cleaned |
 | R21-I | `ConnEvent::Ev` outer/inner id are not tied | OPEN (info) | conn.rs always passes the same id |
 
@@ -434,7 +434,7 @@ at a predictable path (easier to find in a forensic look than a vault on a USB s
 Enter, and Tails gets an explicit warning (home is erased at shutdown). Checks: the directory is created 0700, an existing one must be a real
 directory (no symlink), owned by us and not group/world-writable (other users could swap the vault or its rollback counter). A relative
 `$XDG_DATA_HOME` or `$HOME` is ignored (XDG rule). The choice never depends on the current directory once a default vault exists; if a
-`./nerd-chat.vault` also exists it is named in a note and ignored. `--ram` now wins over `--vault` (before, `--ram --vault X` silently wrote to X).
+`./sine-loco.vault` also exists it is named in a note and ignored. `--ram` now wins over `--vault` (before, `--ram --vault X` silently wrote to X).
 Not done: the purge leaves the (empty) directory; the counter file still defaults to sit beside the vault. Status: OPEN until reviewed.
 
 ## Review 24 (Opus, delivery confirmation, commit 9282b40) — integrated on branch `next`
@@ -472,7 +472,7 @@ No critical/high. All vault_path tests pass; new tests: dangling symlink / direc
 
 | # | Finding | Status | Fix / note |
 |---|---|---|---|
-| R26-M1 | a dangling symlink at `./nerd-chat.vault` (or the default path) counted as "existing", then as "absent" in the UI/store (`Path::exists` follows links): the vault was created in the current directory without confirmation, directory checks or Tails warning | FIXED | `check_existing` refuses anything but a regular file; store/app/main use `symlink_metadata`; any inspect error other than NotFound = refuse |
+| R26-M1 | a dangling symlink at `./sine-loco.vault` (or the default path) counted as "existing", then as "absent" in the UI/store (`Path::exists` follows links): the vault was created in the current directory without confirmation, directory checks or Tails warning | FIXED | `check_existing` refuses anything but a regular file; store/app/main use `symlink_metadata`; any inspect error other than NotFound = refuse |
 | R26-L1 | an existing default vault: no check of directory mode/owner or file owner | FIXED | `check_existing` (regular file, ours, absolute parent dir private and ours) |
 | R26-L2 | parents not checked, `create_dir_all` follows a symlinked `~/.local`; confirmation shows the unresolved path; window between `prepare_dir` and write | OPEN (low) | idea: show the canonical path, `O_NOFOLLOW` dirfd |
 | R26-L3 | any input (also EOF) at the confirmation created the directory | FIXED | only an empty line continues |
@@ -481,7 +481,7 @@ No critical/high. All vault_path tests pass; new tests: dangling symlink / direc
 | R26-L6 | backups/sync copy `~/.local/share`; a restore defeats rollback protection | FIXED (text) | stated in the confirmation; GETTING_STARTED/README updated |
 | R26-L7 | running as root with the user's HOME takes over the user's vault | FIXED | `check_existing` requires file and directory to be owned by the effective user |
 | R26-L8 | Tails detection fails open; Whonix/other live systems get no warning | OPEN (optional) | statfs tmpfs/overlay or `boot=live` heuristic |
-| R26-I1 | the "ignoring ./nerd-chat.vault" notes go to stderr right before the alternate screen and are practically never seen | OPEN | the header shows the path; show the note in the first status line |
+| R26-I1 | the "ignoring ./sine-loco.vault" notes go to stderr right before the alternate screen and are practically never seen | OPEN | the header shows the path; show the note in the first status line |
 | R26-I3 | an inspect error other than NotFound was treated as "no vault" | FIXED | refused |
 
 ## Review 27 (Opus, GUI phase 1a: core extraction into crates/app, commit 10fe8a4) — fixed in the commit that follows
@@ -497,7 +497,7 @@ No critical/high. Moved files verified byte-identical (`similarity index 100%`);
 | R27-L4 | stale docs | FIXED | BUILD_AND_RUN, PLAN, PROGRESS updated |
 | R27-I1 | `parse_args` reads the keyfile before the swap refusal (older) | OPEN (info) | move the swap check before reading the keyfile |
 | R27-I2 | design §7 listed `no_new_privs` for the main process; `harden()` sets only RLIMIT_CORE=0 and non-dumpable | ACCEPTED | `no_new_privs` on the main process could break AppArmor transitions for the spawned Tor (Ubuntu `system_tor`); it stays a property of the cleaning helper. Design text corrected |
-| R27-I3 | cargo feature unification: `cargo build --workspace` turns `terminal-ui` on for the GUI | NOTED | build the GUI with `-p nerd-chat-gui`, never from a workspace-wide release build |
+| R27-I3 | cargo feature unification: `cargo build --workspace` turns `terminal-ui` on for the GUI | NOTED | build the GUI with `-p sine-loco-gui`, never from a workspace-wide release build |
 
 ## D-5 GUI dependencies (owner approved, 2026-11-09)
 egui/eframe 0.37 with features `default_fonts, glow, wayland, x11` only (no AccessKit, no clipboard, no web screen reader, no system fonts) enter the project in `crates/gui`; the terminal binary and its static build do not link them. `cargo deny` stays green with ONE narrow exception: `epaint_default_fonts` (bundled fonts) is allowed the SIL OFL 1.1 and the Ubuntu Font Licence. `cargo vet` exemptions grew from about 210 to 395 crates (all UNAUDITED, like the existing ones); `cargo vet` and `cargo deny` pass. Audit backlog is listed by `cargo vet`.
@@ -514,7 +514,7 @@ No critical. The crypto argument holds (one online guess per offer; nothing offl
 | R28-M3 | cancel/panic cannot interrupt Tor streams (no shutdown, blocking SOCKS connect) | SPEC FIXED: `Stream::shutdown`, early registration, cancel checks |
 | R28-M4 | engine command for hosting: races, orphans, no events | SPEC FIXED: `pair_host_fn` with its own control connection; drop = removal |
 | R28-M5 | `can_host` probe tests the wrong command form | SPEC FIXED: the real public `ADD_ONION` decides; bit untouched |
-| R28-M6 | `nerdchat:pair/` prefix names the app to the link carrier | SPEC FIXED: bare onion id |
+| R28-M6 | `sineloco:pair/` prefix names the app to the link carrier | SPEC FIXED: bare onion id |
 | R28-L1..L7, I1..I4 | descriptor lingers ~3 h; random socket name; joiner error classes; clear code after failure; trust wording; online presence; derive nothing from the code | SPEC FIXED / documented |
 
 ## Review 29 (Opus, IMPLEMENTATION of pairing over Tor, commits fc1d179..2ffdb49)

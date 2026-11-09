@@ -2,8 +2,8 @@
 //! service and holds its client-auth key can send). Identities are generated once per process; only the input varies. Must never panic and never succeed.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
-use nerd_chat_net::{guard::HandshakeGuard, link};
+use sine_loco_core::{bundle::Bundle, identity::ContactIdentity};
+use sine_loco_net::{guard::HandshakeGuard, link};
 use std::{io::{Cursor, Read, Write}, sync::OnceLock};
 
 struct Pipe(Cursor<Vec<u8>>);

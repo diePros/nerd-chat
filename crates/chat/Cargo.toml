@@ -1,14 +1,14 @@
 [package]
 publish = false
-name = "nerd-chat-chat"
+name = "sine-loco-chat"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-nerd-chat-core = { path = "../core" }
-nerd-chat-net = { path = "../net" }
+sine-loco-core = { path = "../core" }
+sine-loco-net = { path = "../net" }
 zeroize = "1"
 getrandom = "0.3"
-nerd-chat-strip = { path = "../strip" }
+sine-loco-strip = { path = "../strip" }
 blake2 = "0.11"

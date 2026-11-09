@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Only the window before Compose draws its first frame; every colour the user sees comes from the palette in :model. -->
-    <style name="Theme.NerdChat" parent="android:Theme.DeviceDefault.DayNight">
+    <style name="Theme.SineLoco" parent="android:Theme.DeviceDefault.DayNight">
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>

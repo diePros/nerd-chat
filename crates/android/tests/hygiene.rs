@@ -48,5 +48,5 @@ fn exactly_two_jni_symbols_are_exported() {
     let s = src("ffi.rs");
     let code: Vec<&str> = s.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
     assert_eq!(code.iter().filter(|l| l.trim() == "#[no_mangle]").count(), 2);
-    assert!(s.contains("Java_app_nerdchat_model_NativeBridge_nInit") && s.contains("Java_app_nerdchat_model_NativeBridge_nCall"));
+    assert!(s.contains("Java_app_sineloco_model_NativeBridge_nInit") && s.contains("Java_app_sineloco_model_NativeBridge_nCall"));
 }

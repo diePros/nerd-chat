@@ -1,5 +1,5 @@
 use crate::{history::Persist, StoreError};
-use nerd_chat_core::{bundle::{Bundle, KEM_PUB_LEN}, identity::{ContactIdentity, SECRET_LEN}, trust::Trust};
+use sine_loco_core::{bundle::{Bundle, KEM_PUB_LEN}, identity::{ContactIdentity, SECRET_LEN}, trust::Trust};
 use zeroize::Zeroizing;
 
 pub const MAX_CONTACTS: usize = 1024;
@@ -75,7 +75,7 @@ pub struct Store {
 
 fn valid_name(n: &str) -> bool {
     let t = n.trim();
-    !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(nerd_chat_core::text::is_unsafe_char)
+    !t.is_empty() && t == n && n.len() <= MAX_NAME && !n.chars().any(sine_loco_core::text::is_unsafe_char)
 }
 
 impl Contact {

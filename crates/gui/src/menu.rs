@@ -1,11 +1,11 @@
-//! "Hide Nerd-chat from the application menu" (design D4): a per-user override of the packaged `.desktop` entry with `NoDisplay=true`.
+//! "Hide Sine Loco from the application menu" (design D4): a per-user override of the packaged `.desktop` entry with `NoDisplay=true`.
 //! The override file is itself a trace on the disk (it says the program is installed): the setting says so, and turning it off removes the file.
 use std::path::{Path, PathBuf};
 
-const FILE: &str = "nerd-chat.desktop";
-const ENTRY: &str = "[Desktop Entry]\nType=Application\nName=Nerd-chat\nGenericName=Private chat\nComment=Serverless chat over Tor, messages only in memory\nExec=nerd-chat-gui\nIcon=nerd-chat\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\nStartupWMClass=Nerd-chat\n";
+const FILE: &str = "sine-loco.desktop";
+const ENTRY: &str = "[Desktop Entry]\nType=Application\nName=Sine Loco\nGenericName=Private chat\nComment=Serverless chat over Tor, messages only in memory\nExec=sine-loco-gui\nIcon=sine-loco\nTerminal=false\nCategories=Network;InstantMessaging;Chat;\nStartupWMClass=Sine Loco\n";
 
-/// `<data dir>/applications/nerd-chat.desktop` for the user: `$XDG_DATA_HOME` if absolute, else `$HOME/.local/share` (the XDG rule).
+/// `<data dir>/applications/sine-loco.desktop` for the user: `$XDG_DATA_HOME` if absolute, else `$HOME/.local/share` (the XDG rule).
 pub fn user_entry_path() -> Option<PathBuf> {
     let abs = |p: PathBuf| p.is_absolute().then_some(p);
     let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).and_then(abs)
@@ -42,7 +42,7 @@ mod tests {
         set_hidden(&p, true).unwrap();
         assert!(is_hidden(&p));
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("Exec=nerd-chat-gui") && text.contains("NoDisplay=true"));
+        assert!(text.contains("Exec=sine-loco-gui") && text.contains("NoDisplay=true"));
         set_hidden(&p, false).unwrap();
         assert!(!p.exists() && !is_hidden(&p));
         set_hidden(&p, false).unwrap(); // already gone: fine

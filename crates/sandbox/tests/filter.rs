@@ -2,7 +2,7 @@
 //! architectures, argument edge cases and 200k pseudo-random inputs, and the result is compared with an independently written
 //! specification of what is allowed.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use nerd_chat_sandbox::filter;
+use sine_loco_sandbox::filter;
 
 const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
 const ALLOW: u32 = 0x7fff_0000;

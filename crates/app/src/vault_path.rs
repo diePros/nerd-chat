@@ -1,15 +1,15 @@
 //! Where the vault lives when the user gives no `--vault`.
 //!
 //! Order (the first match wins, and the choice never depends on the current directory once a default vault exists):
-//!   1. `<data dir>/nerd-chat/nerd-chat.vault` exists  -> use it (`$XDG_DATA_HOME`, else `~/.local/share`)
-//!   2. `./nerd-chat.vault` or the old `./seburity.vault` exists -> use it (vaults made before this default existed keep working)
+//!   1. `<data dir>/sine-loco/sine-loco.vault` exists  -> use it (`$XDG_DATA_HOME`, else `~/.local/share`)
+//!   2. `./sine-loco.vault` or the old `./seburity.vault` exists -> use it (vaults made before this default existed keep working)
 //!   3. nothing exists -> a NEW vault in the data dir, only after the user confirmed the location (`main.rs`)
 //! Pure decisions live here so they can be tested without touching the real home directory.
 use std::path::{Path, PathBuf};
 
-pub const FILE: &str = "nerd-chat.vault";
+pub const FILE: &str = "sine-loco.vault";
 const LEGACY_FILE: &str = "seburity.vault";
-const DIR: &str = "nerd-chat";
+const DIR: &str = "sine-loco";
 
 pub enum Choice {
     /// An existing vault; `note` (if any) is printed to the user.
@@ -20,8 +20,8 @@ pub enum Choice {
     Unusable(String),
 }
 
-/// The directory for the default vault: `$XDG_DATA_HOME/nerd-chat` if that variable is an ABSOLUTE path (the XDG rule), else
-/// `$HOME/.local/share/nerd-chat`; `None` if there is no absolute home either.
+/// The directory for the default vault: `$XDG_DATA_HOME/sine-loco` if that variable is an ABSOLUTE path (the XDG rule), else
+/// `$HOME/.local/share/sine-loco`; `None` if there is no absolute home either.
 pub fn default_dir(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     let abs = |p: &&Path| p.is_absolute() && !p.as_os_str().is_empty();
     match xdg_data_home.filter(abs) {
@@ -62,7 +62,7 @@ pub fn is_tails(os_release: &str) -> bool { os_release.lines().any(|l| l.trim_st
 /// The text shown before a NEW vault is created at the default place.
 pub fn confirm_text(path: &Path, tails: bool) -> String {
     let mut s = format!("No vault found. A NEW one will be created at:\n  {}\nThat is on THIS computer's disk. To keep it elsewhere (a USB stick) use --vault PATH.\n", path.display());
-    if tails { s.push_str("WARNING: this looks like Tails: your home directory is ERASED at shutdown, so this vault would be gone after the next restart.\nUse the Persistent Storage instead: --vault ~/Persistent/nerd-chat.vault\n"); }
+    if tails { s.push_str("WARNING: this looks like Tails: your home directory is ERASED at shutdown, so this vault would be gone after the next restart.\nUse the Persistent Storage instead: --vault ~/Persistent/sine-loco.vault\n"); }
     s.push_str("Home-directory backups and sync tools copy this folder too, and a restored backup brings back an old vault (rollback goes unnoticed).\n");
     s.push_str("Press Enter (an empty line) to continue; anything else cancels.");
     s
@@ -117,10 +117,10 @@ mod tests {
 
     #[test]
     fn the_xdg_variable_wins_only_when_it_is_absolute() {
-        assert_eq!(default_dir(Some(&p("/data")), Some(&p("/home/u"))), Some(p("/data/nerd-chat")));
-        assert_eq!(default_dir(None, Some(&p("/home/u"))), Some(p("/home/u/.local/share/nerd-chat")));
-        assert_eq!(default_dir(Some(&p("relative/dir")), Some(&p("/home/u"))), Some(p("/home/u/.local/share/nerd-chat")), "XDG says: ignore a relative value");
-        assert_eq!(default_dir(Some(&p("")), Some(&p("/home/u"))), Some(p("/home/u/.local/share/nerd-chat")));
+        assert_eq!(default_dir(Some(&p("/data")), Some(&p("/home/u"))), Some(p("/data/sine-loco")));
+        assert_eq!(default_dir(None, Some(&p("/home/u"))), Some(p("/home/u/.local/share/sine-loco")));
+        assert_eq!(default_dir(Some(&p("relative/dir")), Some(&p("/home/u"))), Some(p("/home/u/.local/share/sine-loco")), "XDG says: ignore a relative value");
+        assert_eq!(default_dir(Some(&p("")), Some(&p("/home/u"))), Some(p("/home/u/.local/share/sine-loco")));
         assert_eq!(default_dir(None, Some(&p("home"))), None, "a relative HOME is not trusted");
         assert_eq!(default_dir(None, None), None);
     }
@@ -129,7 +129,7 @@ mod tests {
     fn a_fresh_machine_gets_a_new_vault_in_the_data_dir() {
         let none = set(&[]);
         match resolve(None, Some(&p("/home/u")), &p("/work"), &|x| none.contains(x)) {
-            Choice::New { dir, path } => { assert_eq!(dir, p("/home/u/.local/share/nerd-chat")); assert_eq!(path, p("/home/u/.local/share/nerd-chat/nerd-chat.vault")); }
+            Choice::New { dir, path } => { assert_eq!(dir, p("/home/u/.local/share/sine-loco")); assert_eq!(path, p("/home/u/.local/share/sine-loco/sine-loco.vault")); }
             _ => panic!("expected New"),
         }
         assert!(matches!(resolve(None, None, &p("/work"), &|_| false), Choice::Unusable(_)));
@@ -137,10 +137,10 @@ mod tests {
 
     #[test]
     fn an_existing_default_vault_is_used_from_any_directory() {
-        let have = set(&["/home/u/.local/share/nerd-chat/nerd-chat.vault"]);
+        let have = set(&["/home/u/.local/share/sine-loco/sine-loco.vault"]);
         for cwd in ["/work", "/tmp", "/"] {
             match resolve(None, Some(&p("/home/u")), &p(cwd), &|x| have.contains(x)) {
-                Choice::Existing { path, note } => { assert_eq!(path, p("/home/u/.local/share/nerd-chat/nerd-chat.vault")); assert!(note.is_none()); }
+                Choice::Existing { path, note } => { assert_eq!(path, p("/home/u/.local/share/sine-loco/sine-loco.vault")); assert!(note.is_none()); }
                 _ => panic!("expected Existing"),
             }
         }
@@ -148,9 +148,9 @@ mod tests {
 
     #[test]
     fn vaults_made_before_the_default_existed_keep_working_and_say_so() {
-        let have = set(&["/work/nerd-chat.vault"]);
+        let have = set(&["/work/sine-loco.vault"]);
         match resolve(None, Some(&p("/home/u")), &p("/work"), &|x| have.contains(x)) {
-            Choice::Existing { path, note } => { assert_eq!(path, p("nerd-chat.vault"), "relative, exactly as before"); assert!(note.unwrap().contains("default for new vaults")); }
+            Choice::Existing { path, note } => { assert_eq!(path, p("sine-loco.vault"), "relative, exactly as before"); assert!(note.unwrap().contains("default for new vaults")); }
             _ => panic!("expected Existing"),
         }
         let old = set(&["/work/seburity.vault"]);
@@ -159,17 +159,17 @@ mod tests {
             _ => panic!("expected Existing"),
         }
         // no home at all: the current directory still works, silently as before
-        match resolve(None, None, &p("/work"), &|x| have.contains(x)) { Choice::Existing { path, note } => { assert_eq!(path, p("nerd-chat.vault")); assert!(note.is_none()); } _ => panic!() }
+        match resolve(None, None, &p("/work"), &|x| have.contains(x)) { Choice::Existing { path, note } => { assert_eq!(path, p("sine-loco.vault")); assert!(note.is_none()); } _ => panic!() }
     }
 
     #[test]
     fn when_both_exist_the_default_wins_and_the_other_is_named() {
-        let have = set(&["/home/u/.local/share/nerd-chat/nerd-chat.vault", "/work/nerd-chat.vault"]);
+        let have = set(&["/home/u/.local/share/sine-loco/sine-loco.vault", "/work/sine-loco.vault"]);
         match resolve(None, Some(&p("/home/u")), &p("/work"), &|x| have.contains(x)) {
             Choice::Existing { path, note } => {
-                assert_eq!(path, p("/home/u/.local/share/nerd-chat/nerd-chat.vault"));
+                assert_eq!(path, p("/home/u/.local/share/sine-loco/sine-loco.vault"));
                 let n = note.unwrap();
-                assert!(n.contains("ignoring /work/nerd-chat.vault") && n.contains("--vault"), "{n}");
+                assert!(n.contains("ignoring /work/sine-loco.vault") && n.contains("--vault"), "{n}");
             }
             _ => panic!("expected Existing"),
         }
@@ -179,16 +179,16 @@ mod tests {
     fn tails_is_recognised_and_warned_about() {
         assert!(is_tails("NAME=\"Debian\"\nTAILS_PRODUCT_NAME=\"Tails\"\n"));
         assert!(!is_tails("NAME=\"Ubuntu\"\nID=ubuntu\n"));
-        let t = confirm_text(&p("/home/amnesia/.local/share/nerd-chat/nerd-chat.vault"), true);
+        let t = confirm_text(&p("/home/amnesia/.local/share/sine-loco/sine-loco.vault"), true);
         assert!(t.contains("ERASED") && t.contains("Persistent") && t.contains("cancels"));
-        assert!(!confirm_text(&p("/x/nerd-chat.vault"), false).contains("ERASED"));
+        assert!(!confirm_text(&p("/x/sine-loco.vault"), false).contains("ERASED"));
     }
 
     #[test]
     fn the_directory_is_created_private_and_unsafe_ones_are_refused() {
         use std::os::unix::fs::PermissionsExt;
         let t = tempfile::tempdir().unwrap();
-        let d = t.path().join("a/b/nerd-chat");
+        let d = t.path().join("a/b/sine-loco");
         prepare_dir(&d).unwrap();
         assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
         prepare_dir(&d).unwrap(); // a second run accepts its own directory
@@ -205,7 +205,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let t = tempfile::tempdir().unwrap();
         let real = t.path().join("real"); std::fs::create_dir(&real).unwrap();
-        let link = t.path().join("nerd-chat"); symlink(&real, &link).unwrap();
+        let link = t.path().join("sine-loco"); symlink(&real, &link).unwrap();
         assert!(prepare_dir(&link).unwrap_err().contains("not a real directory"));
         let file = t.path().join("f"); std::fs::write(&file, b"x").unwrap();
         assert!(prepare_dir(&file).unwrap_err().contains("not a real directory"));
@@ -215,7 +215,7 @@ mod tests {
     fn an_existing_vault_must_be_a_regular_file_in_a_private_directory() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let d = tempfile::tempdir().unwrap();
-        let dir = d.path().join("nerd-chat");
+        let dir = d.path().join("sine-loco");
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let v = dir.join(FILE);

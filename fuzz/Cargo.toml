@@ -1,5 +1,5 @@
 [package]
-name = "nerd-chat-fuzz"
+name = "sine-loco-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -9,12 +9,12 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-nerd-chat-core = { path = "../crates/core" }
-nerd-chat-store = { path = "../crates/store" }
-nerd-chat-chat = { path = "../crates/chat" }
-nerd-chat-exchange = { path = "../crates/exchange" }
-nerd-chat-strip = { path = "../crates/strip" }
-nerd-chat-net = { path = "../crates/net" }
+sine-loco-core = { path = "../crates/core" }
+sine-loco-store = { path = "../crates/store" }
+sine-loco-chat = { path = "../crates/chat" }
+sine-loco-exchange = { path = "../crates/exchange" }
+sine-loco-strip = { path = "../crates/strip" }
+sine-loco-net = { path = "../crates/net" }
 
 # Not part of the main workspace (nightly toolchain, libFuzzer): run with `cargo +nightly fuzz run <target>` from the repository root.
 [workspace]

@@ -15,7 +15,7 @@ unless you say so". Where the two goals differ, ours wins; where Session found a
 - We did not read Session's source code. Check its licence before doing so (it is a different licence family from our AGPL); we take ideas only, never code.
 
 ## 1. Side by side
-| Topic | Session (as far as we could establish) | nerd-chat |
+| Topic | Session (as far as we could establish) | sine-loco |
 |---|---|---|
 | Network | its own onion routing ("onion requests"): the client picks **3 random service nodes** (paid, token-staked) and wraps the request in 3 layers; each hop knows only its neighbours | **Tor** v3 onion services; one hosted per contact, with client authorisation |
 | Offline delivery | **yes**: messages are stored on a *swarm* of service nodes (said to be 5-10, chosen deterministically from the recipient ID) until a time-to-live; docs say **2 weeks by default**, the 2020 whitepaper said a 96 h maximum **(unverified which is current)** | **no**: online-only peer to peer; unconfirmed texts wait in the sender's RAM (max 50) and are resent on every new connection |

@@ -1,8 +1,8 @@
 //! Start-up (arguments, hardening, swap refusal, the first-run vault dialog) and the eframe application object.
 use crate::view;
 use eframe::egui;
-use nerd_chat_app::{app::{Action, App, Config, Key, Mode, Online, Pane, Screen}, vault_path};
-use nerd_chat_vault::Profile;
+use sine_loco_app::{app::{Action, App, Config, Key, Mode, Online, Pane, Screen}, vault_path};
+use sine_loco_vault::Profile;
 use std::{path::PathBuf, time::{Duration, Instant}};
 
 /// What the window shows before (or instead of) the app core.
@@ -27,7 +27,7 @@ pub struct Gui {
     started: bool,
     /// text of the single-line, NON-secret prompt currently shown (contact name, file path, address)
     pub prompt_text: String,
-    pub prompt_for: Option<nerd_chat_app::app::Prompt>,
+    pub prompt_for: Option<sine_loco_app::app::Prompt>,
     /// contacts whose "not verified" notice was already shown in this session (D3: once per contact per session); nothing is stored
     pub notice_seen: std::collections::HashSet<[u8; 8]>,
     /// developer option: never show the notice (for screenshots of the chat itself)
@@ -46,16 +46,16 @@ pub struct Gui {
 pub fn run() -> eframe::Result {
     // FIRST: the cleaner helper dispatch (this binary re-executed), the sandboxed cleaner, process hardening (the app core refuses to run without it)
     let args: Vec<String> = std::env::args().collect();
-    let started = nerd_chat_app::startup::startup(&args);
+    let started = sine_loco_app::startup::startup(&args);
     for w in started.warnings { eprintln!("warning: {w}"); }
 
     let mut g = Gui::from_args(&args, started.swap);
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_title("Nerd-chat").with_app_id("nerd-chat"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_title("Sine Loco").with_app_id("sine-loco"),
         ..Default::default()
     };
     g.frames = 0;
-    eframe::run_native("Nerd-chat", opts, Box::new(move |cc| { view::style(&cc.egui_ctx); Ok(Box::new(g)) }))
+    eframe::run_native("Sine Loco", opts, Box::new(move |cc| { view::style(&cc.egui_ctx); Ok(Box::new(g)) }))
 }
 
 impl Gui {
@@ -87,8 +87,8 @@ impl Gui {
         let mut cfg = Config::new(if ram { None } else { path.clone() }, val("--counter-file").map(PathBuf::from), None, profile);
         cfg.allow_swap = has("--allow-swap");
         cfg.can_host = !has("--cannot-host");
-        if let Some(a) = val("--tor-control").and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { cfg.tor.control = Some(a); }
-        if let Some(a) = val("--tor-socks").and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { cfg.tor.socks = Some(a); }
+        if let Some(a) = val("--tor-control").and_then(|s| sine_loco_net::tor::Addr::parse(&s)) { cfg.tor.control = Some(a); }
+        if let Some(a) = val("--tor-socks").and_then(|s| sine_loco_net::tor::Addr::parse(&s)) { cfg.tor.socks = Some(a); }
         cfg.tor.trust_control = has("--tor-trust-control");
         let shot = val("--screenshot").map(|p| (PathBuf::from(p), val("--shot-frame").and_then(|s| s.parse().ok()).unwrap_or(40)));
         let mut g = Gui { shell, cfg: Some(cfg), app: None, user_offline: false, retry_at: None, retries: 0, started: false, prompt_text: String::new(), prompt_for: None, notice_seen: Default::default(), skip_notice: has("--skip-notice"), settings_open: false, menu_hidden: crate::menu::user_entry_path().is_some_and(|p| crate::menu::is_hidden(&p)), menu_note: String::new(), purge_ok: false, shot, frames: 0,
@@ -228,7 +228,7 @@ mod tests {
         let (old_home, old_xdg) = (std::env::var_os("HOME"), std::env::var_os("XDG_DATA_HOME"));
         std::env::set_var("HOME", home.path());
         std::env::remove_var("XDG_DATA_HOME");
-        let g = Gui::from_args(&["nerd-chat-gui".into(), "--allow-swap".into()], None);
+        let g = Gui::from_args(&["sine-loco-gui".into(), "--allow-swap".into()], None);
         let (shell_path, cfg_path) = (match &g.shell { Shell::FirstRun { path, .. } => Some(path.clone()), _ => None }, g.cfg.as_ref().and_then(|c| c.path.clone()));
         match old_home { Some(v) => std::env::set_var("HOME", v), None => std::env::remove_var("HOME") }
         if let Some(v) = old_xdg { std::env::set_var("XDG_DATA_HOME", v); }

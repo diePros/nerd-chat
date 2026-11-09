@@ -1,13 +1,13 @@
 //! UI state machine (no rendering, no terminal): driven by key events, fully testable.
 use crate::secret::{ComposeBuf, SecretBuf};
-use nerd_chat_chat::{transport::{BoxStream, PairDialError, PairDialFn, PairHostFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
-use nerd_chat_net::tor::CancelToken;
-use nerd_chat_net::tor::{control::AuthPref, probe::{probe_hosting, HostProbe}, spawn::{find_tor, SpawnConfig}, Addr};
-use nerd_chat_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
-use nerd_chat_exchange::{file, pair::{Lockout, PairStream, PairingJoin, PairingOffer, REMOTE_OFFER_MAX_TTL}, ExchangeError, ImportedContact, SafetyView};
-pub use nerd_chat_store::history::Persist;
-use nerd_chat_store::{history::{Clock, History, NoPlatformKeys, PlatformKeys, State as MsgState, Swept, SystemClock}, read_regular_file, OpenInfo, StoreError, VaultFile};
-use nerd_chat_vault::Profile;
+use sine_loco_chat::{transport::{BoxStream, PairDialError, PairDialFn, PairHostFn, TorSetup, TorTransport}, ContactCfg, Engine, Event, Timing, Transport};
+use sine_loco_net::tor::CancelToken;
+use sine_loco_net::tor::{control::AuthPref, probe::{probe_hosting, HostProbe}, spawn::{find_tor, SpawnConfig}, Addr};
+use sine_loco_core::{bundle::{safety_number, Bundle}, identity::ContactIdentity, trust::Trust};
+use sine_loco_exchange::{file, pair::{Lockout, PairStream, PairingJoin, PairingOffer, REMOTE_OFFER_MAX_TTL}, ExchangeError, ImportedContact, SafetyView};
+pub use sine_loco_store::history::Persist;
+use sine_loco_store::{history::{Clock, History, NoPlatformKeys, PlatformKeys, State as MsgState, Swept, SystemClock}, read_regular_file, OpenInfo, StoreError, VaultFile};
+use sine_loco_vault::Profile;
 use std::path::Path;
 use std::{
     collections::{HashMap, HashSet},
@@ -79,7 +79,7 @@ impl Config {
     pub fn with_test_transport(mut self, f: TransportFactory) -> Self { self.transport = Some(f); self }
 
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, persist_default: Persist::Off, grid: Duration::from_secs(5), history_slot: nerd_chat_store::history::SLOT_LEN, platform_keys: None, clock: None }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, persist_default: Persist::Off, grid: Duration::from_secs(5), history_slot: sine_loco_store::history::SLOT_LEN, platform_keys: None, clock: None }
     }
 }
 
@@ -230,7 +230,7 @@ impl PairStream for TorPairStream { fn set_timeout(&mut self, d: Duration) -> st
 
 /// The offer side over Tor (worker thread): host the one-shot service, wait until it is published, show link + code, wait for ONE
 /// connection, then pair. Everything it owns (service, listener) is dropped on every path.
-fn tor_offer_job(host_fn: PairHostFn, tok: &CancelToken, ident: &ContactIdentity, adv: bool, lockout: Arc<Lockout>, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> {
+fn tor_offer_job(host_fn: PairHostFn, tok: &CancelToken, ident: &ContactIdentity, adv: bool, lockout: Arc<Lockout>, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<sine_loco_exchange::pair::Paired, ExchangeError> {
     let mut host = match host_fn() {
         Ok(h) => h,
         Err(e) => { let _ = ltx.send(LinkMsg::Failed(if e.contains("510") { "Your Tor cannot create the pairing service here. Ask the OTHER person to create the code, and join with their link.".into() } else { format!("Could not create the pairing service: {e}") })); return Err(ExchangeError::Io); }
@@ -263,7 +263,7 @@ fn tor_offer_job(host_fn: PairHostFn, tok: &CancelToken, ident: &ContactIdentity
 }
 
 /// The join side over Tor (worker thread): dial the link (bounded retry while the descriptor is not found), then pair.
-fn tor_join_job(dial: PairDialFn, tok: &CancelToken, id: &str, join: PairingJoin, ident: &ContactIdentity, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> {
+fn tor_join_job(dial: PairDialFn, tok: &CancelToken, id: &str, join: PairingJoin, ident: &ContactIdentity, ltx: &std::sync::mpsc::Sender<LinkMsg>) -> Result<sine_loco_exchange::pair::Paired, ExchangeError> {
     let fail = |m: &str| { let _ = ltx.send(LinkMsg::Failed(m.to_string())); };
     let start = Instant::now();
     let stream = loop {
@@ -285,7 +285,7 @@ fn tor_join_job(dial: PairDialFn, tok: &CancelToken, id: &str, join: PairingJoin
     tok.register(&*stream);
     if tok.is_cancelled() { return Err(ExchangeError::Io); }
     let mut s = TorPairStream(stream);
-    match join.with_deadline(nerd_chat_exchange::pair::REMOTE_PAIR_DEADLINE).join_remote(&mut s, ident) {
+    match join.with_deadline(sine_loco_exchange::pair::REMOTE_PAIR_DEADLINE).join_remote(&mut s, ident) {
         Ok(p) => Ok(p),
         Err((e, false)) if e == ExchangeError::Io => { fail("Your partner's pairing closed before it started: the offer was cancelled or already used. Ask for a new link."); Err(e) }
         Err((e, _)) => Err(e),
@@ -390,12 +390,12 @@ pub struct App {
     quit_armed: bool, offline_armed: bool,
     compose: ComposeBuf,
     /// pending incoming file offers (contact id -> (transfer id, size))
-    offers: HashMap<[u8; 8], (nerd_chat_chat::file::Xid, u32)>,
+    offers: HashMap<[u8; 8], (sine_loco_chat::file::Xid, u32)>,
     /// accepted, still arriving: contact id -> bucket (counts toward the RAM budget)
     accepted: HashMap<[u8; 8], u32>,
     inbox: HashMap<[u8; 8], Received>,
     /// file being cleaned on a worker (cleaning is CPU-heavy on hostile input; the UI/panic key must stay live)
-    prep_rx: Option<([u8; 8], Receiver<Result<(nerd_chat_chat::FileOut, Vec<String>), nerd_chat_strip::StripError>>)>,
+    prep_rx: Option<([u8; 8], Receiver<Result<(sine_loco_chat::FileOut, Vec<String>), sine_loco_strip::StripError>>)>,
     /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
     pub alerts: Vec<(String, u32)>,
     /// This session's warnings, newest last, kept after they were acknowledged (memory only, wiped by panic/purge).
@@ -415,7 +415,7 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config) -> Self {
-        assert!(cfg!(test) || crate::startup::is_done(), "nerd_chat_app::startup::startup(&args) must be the first thing a front end runs (cleaner helper, hardening)");
+        assert!(cfg!(test) || crate::startup::is_done(), "sine_loco_app::startup::startup(&args) must be the first thing a front end runs (cleaner helper, hardening)");
         let exists = cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok());
         let ram = cfg.path.is_none();
         let mut a = Self {
@@ -524,7 +524,7 @@ impl App {
         match (self.history.is_some(), p.keeps_anything()) {
             (_, false) => {
                 if let Some(h) = self.history.take() { let _ = h.shred(); }
-                else if let Some(p) = self.hist_path() { if std::fs::symlink_metadata(&p).is_ok() { let _ = nerd_chat_store::shred_file(&p); } } // a refused (rolled-back) file is removed too
+                else if let Some(p) = self.hist_path() { if std::fs::symlink_metadata(&p).is_ok() { let _ = sine_loco_store::shred_file(&p); } } // a refused (rolled-back) file is removed too
                 self.pending_sends.clear();
                 // what is not in the history any more is held by the engine only if it is running (or was handed the text when it started)
                 if self.engine.is_none() {
@@ -585,7 +585,7 @@ impl App {
     fn seed_history_lines(&mut self) {
         let Some(h) = self.history.as_ref() else { return };
         let ids: Vec<[u8; 8]> = self.vf.as_ref().map(|v| v.store.contacts.iter().map(|c| c.id).collect()).unwrap_or_default();
-        let lines: Vec<([u8; 8], Vec<nerd_chat_store::history::Line>)> = ids.into_iter().map(|id| (id, h.lines(id))).filter(|(_, l)| !l.is_empty()).collect();
+        let lines: Vec<([u8; 8], Vec<sine_loco_store::history::Line>)> = ids.into_iter().map(|id| (id, h.lines(id))).filter(|(_, l)| !l.is_empty()).collect();
         for (id, ls) in lines {
             for l in ls {
                 let (queued, unsent, unconfirmed) = (l.state == MsgState::Queued, matches!(l.state, MsgState::Unsent | MsgState::Expired), l.state == MsgState::Unconfirmed);
@@ -658,7 +658,7 @@ impl App {
         }
     }
     /// The messages the user saved for the selected contact.
-    pub fn saved_msgs(&self) -> &[nerd_chat_store::SavedMsg] { self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map_or(&[], |c| c.saved.as_slice()) }
+    pub fn saved_msgs(&self) -> &[sine_loco_store::SavedMsg] { self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).map_or(&[], |c| c.saved.as_slice()) }
     pub fn chat_lines(&self) -> &[ChatLine] { self.chat_id().and_then(|id| self.chats.get(&id)).map_or(&[], |v| v.as_slice()) }
     pub fn compose_text(&self) -> &str { self.compose.as_str() }
     pub fn online_label(&self) -> String {
@@ -718,7 +718,7 @@ impl App {
         use std::os::unix::fs::MetadataExt;
         let mut v = Vec::new();
         if let Some(p) = &self.cfg.path {
-            let counter = self.cfg.counter.clone().unwrap_or_else(|| nerd_chat_store::counter_path_for(p));
+            let counter = self.cfg.counter.clone().unwrap_or_else(|| sine_loco_store::counter_path_for(p));
             for f in [p.clone(), counter] { v.extend(Self::temp_siblings(&f)); v.push(f); }
             v.extend(self.hist_path());
         }
@@ -744,7 +744,7 @@ impl App {
     pub fn purge_finish(&mut self) {
         let Some(created) = self.purge_pending.take() else { return };
         let targets = self.purge_targets(&created);
-        let failed = targets.iter().filter(|p| nerd_chat_store::shred_file(p).is_err()).count();
+        let failed = targets.iter().filter(|p| sine_loco_store::shred_file(p).is_err()).count();
         self.purge_report = Some((targets.len() - failed, failed));
     }
 
@@ -950,11 +950,11 @@ impl App {
             KdfMsg::Opened(Err(e)) => {
                 self.screen = back;
                 match e {
-                    StoreError::Vault(nerd_chat_vault::VaultError::Rollback { found, expected }) =>
+                    StoreError::Vault(sine_loco_vault::VaultError::Rollback { found, expected }) =>
                         self.err(format!("ROLLBACK DETECTED: vault save #{found} is older than #{expected}. An old copy was substituted. Refusing to open.")),
-                    StoreError::Vault(nerd_chat_vault::VaultError::Tampered) =>
+                    StoreError::Vault(sine_loco_vault::VaultError::Tampered) =>
                         self.err("Password correct but the vault file is CORRUPTED or TAMPERED with."),
-                    StoreError::Vault(nerd_chat_vault::VaultError::WrongCredentials) => {
+                    StoreError::Vault(sine_loco_vault::VaultError::WrongCredentials) => {
                         self.failures += 1;
                         if self.failures >= 3 {
                             let wait = 5u64 << (self.failures - 3).min(6);
@@ -1145,7 +1145,7 @@ impl App {
                 let removed = self.vf().store.contacts[sel].saved.get(k).map(|m| (m.mine, m.text.clone()));
                 self.vf().store.delete_saved(sel, k);
                 if !self.save() {
-                    if let Some((mine, text)) = removed { self.vf().store.contacts[sel].saved.insert(k, nerd_chat_store::SavedMsg { mine, text }); }
+                    if let Some((mine, text)) = removed { self.vf().store.contacts[sel].saved.insert(k, sine_loco_store::SavedMsg { mine, text }); }
                     self.resync_note("may already lack this message");
                     return Action::None;
                 }
@@ -1323,7 +1323,7 @@ impl App {
         }
     }
 
-    fn our_cap(&self, c: &nerd_chat_store::Contact) -> bool { c.adv_can_host.unwrap_or(self.cfg.can_host) }
+    fn our_cap(&self, c: &sine_loco_store::Contact) -> bool { c.adv_can_host.unwrap_or(self.cfg.can_host) }
 
     /// Option C: host an onion service for the selected contact although the roles would make us only dial.
     fn toggle_host_anyway(&mut self) {
@@ -1339,7 +1339,7 @@ impl App {
         self.vf().store.contacts[i].host_anyway = on;
         if !self.save() { self.vf().store.contacts[i].host_anyway = was; return; } // keep memory and vault in step
         // only roles where we DIAL are affected; otherwise leave the running connection alone (a re-add would drop it)
-        let dials = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)).and_then(|c| c.peer.as_ref().map(|p| nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can))).unwrap_or(false);
+        let dials = self.vf.as_ref().and_then(|v| v.store.contacts.get(i)).and_then(|c| c.peer.as_ref().map(|p| sine_loco_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can))).unwrap_or(false);
         if dials { self.engine_add(i); }
         if on { self.err("HOST ANYWAY is ON for this contact: while online you publish an onion service for them, so anyone holding THEIR copy of your bundle can see when you are online. Use only if they cannot host (their bundle said so wrongly)."); }
         else { self.ok("Host anyway is off: you only host for this contact when the roles say so."); }
@@ -1350,7 +1350,7 @@ impl App {
         let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
         let p = c.peer.as_ref()?;
         let can = self.our_cap(c);
-        let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
+        let dials = sine_loco_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
         Some((p.can_host, c.host_anyway, !dials || (c.host_anyway && can)))
     }
 
@@ -1360,7 +1360,7 @@ impl App {
         let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
         let p = c.peer.as_ref()?;
         let can = self.our_cap(c);
-        let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
+        let dials = sine_loco_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
         Some(Inspect {
             connected: self.linked.contains(&c.id),
             contact_can_host: p.can_host,
@@ -1393,12 +1393,12 @@ impl App {
     fn on_rotate(&mut self, id: [u8; 8], kind: u8, onion: [u8; 32], auth: [u8; 32]) {
         let Some(i) = self.vf.as_ref().and_then(|v| v.store.contacts.iter().position(|c| c.id == id)) else { return };
         match kind {
-            nerd_chat_chat::proto::KIND_ROTATE_OFFER => {
+            sine_loco_chat::proto::KIND_ROTATE_OFFER => {
                 let c = &self.vf().store.contacts[i];
                 let Some(peer) = c.peer.clone() else { return };
                 if (peer.onion_pub, peer.auth_pub) == (onion, auth) && c.peer_old.is_some() {
                     // already switched (our ack was lost): acknowledge again
-                    if let Some(e) = &self.engine { e.answer_rotation(id, nerd_chat_chat::proto::KIND_ROTATE_ACK, onion, auth); }
+                    if let Some(e) = &self.engine { e.answer_rotation(id, sine_loco_chat::proto::KIND_ROTATE_ACK, onion, auth); }
                     return;
                 }
                 if c.peer_old.is_some() { return self.err("Ignored a second key rotation from a contact before the first one finished."); }
@@ -1415,12 +1415,12 @@ impl App {
                     return; // no ack: the contact keeps proposing
                 }
                 // ack first (the re-add below closes the connection), then host/dial with the new keys
-                if let Some(e) = &self.engine { e.answer_rotation(id, nerd_chat_chat::proto::KIND_ROTATE_ACK, onion, auth); }
+                if let Some(e) = &self.engine { e.answer_rotation(id, sine_loco_chat::proto::KIND_ROTATE_ACK, onion, auth); }
                 self.rot_accepted.insert(id, Instant::now());
                 self.engine_add(i);
                 self.ok("This contact rotated its onion service keys (identity and safety number are unchanged).");
             }
-            nerd_chat_chat::proto::KIND_ROTATE_ACK => {
+            sine_loco_chat::proto::KIND_ROTATE_ACK => {
                 let c = &self.vf().store.contacts[i];
                 let Some(t) = c.next_transport.clone() else { return };
                 let Some(next) = c.identity.with_transport_secret(&t) else { return };
@@ -1433,11 +1433,11 @@ impl App {
                     return;
                 }
                 // tell the contact it may forget the old keys, then retire our old service
-                if let Some(e) = &self.engine { e.answer_rotation(id, nerd_chat_chat::proto::KIND_ROTATE_DONE, onion, auth); }
+                if let Some(e) = &self.engine { e.answer_rotation(id, sine_loco_chat::proto::KIND_ROTATE_DONE, onion, auth); }
                 self.engine_add(i);
                 self.ok("Key rotation complete: your old onion service was removed from Tor (it also vanishes when you go offline); copies of your old bundle no longer show when you are online. Send your NEW bundle to anyone who still needs it.");
             }
-            nerd_chat_chat::proto::KIND_ROTATE_DONE => {
+            sine_loco_chat::proto::KIND_ROTATE_DONE => {
                 let c = &self.vf().store.contacts[i];
                 let Some(peer) = c.peer.as_ref() else { return };
                 if c.peer_old.is_none() || (peer.onion_pub, peer.auth_pub) != (onion, auth) { return; }
@@ -1515,7 +1515,7 @@ impl App {
 
     fn vf(&mut self) -> &mut VaultFile { self.vf.as_mut().expect("unlocked") }
     /// The selected contact (borrow-friendly: computes the index itself).
-    fn cur(&mut self) -> Option<&mut nerd_chat_store::Contact> {
+    fn cur(&mut self) -> Option<&mut sine_loco_store::Contact> {
         let i = self.sel;
         self.vf.as_mut()?.store.contacts.get_mut(i)
     }
@@ -1542,10 +1542,10 @@ impl App {
                 Err(e) => self.err(format!("{e}")),
             },
             Prompt::SendFile | Prompt::SendText => {
-                let mode = if p == Prompt::SendText { nerd_chat_strip::Mode::PlainText } else { nerd_chat_strip::Mode::Auto };
+                let mode = if p == Prompt::SendText { sine_loco_strip::Mode::PlainText } else { sine_loco_strip::Mode::Auto };
                 let Some(id) = self.sel_id() else { return };
                 if !self.linked.contains(&id) { return self.err("Contact is no longer connected."); }
-                let raw = match read_regular_file(&PathBuf::from(&text), nerd_chat_chat::file::MAX_FILE as u64 * 2) {
+                let raw = match read_regular_file(&PathBuf::from(&text), sine_loco_chat::file::MAX_FILE as u64 * 2) {
                     Ok(v) => Zeroizing::new(v),
                     Err(e) => return self.err(format!("Cannot read file: {e}")),
                 };
@@ -1554,7 +1554,7 @@ impl App {
                 let (tx, rx) = channel();
                 self.prep_rx = Some((id, rx));
                 self.ok("Cleaning the file (metadata removal) ... F12 = panic.");
-                thread::spawn(move || { let _ = tx.send(nerd_chat_chat::Engine::prepare_file(&raw, mode)); });
+                thread::spawn(move || { let _ = tx.send(sine_loco_chat::Engine::prepare_file(&raw, mode)); });
             }
             Prompt::SaveFile => {
                 let Some(id) = self.sel_id() else { return };
@@ -1586,7 +1586,7 @@ impl App {
                 match r {
                     Err(e) => self.err(format!("Cannot read {text}: {e}")),
                     Ok(s) => match file::dearmor(&s) {
-                        Err(_) => self.err("Not a valid Nerd-chat contact file."),
+                        Err(_) => self.err("Not a valid Sine Loco contact file."),
                         Ok(b) => {
                             let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
                             if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return; }
@@ -1621,7 +1621,7 @@ impl App {
             }
             Prompt::Listen => self.start_listen(text),
             Prompt::JoinAddr => self.open_prompt(Prompt::JoinCode(text.trim().to_string()), ""),
-            Prompt::JoinLink => match nerd_chat_net::tor::parse_pairing_link(&text) {
+            Prompt::JoinLink => match sine_loco_net::tor::parse_pairing_link(&text) {
                 Ok(id) => self.open_prompt(Prompt::JoinCode(format!("tor:{id}")), ""),
                 Err(_) => self.err("That is not a valid pairing link: paste the 56 characters exactly as you received them."),
             },
@@ -1669,7 +1669,7 @@ impl App {
     /// Run one pairing job on a worker thread. The job gets the cancel flag, the slot where it must publish its socket (so `x`/panic can cut
     /// a blocked read) and a private copy of the contact's identity; its outcome arrives through `pair_rx`.
     fn spawn_pair<F>(&mut self, info: Zeroizing<String>, job: F)
-    where F: FnOnce(&AtomicBool, &Mutex<Option<TcpStream>>, &ContactIdentity) -> Result<nerd_chat_exchange::pair::Paired, ExchangeError> + Send + 'static {
+    where F: FnOnce(&AtomicBool, &Mutex<Option<TcpStream>>, &ContactIdentity) -> Result<sine_loco_exchange::pair::Paired, ExchangeError> + Send + 'static {
         let (ident, id) = self.identity_clone();
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1881,7 +1881,7 @@ impl App {
     }
 
     /// Everything the engine needs for a contact, incl. an unfinished key rotation (both directions).
-    fn cfg_of(&self, c: &nerd_chat_store::Contact) -> Option<ContactCfg> {
+    fn cfg_of(&self, c: &sine_loco_store::Contact) -> Option<ContactCfg> {
         let p = c.peer.as_ref()?;
         let cfg = ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.our_cap(c), c.host_anyway)
             .with_rotation(&c.identity, c.next_transport.as_deref(), c.peer_old);
@@ -1929,9 +1929,9 @@ impl App {
         if self.engine.is_none() && !kept { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
         // refuse BEFORE taking the draft, so nothing is lost: the engine keeps at most MAX_UNCONFIRMED unconfirmed texts per contact
         let open = self.chats.get(&id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count());
-        if open >= nerd_chat_chat::engine::MAX_UNCONFIRMED { return self.err("Outbox full: the contact has not confirmed your earlier messages yet. Your draft is kept; try again when they come online."); }
+        if open >= sine_loco_chat::engine::MAX_UNCONFIRMED { return self.err("Outbox full: the contact has not confirmed your earlier messages yet. Your draft is kept; try again when they come online."); }
         // the id is made HERE so that the history's copy and the engine's copy are the same message
-        let mid = nerd_chat_chat::proto::new_msg_id();
+        let mid = sine_loco_chat::proto::new_msg_id();
         let text = self.compose.take_string();
         let linked = self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
@@ -1985,7 +1985,7 @@ impl App {
         t
     }
 
-    fn contact(&self, id: [u8; 8]) -> Option<&nerd_chat_store::Contact> { self.vf.as_ref()?.store.contacts.iter().find(|c| c.id == id) }
+    fn contact(&self, id: [u8; 8]) -> Option<&sine_loco_store::Contact> { self.vf.as_ref()?.store.contacts.iter().find(|c| c.id == id) }
     fn known(&self, id: &[u8; 8]) -> bool { self.contact(*id).is_some() }
 
     fn poll_online(&mut self) {
@@ -2058,7 +2058,7 @@ impl App {
                     self.status = "A contact offers a file: select them, then a = accept / r = decline.".into();
                 }
                 Event::File { id, data, format, report, resanitised } => {
-                    let ext = match format { nerd_chat_strip::Format::Jpeg => "jpg", nerd_chat_strip::Format::Png => "png", nerd_chat_strip::Format::Text => "txt" };
+                    let ext = match format { sine_loco_strip::Format::Jpeg => "jpg", sine_loco_strip::Format::Png => "png", sine_loco_strip::Format::Text => "txt" };
                     self.accepted.remove(&id);
                     self.inbox.insert(id, Received { data, ext });
                     self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ").chars().take(200).collect::<String>()) }
@@ -2187,7 +2187,7 @@ impl App {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use nerd_chat_chat::{Timing, Transport};
+    use sine_loco_chat::{Timing, Transport};
     use std::sync::atomic::AtomicBool;
 
     pub fn type_str(a: &mut App, s: &str) { for c in s.chars() { a.handle(Key::Char(c)); } }
@@ -2283,11 +2283,11 @@ mod tests {
         a.cfg.host_probe_test = Some(HostProbe::Cannot("510".into()));
         export(&mut a, "2.sbc");
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
-        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("2.sbc")).unwrap()).unwrap().can_host);
+        assert!(!sine_loco_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("2.sbc")).unwrap()).unwrap().can_host);
         // fixed once told: a later, different probe answer changes nothing
         a.cfg.host_probe_test = Some(HostProbe::Can);
         export(&mut a, "3.sbc");
-        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("3.sbc")).unwrap()).unwrap().can_host);
+        assert!(!sine_loco_exchange::file::dearmor(&std::fs::read_to_string(d.path().join("3.sbc")).unwrap()).unwrap().can_host);
         // another contact, tor can host
         add(&mut a, "carol"); a.sel = 1;
         export(&mut a, "4.sbc");
@@ -2615,7 +2615,7 @@ mod tests {
                  ack_delay_min: Duration::from_millis(20), ack_delay_max: Duration::from_millis(40), caps_wait: Duration::from_millis(400), rekey_cells: 32, rekey_after: Duration::from_secs(600) }
     }
 
-    fn net_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet) -> App {
+    fn net_app(dir: &std::path::Path, name: &str, net: &sine_loco_chat::MemNet) -> App {
         let mut c = cfg(Some(dir.join(name)));
         let net = net.clone();
         c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(net.transport()) as Box<dyn Transport>)));
@@ -2647,8 +2647,8 @@ mod tests {
     }
 
     /// Two apps with one contact each, bundles exchanged by file (the offline path), both on the same in-memory network.
-    fn linked_pair(dir: &std::path::Path) -> (nerd_chat_chat::MemNet, App, App) {
-        let net = nerd_chat_chat::MemNet::new();
+    fn linked_pair(dir: &std::path::Path) -> (sine_loco_chat::MemNet, App, App) {
+        let net = sine_loco_chat::MemNet::new();
         let mut a = net_app(dir, "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(dir, "b.vault", &net); add(&mut b, "alice");
         link_apps(&mut a, &mut b, dir);
@@ -2706,9 +2706,9 @@ mod tests {
         let (_net, mut a, _b) = linked_pair(d.path());
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
         let before = peer_onion_of(&a);
-        let offer = nerd_chat_chat::proto::KIND_ROTATE_OFFER;
+        let offer = sine_loco_chat::proto::KIND_ROTATE_OFFER;
         let mine = (onion_of(&a), a.vf.as_ref().unwrap().store.contacts[0].identity.auth_public().to_bytes());
-        let fresh = nerd_chat_core::identity::ContactIdentity::generate();
+        let fresh = sine_loco_core::identity::ContactIdentity::generate();
         let good = (fresh.onion_public(), fresh.auth_public().to_bytes());
         a.on_rotate(id, offer, [0; 32], good.1);                       // weak onion key
         assert!(a.error, "{}", a.status); assert_eq!(peer_onion_of(&a), before);
@@ -2721,13 +2721,13 @@ mod tests {
         assert!(!a.error, "{}", a.status);
         assert_eq!(peer_onion_of(&a), good.0);
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].peer_old.map(|o| o.0), Some(before));
-        let again = nerd_chat_core::identity::ContactIdentity::generate();
+        let again = sine_loco_core::identity::ContactIdentity::generate();
         a.on_rotate(id, offer, again.onion_public(), again.auth_public().to_bytes()); // a second one before DONE
         assert!(a.error && a.status.contains("second"), "{}", a.status);
         assert_eq!(peer_onion_of(&a), good.0);
         // an ACK or DONE for something we never proposed does nothing
-        a.on_rotate(id, nerd_chat_chat::proto::KIND_ROTATE_ACK, good.0, good.1);
-        a.on_rotate(id, nerd_chat_chat::proto::KIND_ROTATE_DONE, again.onion_public(), again.auth_public().to_bytes());
+        a.on_rotate(id, sine_loco_chat::proto::KIND_ROTATE_ACK, good.0, good.1);
+        a.on_rotate(id, sine_loco_chat::proto::KIND_ROTATE_DONE, again.onion_public(), again.auth_public().to_bytes());
         assert!(a.vf.as_ref().unwrap().store.contacts[0].peer_old.is_some());
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].identity.onion_public(), mine.0);
     }
@@ -2737,9 +2737,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (_net, mut a, _b) = linked_pair(d.path());
         let id = a.vf.as_ref().unwrap().store.contacts[0].id;
-        let (offer, done) = (nerd_chat_chat::proto::KIND_ROTATE_OFFER, nerd_chat_chat::proto::KIND_ROTATE_DONE);
-        let k1 = nerd_chat_core::identity::ContactIdentity::generate();
-        let k2 = nerd_chat_core::identity::ContactIdentity::generate();
+        let (offer, done) = (sine_loco_chat::proto::KIND_ROTATE_OFFER, sine_loco_chat::proto::KIND_ROTATE_DONE);
+        let k1 = sine_loco_core::identity::ContactIdentity::generate();
+        let k2 = sine_loco_core::identity::ContactIdentity::generate();
         a.on_rotate(id, offer, k1.onion_public(), k1.auth_public().to_bytes());
         assert!(!a.error, "{}", a.status);
         a.on_rotate(id, done, k1.onion_public(), k1.auth_public().to_bytes());
@@ -2899,7 +2899,7 @@ mod tests {
     #[test]
     fn capability_travels_with_pairing_and_host_anyway_is_a_saved_explicit_choice() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
+        let net = sine_loco_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         a.cfg.can_host = false;                                   // a's Tor cannot host: says so in the bundle it sends
@@ -2922,12 +2922,12 @@ mod tests {
         let f = d.path().join("own.sbc");
         a.handle(Key::Char('e')); a.input = f.to_str().unwrap().into(); a.handle(Key::Enter);
         let txt = std::fs::read_to_string(&f).unwrap();
-        assert!(!nerd_chat_exchange::file::dearmor(&txt).unwrap().can_host, "the exported bundle must say that this Tor cannot host");
+        assert!(!sine_loco_exchange::file::dearmor(&txt).unwrap().can_host, "the exported bundle must say that this Tor cannot host");
         // review 12 (M1/L2): what we told a contact is FIXED: a later run without --cannot-host exports the same bit, and roles use it
         a.cfg.can_host = true;
         let f2 = d.path().join("own2.sbc");
         a.handle(Key::Char('e')); a.input = f2.to_str().unwrap().into(); a.handle(Key::Enter);
-        assert!(!nerd_chat_exchange::file::dearmor(&std::fs::read_to_string(&f2).unwrap()).unwrap().can_host, "advertised capability must not change per export");
+        assert!(!sine_loco_exchange::file::dearmor(&std::fs::read_to_string(&f2).unwrap()).unwrap().can_host, "advertised capability must not change per export");
         assert_eq!(a.vf.as_ref().unwrap().store.contacts[0].adv_can_host, Some(false));
         assert_eq!(a.cap_mismatch(), Some(false), "today's flag differs from what the contact was told: the UI must say so");
         a.cfg.can_host = false;
@@ -2944,7 +2944,7 @@ mod tests {
     #[test]
     fn contact_added_while_online_connects_and_offline_is_refused_cleanly() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
+        let net = sine_loco_chat::MemNet::new();
         let mut a = net_app(d.path(), "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
         // typing while offline: refused, nothing sent
@@ -3003,7 +3003,7 @@ mod tests {
     }
 
     /// A transport factory that blocks until released: lets a test change contacts while tor is still "starting".
-    fn gated_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet, gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> App {
+    fn gated_app(dir: &std::path::Path, name: &str, net: &sine_loco_chat::MemNet, gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> App {
         let mut c = cfg(Some(dir.join(name)));
         let net = net.clone();
         c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| {
@@ -3023,7 +3023,7 @@ mod tests {
     #[test]
     fn contact_deleted_while_starting_is_removed_from_the_engine() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
+        let net = sine_loco_chat::MemNet::new();
         let gate = std::sync::Arc::new(AtomicBool::new(false));
         let mut a = gated_app(d.path(), "a.vault", &net, gate.clone()); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
@@ -3045,7 +3045,7 @@ mod tests {
     #[test]
     fn contact_linked_while_starting_connects_after_ready() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
+        let net = sine_loco_chat::MemNet::new();
         let gate = std::sync::Arc::new(AtomicBool::new(false));
         let mut a = gated_app(d.path(), "a.vault", &net, gate.clone()); add(&mut a, "bob");
         let mut b = net_app(d.path(), "b.vault", &net); add(&mut b, "alice");
@@ -3319,7 +3319,7 @@ mod tests {
         a.handle(Key::Esc);
         let locked = screen_text(&a, 110, 24);
         assert!(locked.contains("LOCKED") && locked.contains("Enter = unlock") && locked.contains("a security alert is waiting"));
-        for leak in ["bobsecret", "topsecretmessage", "something bad", "Contacts", "Details", "NERD-CHAT", "[4]", "Safety number", "99999-88888", "127.0.0.1:4444", "Paired"] { assert!(!locked.contains(leak), "the privacy screen leaked {leak:?}"); }
+        for leak in ["bobsecret", "topsecretmessage", "something bad", "Contacts", "Details", "SINE LOCO", "[4]", "Safety number", "99999-88888", "127.0.0.1:4444", "Paired"] { assert!(!locked.contains(leak), "the privacy screen leaked {leak:?}"); }
         let narrow = screen_text(&a, 30, 8);
         assert!(!narrow.contains("bobsecret"));
     }
@@ -3545,7 +3545,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         { let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob"); }
         let vault = d.path().join("v");
-        let counter = nerd_chat_store::counter_path_for(&vault);
+        let counter = sine_loco_store::counter_path_for(&vault);
         assert!(vault.exists() && counter.exists());
         let mut a = App::new(cfg(Some(vault.clone())));                      // locked: the password prompt
         assert_eq!(a.screen, Screen::Unlock);
@@ -3567,7 +3567,7 @@ mod tests {
     fn purge_reports_files_it_could_not_remove_and_still_removes_the_rest() {
         let d = tempfile::tempdir().unwrap();
         let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
-        let vault = d.path().join("v"); let counter = nerd_chat_store::counter_path_for(&vault);
+        let vault = d.path().join("v"); let counter = sine_loco_store::counter_path_for(&vault);
         std::fs::remove_file(&counter).unwrap();
         std::fs::create_dir(&counter).unwrap(); std::fs::write(counter.join("x"), b"y").unwrap();   // a non-empty directory cannot be deleted: reported, not fatal
         assert_eq!(a.handle(Key::Purge), Action::Purge);
@@ -3742,11 +3742,11 @@ mod tests {
         go_online(&mut a);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
         a.handle(Key::Char('i'));
-        for i in 0..nerd_chat_chat::engine::MAX_UNCONFIRMED { type_str(&mut a, &format!("m{i}")); a.handle(Key::Enter); }
+        for i in 0..sine_loco_chat::engine::MAX_UNCONFIRMED { type_str(&mut a, &format!("m{i}")); a.handle(Key::Enter); }
         type_str(&mut a, "the draft");
         a.handle(Key::Enter);
         assert!(a.error && a.status.contains("Outbox full"), "{}", a.status);
-        assert_eq!(a.chat_lines().len(), nerd_chat_chat::engine::MAX_UNCONFIRMED, "no line was added");
+        assert_eq!(a.chat_lines().len(), sine_loco_chat::engine::MAX_UNCONFIRMED, "no line was added");
         assert!(!a.compose.is_empty(), "the draft is still there");
     }
 
@@ -3868,8 +3868,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------- pairing over Tor (spec 2026-11-09-tor-pairing-spec.md), on the in-memory network
-    fn tor_pair_apps(dir: &std::path::Path) -> (nerd_chat_chat::MemNet, App, App) {
-        let net = nerd_chat_chat::MemNet::new();
+    fn tor_pair_apps(dir: &std::path::Path) -> (sine_loco_chat::MemNet, App, App) {
+        let net = sine_loco_chat::MemNet::new();
         let mut a = net_app(dir, "a.vault", &net); add(&mut a, "bob");
         let mut b = net_app(dir, "b.vault", &net); add(&mut b, "alice");
         go_online(&mut a); go_online(&mut b);
@@ -3927,7 +3927,7 @@ mod tests {
         // an attacker who only has the link connects and hangs up
         let (link, _code) = tor_offer(&mut a, &mut b);
         let dial = net.transport().pair_dial_fn().unwrap();
-        drop(dial(&link, &[9; 16], &nerd_chat_net::tor::CancelToken::new()).unwrap());
+        drop(dial(&link, &[9; 16], &sine_loco_net::tor::CancelToken::new()).unwrap());
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].pair_ctl.is_none()), "{}", a.status);
         assert!(a.error && a.remote_lockout.remaining() == 0 && !a.alerts.iter().any(|(t, _)| t.contains("Someone used your pairing link")), "no guess, no accusation: {} {:?}", a.status, a.alerts);
         // a joiner who types a wrong code
@@ -3996,7 +3996,7 @@ mod tests {
     fn the_joiner_hears_why_a_link_failed() {
         let d = tempfile::tempdir().unwrap();
         let (_net, _a, mut b) = tor_pair_apps(d.path());
-        let ghost = nerd_chat_core::onion::service_id(&[7u8; 32]); // a well-formed link nobody serves
+        let ghost = sine_loco_core::onion::service_id(&[7u8; 32]); // a well-formed link nobody serves
         tor_join(&mut b, &ghost, "1234567890");
         assert!(pump_until(&mut [&mut b], |x| x[0].pair_ctl.is_none()), "{}", b.status);
         assert!(b.error && b.status.contains("Could not reach your partner"), "{}", b.status);
@@ -4004,7 +4004,7 @@ mod tests {
 
     // ---------------------------------------------------------------- the message history (docs/HISTORY_AND_TIMING_PLAN.md)
 
-    use nerd_chat_store::history::{Clock, Persist, State as MsgState};
+    use sine_loco_store::history::{Clock, Persist, State as MsgState};
 
     struct TestClock { wall: std::sync::Mutex<u64>, mono: std::sync::Mutex<u64> }
     impl TestClock {
@@ -4013,7 +4013,7 @@ mod tests {
     }
     impl Clock for TestClock { fn wall(&self) -> u64 { *self.wall.lock().unwrap() } fn mono(&self) -> u64 { *self.mono.lock().unwrap() } }
 
-    fn reopen_net_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet) -> App {
+    fn reopen_net_app(dir: &std::path::Path, name: &str, net: &sine_loco_chat::MemNet) -> App {
         let mut c = cfg(Some(dir.join(name)));
         let net = net.clone();
         c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(net.transport()) as Box<dyn Transport>)));
@@ -4027,7 +4027,7 @@ mod tests {
         assert_eq!(a.screen, Screen::Main, "{}", a.status);
         a
     }
-    fn hist(a: &App) -> &nerd_chat_store::History { a.history.as_ref().expect("history is open") }
+    fn hist(a: &App) -> &sine_loco_store::History { a.history.as_ref().expect("history is open") }
     fn cid(a: &App) -> [u8; 8] { a.vf.as_ref().unwrap().store.contacts[0].id }
     fn kept(a: &App) -> Vec<String> { hist(a).queued(cid(a)).iter().map(|(_, t)| t.to_string()).collect() }
     fn say_in_chat(a: &mut App, text: &str) { a.handle(Key::Char('i')); type_str(a, text); a.handle(Key::Enter); }
@@ -4036,7 +4036,7 @@ mod tests {
 
     #[test]
     fn the_engine_and_the_store_agree_on_how_many_unconfirmed_texts_fit() {
-        assert_eq!(nerd_chat_store::MAX_OUTBOX, nerd_chat_chat::engine::MAX_UNCONFIRMED);
+        assert_eq!(sine_loco_store::MAX_OUTBOX, sine_loco_chat::engine::MAX_UNCONFIRMED);
     }
 
     #[test]
@@ -4208,7 +4208,7 @@ mod tests {
     #[test]
     fn an_unsent_text_that_runs_out_of_time_is_marked_cancelled_and_never_sent_later() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
+        let net = sine_loco_chat::MemNet::new();
         let clock = TestClock::new();
         let mut cfg_a = cfg(Some(d.path().join("a.vault")));
         { let n = net.clone(); cfg_a.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(n.transport()) as Box<dyn Transport>))); }
@@ -4286,7 +4286,7 @@ mod tests {
     fn a_failed_counter_write_when_the_setting_is_saved_rolls_nothing_back() {
         let d = tempfile::tempdir().unwrap();
         let (_net, mut a, _b) = linked_pair(d.path());
-        let counter = nerd_chat_store::counter_path_for(&d.path().join("a.vault"));
+        let counter = sine_loco_store::counter_path_for(&d.path().join("a.vault"));
         std::fs::remove_file(&counter).unwrap(); std::fs::create_dir(&counter).unwrap();   // the counter file can no longer be replaced; the vault file still can (works as root)
         a.set_persist(Persist::Day);
         assert!(a.error && a.status.contains("saved, but the rollback-counter file"), "{}", a.status);

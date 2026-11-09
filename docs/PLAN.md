@@ -1,4 +1,4 @@
-# Nerd-chat — serverless, Tor-routed, single-binary secure chat (Rust)
+# Sine Loco — serverless, Tor-routed, single-binary secure chat (Rust)
 
 ## Context
 Goal: a chat for high-risk users with **no server in between**, contacts added by **local key exchange** (file / QR / direct BLE-Wi-Fi), per-contact keypairs, a password-locked vault, routable over **Tor** (and WireGuard/VPN if wanted), shipped as **one executable** that runs from a live-booted Linux. Repo is empty (greenfield); nothing to reuse. Decisions made with user: **online-only P2P**, **embedded C `tor`** (Arti later), **terminal TUI**.
@@ -74,7 +74,7 @@ crates/net       # transport trait; embedded-tor driver; system-tor driver; brid
 crates/app       # UI-agnostic application core (state machine, vault, pairing, panic/purge): shared by the front ends
 crates/tui       # terminal front end (ratatui) on top of crates/app
 crates/gui       # graphical front end (egui) on top of crates/app
-bin/nerd-chat     # single static binary: embeds tor, loads via memfd
+bin/sine-loco     # single static binary: embeds tor, loads via memfd
 docs/THREAT_MODEL.md, docs/PROTOCOL.md
 ```
 
@@ -108,13 +108,13 @@ Send files over the same signed + encrypted session, in fixed-size chunks (so fi
 - **Receiver side**: files land in RAM first (or a user-chosen directory with neutral names), integrity verified end-to-end
   (hash inside the signed session), a quarantine step that re-checks and re-strips, and no preview rendering of untrusted formats.
 - **Padding/chunking** to hide exact sizes, optional cover traffic while a transfer runs, resume after reconnect inside the session only.
-- Later: stripped-copy verification tooling (`nerd-chat strip FILE` as a standalone command), reproducible test corpus
+- Later: stripped-copy verification tooling (`sine-loco strip FILE` as a standalone command), reproducible test corpus
   (files with planted metadata) proving each stripper, and an audit of every parser used.
 Honest limit: stripping cannot remove information that is in the content itself (faces, handwriting, writing style, visible text).
 
 ## Verification
 - `cargo test` + `cargo fuzz` on bundle/cell/handshake parsers; known-answer tests for KDF/AEAD.
-- `ldd bin/nerd-chat` → "statically linked" (or "not a dynamic executable"); run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).
+- `ldd bin/sine-loco` → "statically linked" (or "not a dynamic executable"); run on Tails, a Debian live and an Alpine/Arch live ISO in QEMU (and on real hardware).
 - End-to-end: two VMs, exchange bundles by file, chat over Tor; `tcpdump` confirms only Tor traffic leaves the host; confirm no plaintext/keys on disk (`strings`, entropy check of vault, RAM-only mode leaves nothing).
 - Wrong-password and tamper tests (vault must fail closed); reproducible-build hash match across two machines.
 

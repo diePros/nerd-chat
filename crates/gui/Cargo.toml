@@ -1,26 +1,26 @@
 [package]
 publish = false
-name = "nerd-chat-gui"
+name = "sine-loco-gui"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Nerd-chat graphical front end (egui). A second skin over nerd-chat-app: passwords and message drafts live only in the app core's zeroizing buffers."
+description = "Sine Loco graphical front end (egui). A second skin over sine-loco-app: passwords and message drafts live only in the app core's zeroizing buffers."
 
 [[bin]]
-name = "nerd-chat-gui"
+name = "sine-loco-gui"
 path = "src/main.rs"
 
 [features]
 # developer demo: two linked in-memory accounts so that the screens can be shown without Tor (never in a release build)
-demo = ["dep:nerd-chat-chat", "nerd-chat-app/test-transport"]
+demo = ["dep:sine-loco-chat", "sine-loco-app/test-transport"]
 
 [dependencies]
-nerd-chat-app = { path = "../app", default-features = false }
-nerd-chat-core = { path = "../core" }
-nerd-chat-vault = { path = "../vault" }
-nerd-chat-strip = { path = "../strip" }
-nerd-chat-net = { path = "../net" }
-nerd-chat-chat = { path = "../chat", optional = true }
+sine-loco-app = { path = "../app", default-features = false }
+sine-loco-core = { path = "../core" }
+sine-loco-vault = { path = "../vault" }
+sine-loco-strip = { path = "../strip" }
+sine-loco-net = { path = "../net" }
+sine-loco-chat = { path = "../chat", optional = true }
 # GUI toolkit: NO accesskit (a screen reader would receive every message: spike report), NO web screen reader. The clipboard feature is on ONLY
 # for the pairing link (owner decision 2026-11-09): explicit Copy button + Ctrl+V in the link field; the view code drops every paste event and disables selectable labels.
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }

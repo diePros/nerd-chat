@@ -1,11 +1,11 @@
 //! THE TIMING-COVER TEST (docs/HISTORY_AND_TIMING_PLAN.md section 2): run a live session in which messages are pushed at moments that are NOT on the grid, tick on the grid,
 //! and look at what the KERNEL says about the files. The claim: mtime and ctime of the history file, the vault file and its counter file only ever show grid (tick) times,
 //! never the moment of a message; the birth time and the inode never change; the size never changes.
-use nerd_chat_store::{
+use sine_loco_store::{
     history::{History, NoPlatformKeys, State, SystemClock, Persist, Tick},
     VaultFile,
 };
-use nerd_chat_vault::Profile;
+use sine_loco_vault::Profile;
 use std::{fs, os::unix::fs::MetadataExt, sync::Arc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 use zeroize::Zeroizing;
 
@@ -20,9 +20,9 @@ fn times(p: &std::path::Path) -> Times {
 #[test]
 fn file_times_show_the_grid_never_the_moment_of_a_message() {
     let d = tempfile::tempdir().unwrap();
-    let vp = d.path().join("nerd-chat.vault");
+    let vp = d.path().join("sine-loco.vault");
     let vf = VaultFile::create(Some(&vp), None, b"pw", None, Profile::InsecureTest).unwrap();
-    let cp = nerd_chat_store::counter_path_for(&vp);
+    let cp = sine_loco_store::counter_path_for(&vp);
     let hp = d.path().join("hist.bin");
     let mut h = History::open(&hp, 64 * 1024, vf.subkey(b"history"), Arc::new(NoPlatformKeys), Arc::new(SystemClock::new()), Persist::Day).unwrap();
 

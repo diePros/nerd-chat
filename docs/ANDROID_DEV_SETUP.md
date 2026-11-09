@@ -8,7 +8,7 @@ Rust side already assumes Linux) or Android Studio's own SDK manager. What is NO
 |---|---|
 | Android app (Kotlin) | branch `claude/stoic-hopper-i5rqlk`, folder `android/` (commit `26f92f2`) |
 | Assessment, plan, decisions | `docs/ANDROID_PORT.md` (same branch) |
-| Rust core with the UI-agnostic `nerd-chat-app` crate and the Linux GUI | branch `next` (NOT merged into the branch above) |
+| Rust core with the UI-agnostic `sine-loco-app` crate and the Linux GUI | branch `next` (NOT merged into the branch above) |
 | `main` | the old TUI-only state |
 
 The Android branch was cut from `main`, so it does not contain `crates/app` or `crates/gui`. The first real integration step (the Rust bridge)
@@ -16,7 +16,7 @@ needs `next`: merge or rebase the Android branch onto `next` first (`git fetch o
 neither `android/` nor `docs/ANDROID_PORT.md` exists on `next`, so a conflict is unlikely).
 
 ```bash
-git clone https://github.com/diePros/nerd-chat && cd nerd-chat
+git clone https://github.com/diePros/sine-loco && cd sine-loco
 git checkout claude/stoic-hopper-i5rqlk
 ```
 
@@ -71,8 +71,8 @@ the blank recent-apps thumbnail. The demo backend accepts any non-empty password
 
 ### Signing a release (never commit keys)
 ```bash
-keytool -genkeypair -v -keystore ~/nerdchat-release.jks -alias nerdchat -keyalg RSA -keysize 4096 -validity 10000
-export NERDCHAT_KEYSTORE=$HOME/nerdchat-release.jks NERDCHAT_KEYSTORE_PASSWORD='...' NERDCHAT_KEY_ALIAS=nerdchat
+keytool -genkeypair -v -keystore ~/sineloco-release.jks -alias sineloco -keyalg RSA -keysize 4096 -validity 10000
+export SINELOCO_KEYSTORE=$HOME/sineloco-release.jks SINELOCO_KEYSTORE_PASSWORD='...' SINELOCO_KEY_ALIAS=sineloco
 ./gradlew :app:assembleRelease      # now signed; verify: $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
 ```
 Untested: the signed path (only the unsigned release build was run). Keep the keystore backed up offline: losing it means users cannot update.
@@ -90,7 +90,7 @@ Untested: the signed path (only the unsigned release build was run). Keep the ke
 - Change colours only in `model/.../Palettes.kt`; the contrast test guards them (`android/README.md`).
 
 ## 5b. Known test failures that are NOT yours (seen in the cloud container, identical on plain `next`)
-`cargo test --workspace --no-fail-fast` reports failures in `sandbox/tests/kernel.rs::installing_without_no_new_privs_fails_closed`, `tui` and `gui` `tests/cleaner.rs`, and two tests of `nerd-chat-app`
+`cargo test --workspace --no-fail-fast` reports failures in `sandbox/tests/kernel.rs::installing_without_no_new_privs_fails_closed`, `tui` and `gui` `tests/cleaner.rs`, and two tests of `sine-loco-app`
 (`a_failed_save_does_not_hide_that_the_vault_file_may_already_hold_the_message` needs a non-root user; `purge_spares_planted_links_and_files_that_replaced_ours` depends on inode reuse, see `docs/ANDROID_PORT.md`).
 On your laptop as a normal user most of these may pass: if one still fails there, it is worth a look.
 
@@ -116,10 +116,10 @@ Things to look at on the phone: whether the history file stays at a constant siz
 ```bash
 export ANDROID_HOME=$HOME/android-sdk
 $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "emulator" "system-images;android-36;default;x86_64"   # AOSP image: no Google services
-echo no | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -n nerdchat -k "system-images;android-36;default;x86_64" -d pixel_6
-$ANDROID_HOME/emulator/emulator -avd nerdchat -no-snapshot &              # add -no-window -gpu swiftshader_indirect for headless
+echo no | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -n sineloco -k "system-images;android-36;default;x86_64" -d pixel_6
+$ANDROID_HOME/emulator/emulator -avd sineloco -no-snapshot &              # add -no-window -gpu swiftshader_indirect for headless
 $ANDROID_HOME/platform-tools/adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-$ANDROID_HOME/platform-tools/adb shell am start -n app.nerdchat/.MainActivity
+$ANDROID_HOME/platform-tools/adb shell am start -n app.sineloco/.MainActivity
 ```
 `/dev/kvm` must be readable by you (group `kvm`: `sudo usermod -aG kvm $USER`, then log in again). The emulator reaches the internet, so the embedded tor really bootstraps.
 `adb exec-out screencap` is BLACK on purpose (`FLAG_SECURE`); use `adb shell uiautomator dump` to read the screen. The emulator is x86_64: it tests `libtor.so`/the bridge for x86_64, not the arm64 build.

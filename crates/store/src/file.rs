@@ -1,5 +1,5 @@
 use crate::{book::Store, StoreError};
-use nerd_chat_vault::{Profile, Vault, VaultError};
+use sine_loco_vault::{Profile, Vault, VaultError};
 use std::{fs, io::Write, path::{Path, PathBuf}, sync::atomic::{AtomicBool, Ordering}};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -102,7 +102,7 @@ const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 /// v2: counter (8) + history generation (8). v1 (counter only, 48 bytes) is still read; the plain 8-byte form is the oldest.
 const COUNTER_FILE_LEN: usize = 24 + 16 + 16;
 const COUNTER_FILE_LEN_V1: usize = 24 + 8 + 16;
-const COUNTER_AAD: &[u8] = b"nerd-chat-counter-file-v1";
+const COUNTER_AAD: &[u8] = b"sine-loco-counter-file-v1";
 
 fn counter_file(vault: &Vault, hist_gen: u64) -> Vec<u8> {
     use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
@@ -494,7 +494,7 @@ mod tests {
 #[cfg(test)]
 mod review33_regressions {
     use super::*;
-    use nerd_chat_vault::Profile;
+    use sine_loco_vault::Profile;
     #[test]
     fn rollback_via_plain_counter_downgrade() {
         let d = tempfile::tempdir().unwrap(); let p = d.path().join("v");

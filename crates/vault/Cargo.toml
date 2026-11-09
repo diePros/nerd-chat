@@ -1,6 +1,6 @@
 [package]
 publish = false
-name = "nerd-chat-vault"
+name = "sine-loco-vault"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true

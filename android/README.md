@@ -1,10 +1,10 @@
-# Nerd-chat for Android (Kotlin, native)
+# Sine Loco for Android (Kotlin, native)
 
 The third native front end next to the terminal UI and the Linux GUI. Kotlin + Jetpack Compose, a WhatsApp-style layout (chat list,
 bubbles, delivery marks, a coloured top bar) with the project's privacy rules kept: **no timestamps, no read receipts, no typing
 indicators, no presence beyond "connected over Tor"** (docs/DELIVERY.md). Focus: anonymity on the network first.
 
-> **Status: the app runs on the real Rust core; tor is embedded and reaches "Tor connected" on the x86_64 emulator (Android 16); NOT yet tried on a real phone.** The screens talk to `nerd-chat-app` through a JNI bridge
+> **Status: the app runs on the real Rust core; tor is embedded and reaches "Tor connected" on the x86_64 emulator (Android 16); NOT yet tried on a real phone.** The screens talk to `sine-loco-app` through a JNI bridge
 > (`crates/android`): vault creation and unlock (the real Argon2 key derivation), contacts, the chat engine, pairing over Tor, verification,
 > panic and purge are the core's own code. `libtor.so` (C tor 0.4.9.16 with OpenSSL 3.5.9 and libevent, built by `scripts/build-tor-android.sh` before Gradle, not committed) is started as a child
 > process by the core. The build declares `INTERNET` for tor only. NOT done: foreground service (Android may freeze tor when the app is in the background), network-change handling, bridges, a run on a device.
@@ -27,8 +27,8 @@ clipboard, process exit) are passed in by the host. The desktop compile therefor
 ```bash
 cd android
 ./gradlew :model:test :ui:test                 # 27 tests; builds the host bridge library and runs the REAL JNI end-to-end test; screenshots in ui/build/shots/
-ANDROID_HOME=~/android-sdk ./gradlew :app:assembleDebug     # builds libnerdchat_bridge.so for arm64-v8a + x86_64 with cargo and the NDK, packages it
-ANDROID_HOME=~/android-sdk ./gradlew :app:assembleRelease   # unsigned; sign with NERDCHAT_KEYSTORE* (see app/build.gradle.kts)
+ANDROID_HOME=~/android-sdk ./gradlew :app:assembleDebug     # builds libsineloco_bridge.so for arm64-v8a + x86_64 with cargo and the NDK, packages it
+ANDROID_HOME=~/android-sdk ./gradlew :app:assembleRelease   # unsigned; sign with SINELOCO_KEYSTORE* (see app/build.gradle.kts)
 ./gradlew :app:assembleDebug -Pdemo                         # demo backend (in-memory), no Rust involved at runtime
 cargo test --workspace --locked                             # the Rust side, from the repository root
 ```
@@ -43,7 +43,7 @@ core itself takes text, only an allowlist of one-letter commands exists (no quit
 refused instead of silently truncated. Passwords and the pairing code travel as `char[]`; the Kotlin array and the Rust copy are wiped, but the snapshot text (chat lines, the pairing code on screen) is copied into Java strings that cannot be wiped, and the `jni` crate keeps one unwiped Rust-side copy per snapshot (tracker R32-B3).
 
 ## Changing the colours
-All palettes are in **`model/src/main/kotlin/app/nerdchat/model/Palettes.kt`**: one block per palette, light and dark scheme, plain hex.
+All palettes are in **`model/src/main/kotlin/app/sineloco/model/Palettes.kt`**: one block per palette, light and dark scheme, plain hex.
 Edit a value, run `./gradlew :model:test`: `PaletteContrastTest` fails if any text/background pair drops below WCAG AA (4.5:1) or a
 bubble disappears into the conversation background. Add a palette = add a block and list it in `Palettes.all`. The user picks one in
 Settings (stored as an id in a plain preference: it is only a colour). Palettes: Fern (default), Onion, Midnight, Graphite, Dusk.

@@ -1,4 +1,4 @@
-# nerd-chat
+# sine-loco
 
 A serverless, Tor-routed, end-to-end encrypted chat for people who have reason to be careful. No server, no accounts, no phone numbers,
 no cloud: you exchange keys with each contact in person (file, QR-less local link with a one-time code), every contact gets its own fresh
@@ -19,17 +19,17 @@ key pair and its own onion service, and everything runs from a **single static L
 - **Panic:** F12 or Ctrl+\ (panic-lock) wipes memory and screen and exits immediately; Ctrl+] (purge) additionally overwrites and deletes the vault, counter, keyfile and exported files. No logs, no automatic history, no clipboard.
 - **Keeping messages:** on Linux nothing is saved by itself unless you switch the history on (setting `O`; `docs/HISTORY_AND_TIMING_PLAN.md`); the Android app keeps messages for 1 day by default (changeable in Settings); you can save a chosen message into the encrypted vault (message cursor `m`, `y`) and delete it again.
 - **Key rotation:** you can replace the onion address and auth key of a contact so that old copies of your bundle stop revealing when you are online.
-- **GUI (in progress):** `cargo build -p nerd-chat-gui` (dynamically linked, needs X11/Wayland and OpenGL; no screen-reader support on purpose, see `docs/superpowers/specs/2026-11-09-gui-spike-report.md`). Build it with `-p`, never from a workspace-wide release build.
+- **GUI (in progress):** `cargo build -p sine-loco-gui` (dynamically linked, needs X11/Wayland and OpenGL; no screen-reader support on purpose, see `docs/superpowers/specs/2026-11-09-gui-spike-report.md`). Build it with `-p`, never from a workspace-wide release build.
 - **UI:** terminal UI with a permanent contact list, a vim-style Normal/Insert input and a privacy screen (3rd Esc). A GUI is planned (`docs/ROADMAP.md`).
 
 ## Build
 ```bash
 git clone <this repository> && cd <repository>
 cargo test --workspace                                              # expect all green
-cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui   # static binary (pinned toolchain, see rust-toolchain.toml)
+cargo build --release --locked --target x86_64-unknown-linux-musl -p sine-loco-tui   # static binary (pinned toolchain, see rust-toolchain.toml)
 ```
 Details, checksums, the reproducible-build check (also on WSL) and live-USB notes: `docs/BUILD_AND_RUN.md`; first steps and the key map: `docs/GETTING_STARTED.md`.
-Without `--vault` the vault lives in `~/.local/share/nerd-chat/` on this computer's disk (home backups and sync tools copy it); use `--vault PATH` for a USB stick or Tails Persistent Storage.
+Without `--vault` the vault lives in `~/.local/share/sine-loco/` on this computer's disk (home backups and sync tools copy it); use `--vault PATH` for a USB stick or Tails Persistent Storage.
 
 Needs `tor` installed for chat (or an existing Tor via `--tor-control`). x86_64 Linux only; the file-cleaning sandbox needs seccomp.
 

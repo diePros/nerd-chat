@@ -504,19 +504,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerd-chat-chat"
+name = "sine-loco-chat"
 version = "0.1.0"
 dependencies = [
  "blake2 0.11.0",
  "getrandom 0.3.4",
- "nerd-chat-core",
- "nerd-chat-net",
- "nerd-chat-strip",
+ "sine-loco-core",
+ "sine-loco-net",
+ "sine-loco-strip",
  "zeroize",
 ]
 
 [[package]]
-name = "nerd-chat-core"
+name = "sine-loco-core"
 version = "0.1.0"
 dependencies = [
  "blake2 0.11.0",
@@ -532,7 +532,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerd-chat-exchange"
+name = "sine-loco-exchange"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -540,28 +540,28 @@ dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 4.1.3",
  "getrandom 0.3.4",
- "nerd-chat-core",
- "nerd-chat-net",
+ "sine-loco-core",
+ "sine-loco-net",
  "spake2",
  "thiserror",
  "zeroize",
 ]
 
 [[package]]
-name = "nerd-chat-fuzz"
+name = "sine-loco-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "nerd-chat-chat",
- "nerd-chat-core",
- "nerd-chat-exchange",
- "nerd-chat-net",
- "nerd-chat-store",
- "nerd-chat-strip",
+ "sine-loco-chat",
+ "sine-loco-core",
+ "sine-loco-exchange",
+ "sine-loco-net",
+ "sine-loco-store",
+ "sine-loco-strip",
 ]
 
 [[package]]
-name = "nerd-chat-net"
+name = "sine-loco-net"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -569,7 +569,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac 0.13.0",
  "libc",
- "nerd-chat-core",
+ "sine-loco-core",
  "rustix",
  "sha2 0.11.1",
  "thiserror",
@@ -577,28 +577,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerd-chat-store"
+name = "sine-loco-store"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
- "nerd-chat-core",
- "nerd-chat-vault",
+ "sine-loco-core",
+ "sine-loco-vault",
  "thiserror",
  "zeroize",
 ]
 
 [[package]]
-name = "nerd-chat-strip"
+name = "sine-loco-strip"
 version = "0.1.0"
 dependencies = [
- "nerd-chat-core",
+ "sine-loco-core",
  "thiserror",
  "zeroize",
 ]
 
 [[package]]
-name = "nerd-chat-vault"
+name = "sine-loco-vault"
 version = "0.1.0"
 dependencies = [
  "argon2",

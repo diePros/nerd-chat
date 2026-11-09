@@ -1,5 +1,5 @@
 #![deny(unsafe_code)]
-//! Bridge between the Kotlin Android app and the Rust core (`nerd-chat-app`).
+//! Bridge between the Kotlin Android app and the Rust core (`sine-loco-app`).
 //!
 //! Three layers, from the inside out:
 //!  * [`bridge::Bridge`]: owns the `App` and a small COMMAND layer (what a tap means) over the core's key-driven state machine, the way

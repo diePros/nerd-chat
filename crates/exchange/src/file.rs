@@ -2,7 +2,7 @@
 //! Strict parser: exact header/footer, canonical base64, hard size cap.
 use crate::ExchangeError;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use nerd_chat_core::bundle::{Bundle, BUNDLE_LEN};
+use sine_loco_core::bundle::{Bundle, BUNDLE_LEN};
 
 const HEAD: &str = "-----BEGIN SEBURITY CONTACT-----";
 const FOOT: &str = "-----END SEBURITY CONTACT-----";
@@ -46,7 +46,7 @@ pub fn dearmor(text: &str) -> Result<Bundle, ExchangeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nerd_chat_core::identity::ContactIdentity;
+    use sine_loco_core::identity::ContactIdentity;
 
     #[test]
     fn roundtrip_and_rejections() {

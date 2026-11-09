@@ -1,11 +1,11 @@
 # Review prompt: the seccomp sandbox crate (unsafe code + filter correctness)
 
 You are an adversarial reviewer with deep knowledge of Linux seccomp-BPF, the x86_64 syscall ABI, Rust unsafe/FFI rules and musl.
-Repository: `/home/sebi/Documents/Code/nerd-chat` (a serverless, Tor-routed chat for people at high risk; privacy and security are
+Repository: `/home/sebi/Documents/Code/sine-loco` (a serverless, Tor-routed chat for people at high risk; privacy and security are
 the only priorities; it is a single static musl executable). Commit under review: `git show 5929fac` (plus the crate as it is now).
 
 ## What was built
-A new crate `crates/sandbox` (`nerd-chat-sandbox`) that is the ONLY place in the project allowed to contain `unsafe`. It must
+A new crate `crates/sandbox` (`sine-loco-sandbox`) that is the ONLY place in the project allowed to contain `unsafe`. It must
 contain EXACTLY ONE unsafe block (`prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog)` in `install`). It builds a classic-BPF
 seccomp ALLOWLIST (`filter()`, safe code) and installs it on the calling thread. It is used by the file-cleaning helper process
 (`crates/app/src/cleaner.rs`, `worker_main`) which parses HOSTILE JPEG/PNG/text from contacts; the filter is installed before
@@ -55,12 +55,12 @@ do not re-report known OPEN items, and note that earlier reviews already proved 
    check the Command setup and what happens if the parent's own fds 1/2 were passed through; a hostile peer controls only the
    helper's answer bytes), `read` on fd 0, `exit_group`. Anything that gives side channels or memory-protection escapes.
 8. Is the allowlist too STRICT for what the helper really does (availability = the user cannot receive images)? The helper runs
-   `nerd_chat_strip::clean` (JPEG/PNG validators, a zlib inflate validator, text cleaner, `Vec`/`String`/`HashMap`?) on musl static-pie.
+   `sine_loco_strip::clean` (JPEG/PNG validators, a zlib inflate validator, text cleaner, `Vec`/`String`/`HashMap`?) on musl static-pie.
    Find every code path that could issue a syscall not on the list: allocator growth (`brk`/`mmap`/`mremap`/`madvise`/`munmap`),
    `HashMap` RandomState (`getrandom`), `Instant::now`, panics/abort (they kill anyway — fine, but confirm the failure surfaces
    as a clean refusal in the parent), stack growth (no syscall), `write` of large buffers (`writev`? `sendfile`?), Rust runtime exit
    handlers, stdout flush at exit, the stack-overflow handler's `sigaltstack` teardown, locale/`getenv` use. Use `strace -f` on the
-   release musl binary (`target/x86_64-unknown-linux-musl/release/nerd-chat --clean-worker`) with big PNG/JPEG/text inputs to confirm.
+   release musl binary (`target/x86_64-unknown-linux-musl/release/sine-loco --clean-worker`) with big PNG/JPEG/text inputs to confirm.
 
 ### C. Integration and failure modes
 9. In `worker_main`: ordering of hardening steps; is `no_new_privs` truly set before `enter()` and is failure fatal? Is every
@@ -79,7 +79,7 @@ do not re-report known OPEN items, and note that earlier reviews already proved 
     could pass for the wrong reason (child killed by SIGSYS from something other than the intended call; `int80` case; the harness
     thread vs main thread; `--exact child_dispatch` accidentally matching nothing and exiting 0 — check that a missing case cannot
     produce a false pass).
-14. Run the tests (`cargo test -p nerd-chat-sandbox -p nerd-chat-tui --test cleaner`), run a few mutations of the filter yourself
+14. Run the tests (`cargo test -p sine-loco-sandbox -p sine-loco-tui --test cleaner`), run a few mutations of the filter yourself
     (change an offset, drop the arch check, allow `mprotect`, allow fd 3, ignore the high word, flip the JSET branch) in a COPY of the
     crate outside the repo and report which mutations survive. Surviving mutants are findings.
 

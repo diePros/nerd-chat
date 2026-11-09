@@ -1,21 +1,21 @@
-//! nerd-chat: terminal UI. Usage:
-//!   nerd-chat [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]
+//! sine-loco: terminal UI. Usage:
+//!   sine-loco [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]
 #![forbid(unsafe_code)]
 
 
-use nerd_chat_app::{app::{self, Action, App, Config, Key}, hardening::{harden, swap_problem}, ui, vault_path};
+use sine_loco_app::{app::{self, Action, App, Config, Key}, hardening::{harden, swap_problem}, ui, vault_path};
 use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{Clear, ClearType},
 };
-use nerd_chat_vault::Profile;
+use sine_loco_vault::Profile;
 use std::{io::stdout, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
 use zeroize::Zeroizing;
 
 fn usage() -> ! {
-    eprintln!("usage: nerd-chat [--version] [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
-  --vault PATH         vault file. Default: ~/.local/share/nerd-chat/nerd-chat.vault ($XDG_DATA_HOME), or an existing ./nerd-chat.vault.\n\
+    eprintln!("usage: sine-loco [--version] [--vault PATH] [--ram] [--low-mem] [--keyfile PATH] [--counter-file PATH]\n\
+  --vault PATH         vault file. Default: ~/.local/share/sine-loco/sine-loco.vault ($XDG_DATA_HOME), or an existing ./sine-loco.vault.\n\
                        On a USB stick or Tails Persistent Storage pass the path yourself.\n\
   --ram                RAM-only: never write anything to disk\n\
   --low-mem            use the 128 MiB key-derivation profile (low-RAM live systems)\n\
@@ -35,10 +35,10 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
-/// `nerd-chat --probe-tor [--probe-onion] [--tor-control ADDR] [--tor-cookie PATH]`: report what the Tor on this
+/// `sine-loco --probe-tor [--probe-onion] [--tor-control ADDR] [--tor-cookie PATH]`: report what the Tor on this
 /// machine allows, then exit. Passive unless --probe-onion (creates and removes one throwaway onion service).
 fn probe_tor(args: &[String]) -> ! {
-    use nerd_chat_net::tor::{control::AuthPref, probe::{probe, Candidates}, Addr};
+    use sine_loco_net::tor::{control::AuthPref, probe::{probe, Candidates}, Addr};
     let (mut onion, mut ctl, mut cookie, mut trust) = (false, None, None, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -57,7 +57,7 @@ fn probe_tor(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
-/// `nerd-chat --strip IN OUT [--text]`: clean one file offline (no network, no vault), write to a NEW file (0600), print the report.
+/// `sine-loco --strip IN OUT [--text]`: clean one file offline (no network, no vault), write to a NEW file (0600), print the report.
 fn strip_cmd(args: &[String]) -> ! {
     use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
@@ -68,12 +68,12 @@ fn strip_cmd(args: &[String]) -> ! {
     // the file contents sit in this process' memory: same swap and core-dump rules as the chat itself
     for w in harden() { eprintln!("warning: {w}"); }
     if !args.iter().any(|a| a == "--allow-swap") { refuse_if_swap(); }
-    let raw = match nerd_chat_store::read_regular_file(&PathBuf::from(input), nerd_chat_strip::MAX_INPUT as u64) {
+    let raw = match sine_loco_store::read_regular_file(&PathBuf::from(input), sine_loco_strip::MAX_INPUT as u64) {
         Ok(v) => Zeroizing::new(v),
         Err(e) => { eprintln!("cannot read {input}: {e}"); std::process::exit(1) }
     };
-    let mode = if text { nerd_chat_strip::Mode::PlainText } else { nerd_chat_strip::Mode::Auto };
-    let c = match nerd_chat_strip::clean_hooked(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
+    let mode = if text { sine_loco_strip::Mode::PlainText } else { sine_loco_strip::Mode::Auto };
+    let c = match sine_loco_strip::clean_hooked(&raw, mode) { Ok(c) => c, Err(e) => { eprintln!("REFUSED: {e}"); std::process::exit(1) } };
     // create_new first: an EXISTING file is never touched, and only a file WE created is removed on a write error
     let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(output) {
         Ok(f) => f,
@@ -116,7 +116,7 @@ fn default_vault(allow_swap: bool) -> PathBuf {
 fn parse_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "--version" || a == "-V") {
-        println!("nerd-chat {}", env!("CARGO_PKG_VERSION"));
+        println!("sine-loco {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0)
     }
     if raw.first().is_some_and(|a| a == "--help" || a == "-h") { usage() }
@@ -137,8 +137,8 @@ fn parse_args() -> Config {
             "--no-sandbox" => {} // handled at startup: clean files in-process instead of in the limited helper
             "--cannot-host" => cannot_host = true,
             "--tor-path" => tor.tor_path = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
-            "--tor-control" => match it.next().and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
-            "--tor-socks" => match it.next().and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-control" => match it.next().and_then(|s| sine_loco_net::tor::Addr::parse(&s)) { Some(a) => tor.control = Some(a), None => { eprintln!("--tor-control needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
+            "--tor-socks" => match it.next().and_then(|s| sine_loco_net::tor::Addr::parse(&s)) { Some(a) => tor.socks = Some(a), None => { eprintln!("--tor-socks needs 127.0.0.1:PORT or unix:/absolute/path"); usage() } },
             "--tor-cookie" => tor.cookie = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--tor-trust-control" => tor.trust_control = true,
             "--counter-file" => counter = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
@@ -258,7 +258,7 @@ survive power-off and be recovered later. Turn swap off first:\n\
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let started = nerd_chat_app::startup::startup(&args); // FIRST: cleaner helper dispatch, sandboxed cleaner, hardening
+    let started = sine_loco_app::startup::startup(&args); // FIRST: cleaner helper dispatch, sandboxed cleaner, hardening
     for w in started.warnings { eprintln!("warning: {w}"); }
     let cfg = parse_args();
     if !cfg.allow_swap { refuse_if_swap(); }

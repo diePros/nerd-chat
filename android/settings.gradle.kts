@@ -1,4 +1,4 @@
-// Nerd-chat for Android (Kotlin). Modules:
+// Sine Loco for Android (Kotlin). Modules:
 //   :model  pure Kotlin: data model, the ChatBackend contract, colour palettes (+ tests). No UI, no Android.
 //   :ui     the Compose screens as plain JVM Compose, so they compile and render screenshots on any machine without the Android SDK.
 //   :app    the Android application: compiles the SAME source files of :ui against androidx Compose. Only included when an Android SDK exists.
@@ -10,6 +10,6 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories { mavenCentral(); google() }
 }
-rootProject.name = "nerd-chat-android"
+rootProject.name = "sine-loco-android"
 include(":model", ":ui")
 if (hasSdk) include(":app")

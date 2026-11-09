@@ -5,7 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// ---- the Rust core: libnerdchat_bridge.so for each ABI, built with cargo + the NDK linker and packaged as native libraries ----
+// ---- the Rust core: libsineloco_bridge.so for each ABI, built with cargo + the NDK linker and packaged as native libraries ----
 // -Pdemo=true: the in-memory demo backend. Only the literal value `true` counts (a `demo=false` or an empty value must not turn it on), and a RELEASE build refuses it.
 val demoBuild = providers.gradleProperty("demo").map { it.equals("true", ignoreCase = true) }.orElse(false).get()
 gradle.taskGraph.whenReady { if (demoBuild && allTasks.any { it.project.path == ":app" && it.name.contains("Release") && it.name.startsWith("assemble", true) }) throw GradleException("-Pdemo=true must never be used for a release build: it would ship the fake backend (any password opens it)") }
@@ -25,17 +25,17 @@ val rustFlags = listOf("-C link-arg=-Wl,-z,max-page-size=16384", "-C link-arg=-W
     "--remap-path-prefix=${repoRoot}=/src", "--remap-path-prefix=${System.getProperty("user.home")}/.cargo=/cargo", "--remap-path-prefix=${System.getProperty("user.home")}/.rustup=/rustup").joinToString(" ")
 val rustTasks = rustAbis.map { (abi, triple) ->
     tasks.register<Exec>("buildRust_$abi") {
-        group = "build"; description = "cargo build --release -p nerd-chat-android --target $triple"
+        group = "build"; description = "cargo build --release -p sine-loco-android --target $triple"
         workingDir = repoRoot
-        commandLine("cargo", "build", "--locked", "--release", "-p", "nerd-chat-android", "--target", triple)
+        commandLine("cargo", "build", "--locked", "--release", "-p", "sine-loco-android", "--target", triple)
         val clang = File(ndkBin, "$triple" + "29-clang")
         val under = triple.replace('-', '_'); val upper = triple.uppercase().replace('-', '_')
         environment("CARGO_TARGET_${upper}_LINKER", clang.path); environment("CC_$under", clang.path); environment("AR_$under", File(ndkBin, "llvm-ar").path)
         // 16 KB page alignment (Android 15+), no build-id and remapped paths so that the library is reproducible
         environment("RUSTFLAGS", rustFlags)
         doFirst { if (!clang.isFile) throw GradleException("NDK $ndkVersion not found at $ndkBin: sdkmanager \"ndk;$ndkVersion\" (docs/ANDROID_DEV_SETUP.md)") }
-        val so = File(repoRoot, "target/$triple/release/libnerdchat_bridge.so")
-        val dest = rustOut.map { it.dir(abi).file("libnerdchat_bridge.so") }
+        val so = File(repoRoot, "target/$triple/release/libsineloco_bridge.so")
+        val dest = rustOut.map { it.dir(abi).file("libsineloco_bridge.so") }
         outputs.file(dest)
         // EVERYTHING that changes the library: all crates, the vendored crypto patch, the workspace manifest (release profile: panic=abort, strip), the lock file, the toolchain pin, the flags
         inputs.files(fileTree(File(repoRoot, "crates")) { include("**/*.rs", "**/Cargo.toml") }, fileTree(File(repoRoot, "vendor")), File(repoRoot, "Cargo.toml"), File(repoRoot, "Cargo.lock"), File(repoRoot, "rust-toolchain.toml"))
@@ -46,10 +46,10 @@ val rustTasks = rustAbis.map { (abi, triple) ->
 
 
 android {
-    namespace = "app.nerdchat"
+    namespace = "app.sineloco"
     compileSdk = 37
     defaultConfig {
-        applicationId = "app.nerdchat"
+        applicationId = "app.sineloco"
         minSdk = 29          // Android 10: W^X app data, scoped storage and the modern permission model are the floor
         targetSdk = 36
         versionCode = 1
@@ -57,20 +57,20 @@ android {
         // 64-bit ARM (every Pixel/GrapheneOS device and nearly all phones) plus x86_64 for the emulator. The Rust core will be built for the same two.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         // -Pdemo: the in-memory demo backend instead of the Rust core (previews, screenshots, UI work without a vault)
-        resValue("bool", "nerdchat_demo", demoBuild.toString())
+        resValue("bool", "sineloco_demo", demoBuild.toString())
     }
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Signing: set NERDCHAT_KEYSTORE / NERDCHAT_KEYSTORE_PASSWORD / NERDCHAT_KEY_ALIAS when building a release (never committed).
-            System.getenv("NERDCHAT_KEYSTORE")?.let { ks ->
+            // Signing: set SINELOCO_KEYSTORE / SINELOCO_KEYSTORE_PASSWORD / SINELOCO_KEY_ALIAS when building a release (never committed).
+            System.getenv("SINELOCO_KEYSTORE")?.let { ks ->
                 signingConfig = signingConfigs.create("release") {
                     storeFile = file(ks)
-                    storePassword = System.getenv("NERDCHAT_KEYSTORE_PASSWORD")
-                    keyAlias = System.getenv("NERDCHAT_KEY_ALIAS") ?: "nerdchat"
-                    keyPassword = System.getenv("NERDCHAT_KEYSTORE_PASSWORD")
+                    storePassword = System.getenv("SINELOCO_KEYSTORE_PASSWORD")
+                    keyAlias = System.getenv("SINELOCO_KEY_ALIAS") ?: "sineloco"
+                    keyPassword = System.getenv("SINELOCO_KEYSTORE_PASSWORD")
                 }
             }
         }

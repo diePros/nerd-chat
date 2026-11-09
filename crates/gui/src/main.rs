@@ -1,6 +1,6 @@
-//! nerd-chat-gui: the graphical front end (docs/superpowers/specs/2026-11-09-gui-design.md, phase 2).
+//! sine-loco-gui: the graphical front end (docs/superpowers/specs/2026-11-09-gui-design.md, phase 2).
 //!
-//! A SECOND SKIN over the same state machine as the terminal version (`nerd-chat-app`). The rules that matter:
+//! A SECOND SKIN over the same state machine as the terminal version (`sine-loco-app`). The rules that matter:
 //!  * Passwords, the pairing code and the message draft are NEVER held by the toolkit: typed characters are forwarded to the app
 //!    core's zeroizing buffers (`App::handle(Key::Char)`), and the screen only shows how many there are (dots) or a borrowed `&str`
 //!    of the draft. There is no egui `TextEdit` for a secret or a message.

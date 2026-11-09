@@ -1,4 +1,4 @@
-//! The Android Keystore as the history's [`PlatformKeys`]: three calls into a Kotlin object (`app.nerdchat.model.PlatformKeys`):
+//! The Android Keystore as the history's [`PlatformKeys`]: three calls into a Kotlin object (`app.sineloco.model.PlatformKeys`):
 //! `wrap(epoch: Int, key: ByteArray): ByteArray?`, `unwrap(epoch: Int, blob: ByteArray): ByteArray?`, `erase(epoch: Int)`.
 //! Plain safe Rust (the `jni` crate's safe API). Key bytes cross as Java byte arrays that are overwritten with zeros right after the call (best effort:
 //! the garbage collector may have copied them, like every secret on the JVM; the bucket keys are short-lived and each protects at most six hours of messages).
@@ -6,7 +6,7 @@ use jni::{
     objects::{GlobalRef, JByteArray, JValue},
     JNIEnv, JavaVM,
 };
-use nerd_chat_store::history::{PlatformKeys, Unwrapped};
+use sine_loco_store::history::{PlatformKeys, Unwrapped};
 use zeroize::Zeroizing;
 
 /// Result of a call into Kotlin: bytes, `null` ("no such key") or a failure (exception, binder error, empty array = Kotlin caught an error).

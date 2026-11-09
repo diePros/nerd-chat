@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use nerd_chat_core::trust::Trust;
+use sine_loco_core::trust::Trust;
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
@@ -33,7 +33,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 } + app.pair_info.as_ref().map_or(0, |p| p.lines().count().saturating_sub(1) as u16)), Constraint::Length(1)]).split(area);
     let mode = if app.is_ram_only() { "RAM-ONLY" } else { "vault" };
     f.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled(" NERD-CHAT ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
+        Span::styled(" SINE LOCO ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
         Span::raw(format!("  {mode}: {}   ", app.path_display())),
         Span::styled(app.online_label(), Style::default().fg(match app.online { crate::app::Online::Online => Color::Green, crate::app::Online::Failed(_) => Color::Red, _ => Color::Yellow })),
     ])), rows[0]);
@@ -352,7 +352,7 @@ mod tests {
     use super::*;
     use crate::app::{Config, Key, Pane};
     use ratatui::{backend::TestBackend, Terminal};
-    use nerd_chat_vault::Profile;
+    use sine_loco_vault::Profile;
 
     fn text(t: &Terminal<TestBackend>) -> String {
         t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
@@ -391,10 +391,10 @@ mod tests {
     #[test]
     fn chat_screen_renders_conversation_warning_and_wraps_long_lines() {
         let d = tempfile::tempdir().unwrap();
-        let net = nerd_chat_chat::MemNet::new();
+        let net = sine_loco_chat::MemNet::new();
         let mut c = Config::new(Some(d.path().join("v")), None, None, Profile::InsecureTest);
         let n = net.clone();
-        c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(n.transport()) as Box<dyn nerd_chat_chat::Transport>)));
+        c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(n.transport()) as Box<dyn sine_loco_chat::Transport>)));
         let mut a = App::new(c);
         for _ in 0..2 { for c in "correct horse battery".chars() { a.handle(Key::Char(c)); } a.handle(Key::Enter); }
         a.handle(Key::Char('n')); for c in "bob".chars() { a.handle(Key::Char(c)); } a.handle(Key::Enter);

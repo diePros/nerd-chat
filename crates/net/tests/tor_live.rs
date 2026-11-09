@@ -1,9 +1,9 @@
 //! LIVE test: needs a real `tor` binary in PATH and Internet access. Run explicitly:
-//!   cargo test -p nerd-chat-net --test tor_live -- --ignored --nocapture
+//!   cargo test -p sine-loco-net --test tor_live -- --ignored --nocapture
 //! It spawns tor (RAM dir), hosts contact A's onion service (authorizing contact B), dials it as B, runs the full
 //! handshake over the real Tor circuit and exchanges a message each way.
-use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
-use nerd_chat_net::{guard::HandshakeGuard, link, tor::{spawn::{find_tor, SpawnConfig}, Target, Tor}};
+use sine_loco_core::{bundle::Bundle, identity::ContactIdentity};
+use sine_loco_net::{guard::HandshakeGuard, link, tor::{spawn::{find_tor, SpawnConfig}, Target, Tor}};
 use std::{os::unix::net::UnixListener, thread, time::{Duration, Instant}};
 
 #[test]
@@ -53,7 +53,7 @@ fn two_contacts_chat_over_real_onion_service_with_client_auth() {
         }
     };
     let mut sess = link::dial(&mut stream, &b, &ab, b"hello from B").expect("handshake over tor");
-    let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+    let mut cell = vec![0u8; sine_loco_core::session::WIRE_CELL_LEN];
     use std::io::Read;
     stream.read_exact(&mut cell).unwrap();
     assert_eq!(&sess.recv(&b, &cell).unwrap().body[..], b"hello from A");

@@ -1,0 +1,37 @@
+.TH NERD-CHAT 1 "2026-11-09" "sine-loco 0.1" "User Commands"
+.SH NAME
+sine-loco \- serverless chat over Tor onion services (terminal version)
+.SH SYNOPSIS
+.B sine-loco
+[\fB\-\-vault\fR \fIPATH\fR | \fB\-\-ram\fR] [\fB\-\-low\-mem\fR] [\fB\-\-keyfile\fR \fIPATH\fR] [\fB\-\-tor\-control\fR \fIADDR\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+Messages exist only in memory; contacts live in an encrypted vault file. Unaudited software: read SECURITY.md in /usr/share/doc/sine-loco before relying on it.
+.SH OPTIONS
+.TP
+.B \-\-vault PATH
+Vault file. Default: ~/.local/share/sine-loco/sine-loco.vault.
+.TP
+.B \-\-ram
+RAM only: never write anything to disk.
+.TP
+.B \-\-low\-mem
+Use the 128 MiB key\-derivation profile.
+.TP
+.B \-\-keyfile PATH
+Second factor file (at least 32 bytes). Keep it on a separate device.
+.TP
+.B \-\-tor\-control ADDR
+Use an already running Tor (for example Tails or Whonix) instead of starting one.
+.TP
+.B \-\-allow\-swap
+Start even if swap is active (default: refuse).
+.TP
+.B \-\-strip IN OUT
+Clean one JPEG/PNG (add \-\-text for plain text) into a new file, then exit.
+.TP
+.B \-\-probe\-tor
+Report what the Tor on this machine allows, then exit.
+.PP
+Run with an unknown option to print the complete list. Press ? in the program for the key help.
+.SH SEE ALSO
+sine-loco-gui(1), /usr/share/doc/sine-loco/GETTING_STARTED.md

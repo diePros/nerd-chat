@@ -1,23 +1,23 @@
 [package]
 publish = false
-name = "nerd-chat-android"
+name = "sine-loco-android"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Bridge between the Kotlin Android app and nerd-chat-app: a command layer over the core's key-driven state machine, a JSON snapshot of its state, and two JNI entry points"
+description = "Bridge between the Kotlin Android app and sine-loco-app: a command layer over the core's key-driven state machine, a JSON snapshot of its state, and two JNI entry points"
 
 [lib]
-name = "nerdchat_bridge"
+name = "sineloco_bridge"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-nerd-chat-app = { path = "../app", default-features = false }
-nerd-chat-core = { path = "../core" }
-nerd-chat-store = { path = "../store" }
-nerd-chat-vault = { path = "../vault" }
+sine-loco-app = { path = "../app", default-features = false }
+sine-loco-core = { path = "../core" }
+sine-loco-store = { path = "../store" }
+sine-loco-vault = { path = "../vault" }
 jni = "0.21"
 zeroize = "1"
 
 [dev-dependencies]
-nerd-chat-vault = { path = "../vault", features = ["insecure-test-kdf"] }
+sine-loco-vault = { path = "../vault", features = ["insecure-test-kdf"] }
 tempfile = "3"

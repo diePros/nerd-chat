@@ -129,7 +129,7 @@ pub fn open(a: &Addr, timeout: Duration) -> Result<Box<dyn Stream>, TorError> {
 }
 
 use control::{AuthPref, Controller};
-use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity, onion::service_id};
+use sine_loco_core::{bundle::Bundle, identity::ContactIdentity, onion::service_id};
 
 /// A connection to a running tor (ours or someone else's) that can host and dial contact onion services.
 pub struct Tor {
@@ -280,13 +280,13 @@ impl Dialer {
 // ---------------------------------------------------------------- one-shot pairing service (docs/superpowers/specs/2026-11-09-tor-pairing-spec.md)
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 
-/// Parse what a joiner pastes: the bare 56-character onion id, `nerdchat:pair/<id>` or `<id>.onion`; whitespace is trimmed and the text
+/// Parse what a joiner pastes: the bare 56-character onion id, `sineloco:pair/<id>` or `<id>.onion`; whitespace is trimmed and the text
 /// lowercased first (some apps capitalise), then the strict v3 check (length, base32, version byte, checksum) applies.
 pub fn parse_pairing_link(s: &str) -> Result<String, TorError> {
     let t = s.trim().to_ascii_lowercase();
-    let t = t.strip_prefix("nerdchat:pair/").unwrap_or(&t);
+    let t = t.strip_prefix("sineloco:pair/").unwrap_or(&t);
     let t = t.strip_suffix(".onion").unwrap_or(t);
-    nerd_chat_core::onion::parse_onion_address(t).map_err(|_| TorError::Other("that is not a valid pairing link".into()))?;
+    sine_loco_core::onion::parse_onion_address(t).map_err(|_| TorError::Other("that is not a valid pairing link".into()))?;
     Ok(t.to_string())
 }
 
@@ -470,7 +470,7 @@ mod tests {
             let mut g = [0u8; 3]; c.read_exact(&mut g).unwrap(); assert_eq!(g, [5, 1, 2]); c.write_all(&[5, 2]).unwrap();
             let mut a = [0u8; 2]; c.read_exact(&mut a).unwrap(); assert_eq!(a, [1, 16]);
             let mut u = [0u8; 16]; c.read_exact(&mut u).unwrap();
-            assert!(u.iter().all(u8::is_ascii_hexdigit) && !u.starts_with(b"nerd-chat"), "neutral random username");
+            assert!(u.iter().all(u8::is_ascii_hexdigit) && !u.starts_with(b"sine-loco"), "neutral random username");
             let mut pl = [0u8; 1]; c.read_exact(&mut pl).unwrap(); assert_eq!(pl[0], 32);
             let mut p = [0u8; 32]; c.read_exact(&mut p).unwrap(); assert_eq!(&p[..], "ab".repeat(16).as_bytes());
             c.write_all(&[1, 0]).unwrap();
@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn the_pairing_link_parser_is_strict_but_forgiving_about_paste_noise() {
         let id = valid_id();
-        for ok in [id.clone(), format!("{id}.onion"), format!("nerdchat:pair/{id}"), format!("  {}\n", id.to_uppercase()), format!("NERDCHAT:PAIR/{}.ONION", id.to_uppercase())] {
+        for ok in [id.clone(), format!("{id}.onion"), format!("sineloco:pair/{id}"), format!("  {}\n", id.to_uppercase()), format!("SINELOCO:PAIR/{}.ONION", id.to_uppercase())] {
             assert_eq!(parse_pairing_link(&ok).unwrap(), id, "{ok:?}");
         }
         let mut bad_sum = id.clone(); bad_sum.replace_range(10..11, if &id[10..11] == "a" { "b" } else { "a" });

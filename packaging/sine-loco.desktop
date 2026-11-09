@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Sine Loco
+GenericName=Private chat
+Comment=Serverless chat over Tor, messages only in memory
+Exec=sine-loco-gui
+Icon=sine-loco
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=chat;tor;private;secure;
+StartupWMClass=sine-loco

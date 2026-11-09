@@ -1,6 +1,6 @@
 # Project name: ideas, decision, how to change it
 
-**Current working title: `nerd-chat`** (also the GitHub repository name, chosen by the owner "for now"). Until 2026-11-06 the codename was
+**Decision 2026-11-09: the project is now called `Sine Loco`** (kebab `sine-loco`, Android package `app.sineloco`). Latin "sine loco" = "without a place": the messages are stored nowhere. Chosen over Unkept, Nulla, Nought, SineChat and bare Sine (bare "Sine" is a registered US trademark of Sine Group Pty Ltd in class 9, visitor sign-in software; SineChat carries the same risk; Sine Loco had no hit in the Apple App Store, Google Play, F-Droid or the US register as far as web search could tell: NOT a legal clearance, EU/AU registers unchecked). "Tor" must not appear in the name (Tor Project trademark policy). The text below is the history. Before 2026-11-09 the working title was `nerd-chat` (also the GitHub repository name, chosen by the owner "for now"). Until 2026-11-06 the codename was
 `seburity`. That codename still appears, on purpose, in the strings listed in `scripts/frozen-labels.txt` (disk/wire formats and
 cryptographic domain separation: vault, contact bundles, messages, handshake, pairing, safety numbers). They must never change with the
 name, or every existing vault and bundle would break; `crates/core/tests/frozen_labels.rs` guards this.

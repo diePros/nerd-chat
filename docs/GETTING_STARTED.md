@@ -6,19 +6,19 @@ panic wipe. Layout: contact list always on the left, the right side shows the se
 
 ## 1. Build and test
 ```bash
-cd ~/Documents/Code/nerd-chat
+cd ~/Documents/Code/sine-loco
 cargo test --workspace            # ~1 min first time; expect all green (60+ tests)
-cargo build --release --locked --target x86_64-unknown-linux-musl -p nerd-chat-tui
-ls -la target/x86_64-unknown-linux-musl/release/nerd-chat
+cargo build --release --locked --target x86_64-unknown-linux-musl -p sine-loco-tui
+ls -la target/x86_64-unknown-linux-musl/release/sine-loco
 ```
 
 ## 2. First run (creates a vault)
 ```bash
-mkdir -p ~/nerd-chat-demo && cd ~/nerd-chat-demo
-~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./alice.vault
+mkdir -p ~/sine-loco-demo && cd ~/sine-loco-demo
+~/Documents/Code/sine-loco/target/x86_64-unknown-linux-musl/release/sine-loco --vault ./alice.vault
 ```
-**Where the vault goes without `--vault`:** an existing `~/.local/share/nerd-chat/nerd-chat.vault` (`$XDG_DATA_HOME` if set to an absolute
-path) is used from any directory; otherwise an existing `./nerd-chat.vault` (or the old `./seburity.vault`) in the current directory, with a
+**Where the vault goes without `--vault`:** an existing `~/.local/share/sine-loco/sine-loco.vault` (`$XDG_DATA_HOME` if set to an absolute
+path) is used from any directory; otherwise an existing `./sine-loco.vault` (or the old `./seburity.vault`) in the current directory, with a
 note; if there is none, the program shows the path it would create, says that it is on this computer's disk, and waits for Enter before
 creating the directory (mode 0700) and vault. It refuses a symlinked, foreign or group/world-writable directory. Without a terminal (a script)
 it refuses and asks for `--vault`. `--ram` always wins over `--vault`. For a vault on a USB stick or on Tails (`~/Persistent`, because the
@@ -49,13 +49,13 @@ media, which the purge destroys: use both. A keyfile that other vaults share (or
 ## 3. Try the file exchange with yourself (two terminals)
 Terminal 1 (Alice):
 ```bash
-cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./alice.vault
+cd ~/sine-loco-demo && ~/Documents/Code/sine-loco/target/x86_64-unknown-linux-musl/release/sine-loco --vault ./alice.vault
 ```
 `n` -> type `bob` -> Enter.  `e` -> the default file name is a neutral random `bundle-xxxxxxxx.sbc` (your contact's name is never put in a file name); Backspace it away and type `alice-for-bob.sbc` for this demo.
 
 Terminal 2 (Bob):
 ```bash
-cd ~/nerd-chat-demo && ~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --vault ./bob.vault
+cd ~/sine-loco-demo && ~/Documents/Code/sine-loco/target/x86_64-unknown-linux-musl/release/sine-loco --vault ./bob.vault
 ```
 `n` -> `alice` -> Enter. `e` -> file name `bob-for-alice.sbc`.
 
@@ -74,23 +74,23 @@ Add a fresh contact on each side (`n`), then:
 On two real machines use the LAN IP: `l` -> `192.168.x.y:4000` (listening is only allowed on loopback / private LAN addresses). The code works ONCE (burned on any failure); `x` cancels a pairing in progress.
 
 ## 4b. Chat over Tor (two people, or two terminals on one machine)
-Prerequisite: `tor` installed (`sudo apt install tor`, then `sudo systemctl disable --now tor` — Nerd-chat starts its own copy).
+Prerequisite: `tor` installed (`sudo apt install tor`, then `sudo systemctl disable --now tor` — Sine Loco starts its own copy).
 After the contacts have each other's keys (section 3 or 4), in BOTH terminals:
 ```bash
-# press  o   (go online): Nerd-chat starts its own Tor in a private RAM directory; the title bar shows "starting tor NN%"
+# press  o   (go online): Sine Loco starts its own Tor in a private RAM directory; the title bar shows "starting tor NN%"
 # when it says ONLINE, the contact list shows a green dot next to a contact once the connection is up
-# HOSTING: if your Tor cannot host onion services (Tails with a restricted control port; check ./nerd-chat --probe-tor --probe-onion),
+# HOSTING: if your Tor cannot host onion services (Tails with a restricted control port; check ./sine-loco --probe-tor --probe-onion),
 #   start with --cannot-host BEFORE exporting/pairing: your bundle then says so and the contact hosts for you. h on a contact = 'host anyway'
 #   (use only if their bundle claims it can host but its Tor refuses; it makes your online status visible to holders of your bundle).
 # FILES (select a connected contact, also while reading its chat): f = send a JPEG/PNG (metadata stripped, other formats refused), t = send plain text,
 #   a / r = accept / decline an offer (nothing is sent before you accept), s = save under a neutral name (never overwrites), r = discard.
-#   Files live in RAM only until saved. Offline cleaning: ./nerd-chat --strip IN OUT   (see docs/FILE_SHARING.md for the limits)
+#   Files live in RAM only until saved. Offline cleaning: ./sine-loco --strip IN OUT   (see docs/FILE_SHARING.md for the limits)
 # Enter on a contact opens the chat (i = open and type): Enter sends, Esc leaves typing, Esc again goes back, o goes offline again (it says "stopping..." for a moment)
 ```
 Connection can take 1-3 minutes the first time (Tor publishes the onion service; the dialing side retries by itself).
 Using a Tor that is already running (Tails/Whonix/system):
 ```bash
-./nerd-chat --vault ./alice.vault --tor-control unix:/run/tor/control      # add --tor-trust-control only if you vouch for its owner
+./sine-loco --vault ./alice.vault --tor-control unix:/run/tor/control      # add --tor-trust-control only if you vouch for its owner
 ```
 Good to know:
 - Messages exist ONLY in RAM: nothing is written to disk, nothing survives quitting. A message says `(queued)` until the other
@@ -102,28 +102,28 @@ Good to know:
 
 ## 5. RAM-only mode (nothing ever written)
 ```bash
-~/Documents/Code/nerd-chat/target/x86_64-unknown-linux-musl/release/nerd-chat --ram
+~/Documents/Code/sine-loco/target/x86_64-unknown-linux-musl/release/sine-loco --ram
 ```
 
 ## 6. Static binary for live systems (built and checked by me on one machine; the full recipe with checksums is docs/BUILD_AND_RUN.md section 3)
 ```bash
 rustup target add x86_64-unknown-linux-musl
-cd ~/Documents/Code/nerd-chat
-cargo build --release --target x86_64-unknown-linux-musl -p nerd-chat-tui
-ldd target/x86_64-unknown-linux-musl/release/nerd-chat     # want: "statically linked" (or "not a dynamic executable")
+cd ~/Documents/Code/sine-loco
+cargo build --release --target x86_64-unknown-linux-musl -p sine-loco-tui
+ldd target/x86_64-unknown-linux-musl/release/sine-loco     # want: "statically linked" (or "not a dynamic executable")
 ```
 
 ## 7. On a live USB system (checklist)
 ```bash
 cat /proc/swaps                    # must be EMPTY (swap can write keys to the host disk). If not: sudo swapoff -a
 free -m                            # <1.5 GB free? use --low-mem
-cp /media/$USER/YOURUSB/nerd-chat /tmp/ && chmod +x /tmp/nerd-chat   # if the USB is mounted noexec
-/tmp/nerd-chat --vault /media/$USER/YOURUSB/nerd-chat.vault --low-mem
+cp /media/$USER/YOURUSB/sine-loco /tmp/ && chmod +x /tmp/sine-loco   # if the USB is mounted noexec
+/tmp/sine-loco --vault /media/$USER/YOURUSB/sine-loco.vault --low-mem
 ```
 Put the keyfile and counter file on a DIFFERENT device than the vault:
 ```bash
 head -c 64 /dev/urandom > /media/$USER/KEYUSB/key.bin
-/tmp/nerd-chat --vault /media/$USER/YOURUSB/s.vault --keyfile /media/$USER/KEYUSB/key.bin --counter-file /media/$USER/KEYUSB/s.counter
+/tmp/sine-loco --vault /media/$USER/YOURUSB/s.vault --keyfile /media/$USER/KEYUSB/key.bin --counter-file /media/$USER/KEYUSB/s.counter
 ```
 (The keyfile must be present at creation AND every unlock. Losing it = losing the vault.)
 

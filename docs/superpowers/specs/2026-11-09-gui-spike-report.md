@@ -1,6 +1,6 @@
 # GUI spike report (phase 0) — egui/eframe 0.37
 
-Status: DONE 2026-11-09. The spike lives outside the repository (`~/Documents/Code/nerd-chat-gui-spike`, throwaway, not committed here). Result: **GO for egui**, with the
+Status: DONE 2026-11-09. The spike lives outside the repository (`~/Documents/Code/sine-loco-gui-spike`, throwaway, not committed here). Result: **GO for egui**, with the
 conditions below. Method and numbers are listed so that they can be repeated.
 
 ## What was tested

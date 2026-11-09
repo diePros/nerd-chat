@@ -2,9 +2,9 @@
 # End-to-end check of the sandboxed cleaning helper with the STATIC musl release binary (the one that ships): a large PNG, a large
 # plain-text file and a malformed file must go through `--strip` (which runs the helper under the seccomp filter) correctly, and the
 # helper must report a seccomp FILTER in its own /proc status. Run from the repo root after:
-#   cargo build --release --target x86_64-unknown-linux-musl -p nerd-chat-tui
+#   cargo build --release --target x86_64-unknown-linux-musl -p sine-loco-tui
 set -euo pipefail
-B=target/x86_64-unknown-linux-musl/release/nerd-chat
+B=target/x86_64-unknown-linux-musl/release/sine-loco
 [ -x "$B" ] || { echo "build the musl release binary first"; exit 2; }
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 python3 - "$d" <<'P'

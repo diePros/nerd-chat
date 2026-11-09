@@ -5,7 +5,7 @@
 pub mod file;
 pub mod pair;
 
-use nerd_chat_core::{bundle::{Bundle, safety_number}, trust::Trust};
+use sine_loco_core::{bundle::{Bundle, safety_number}, trust::Trust};
 
 /// A contact bundle plus how far it is authenticated. Fields are private: the only ways to raise
 /// trust are a completed `pair` run (`CodeAuthenticated`) or `confirm` with a `SafetyView`.

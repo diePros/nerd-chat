@@ -418,7 +418,7 @@ fn png(d: &[u8]) -> Result<Cleaned, StripError> {
 /// Content that is really a structured document: refused even in plain-text mode (its metadata would pass untouched).
 fn looks_structured(s: &str) -> bool {
     // skip EVERYTHING invisible or blank first (NBSP, ideographic space, combining marks, bidi/format characters...)
-    let t = s.trim_start_matches(|c: char| c.is_whitespace() || nerd_chat_core::text::is_unsafe_char(c) || nerd_chat_core::text::is_combining(c));
+    let t = s.trim_start_matches(|c: char| c.is_whitespace() || sine_loco_core::text::is_unsafe_char(c) || sine_loco_core::text::is_combining(c));
     let lower: String = t.chars().take(64).flat_map(char::to_lowercase).collect();
     if ["{\\rtf", "%pdf", "%!", "<?xml", "<svg", "<!doctype", "<html", "<", "begin:v", "#!", "from ", "mime-version"].iter().any(|p| lower.starts_with(p)) { return true; }
     // RFC 822 / e-mail headers ("Delivered-To:", "Received:", "X-Originating-IP:" ... carry addresses and IPs)
@@ -436,9 +436,9 @@ fn text(d: &[u8]) -> Result<Cleaned, StripError> {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         let c = if c == '\r' { if chars.peek() == Some(&'\n') { continue } else { '\n' } } else { c };
-        let combining = nerd_chat_core::text::is_combining(c);
-        if nerd_chat_core::text::is_unsafe_char(c) && c != '\n' && c != '\t' { removed += 1; continue; } // removed characters do NOT reset the run
-        if combining { run += 1; if run > nerd_chat_core::text::MAX_COMBINING_RUN { removed += 1; continue; } } else { run = 0; }
+        let combining = sine_loco_core::text::is_combining(c);
+        if sine_loco_core::text::is_unsafe_char(c) && c != '\n' && c != '\t' { removed += 1; continue; } // removed characters do NOT reset the run
+        if combining { run += 1; if run > sine_loco_core::text::MAX_COMBINING_RUN { removed += 1; continue; } } else { run = 0; }
         out.push(c);
     }
     // a file made ONLY of removable characters would be sent as an empty file that the receiver's own cleaning refuses (found by fuzzing)
@@ -666,7 +666,7 @@ mod tests {
         assert!(text_clean("\u{202E}<svg><metadata>owner=jdoe</metadata></svg>".as_bytes()).is_err());
         let sneaky = format!("a{}", "\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{200B}".repeat(20));
         let out = text_clean(sneaky.as_bytes()).unwrap().data;
-        assert!(String::from_utf8(out.clone()).unwrap().chars().filter(|c| nerd_chat_core::text::is_combining(*c)).count() <= nerd_chat_core::text::MAX_COMBINING_RUN);
+        assert!(String::from_utf8(out.clone()).unwrap().chars().filter(|c| sine_loco_core::text::is_combining(*c)).count() <= sine_loco_core::text::MAX_COMBINING_RUN);
         assert_eq!(text_clean(&out).unwrap().data, out, "idempotent");
     }
 

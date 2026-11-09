@@ -3,7 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|d: &[u8]| {
-    let _ = nerd_chat_core::bundle::Bundle::decode(d);
-    let _ = nerd_chat_store::Store::decode(d);
-    if let Ok(t) = std::str::from_utf8(d) { let _ = nerd_chat_exchange::file::dearmor(t); }
+    let _ = sine_loco_core::bundle::Bundle::decode(d);
+    let _ = sine_loco_store::Store::decode(d);
+    if let Ok(t) = std::str::from_utf8(d) { let _ = sine_loco_exchange::file::dearmor(t); }
 });

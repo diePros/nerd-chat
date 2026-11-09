@@ -1,8 +1,8 @@
 //! How streams reach a contact. The engine only sees `Transport`; Tor and the in-memory test network both implement it.
 //! Role per contact (decided by the engine): the LISTENER hosts its onion service for that contact, the DIALER only dials.
 //! Only listeners publish a service, so a user is not visible online for contacts that never need to dial them.
-use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
-use nerd_chat_net::tor::{
+use sine_loco_core::{bundle::Bundle, identity::ContactIdentity};
+use sine_loco_net::tor::{
     control::AuthPref,
     spawn::SpawnConfig,
     Addr, Dialer, Stream, Target, Tor,
@@ -39,17 +39,17 @@ pub struct PairHost {
     pub id: String,
     /// the ONE accepted (and, for loopback TCP, verified) connection
     pub incoming: Receiver<BoxStream>,
-    wait: Box<dyn FnMut(&nerd_chat_net::tor::CancelToken) -> Result<bool, String> + Send>,
+    wait: Box<dyn FnMut(&sine_loco_net::tor::CancelToken) -> Result<bool, String> + Send>,
     _guard: Box<dyn Send>,
 }
 impl PairHost {
-    pub fn new(id: String, incoming: Receiver<BoxStream>, wait: Box<dyn FnMut(&nerd_chat_net::tor::CancelToken) -> Result<bool, String> + Send>, guard: Box<dyn Send>) -> Self { Self { id, incoming, wait, _guard: guard } }
+    pub fn new(id: String, incoming: Receiver<BoxStream>, wait: Box<dyn FnMut(&sine_loco_net::tor::CancelToken) -> Result<bool, String> + Send>, guard: Box<dyn Send>) -> Self { Self { id, incoming, wait, _guard: guard } }
     /// Block until the service is reachable by others (tor reported the descriptor uploaded). `Ok(false)` = cancelled.
-    pub fn wait_published(&mut self, cancel: &nerd_chat_net::tor::CancelToken) -> Result<bool, String> { (self.wait)(cancel) }
+    pub fn wait_published(&mut self, cancel: &sine_loco_net::tor::CancelToken) -> Result<bool, String> { (self.wait)(cancel) }
 }
 pub type PairHostFn = Arc<dyn Fn() -> Result<PairHost, String> + Send + Sync>;
 /// `dial_pairing(onion id, isolation token, cancel)`
-pub type PairDialFn = Arc<dyn Fn(&str, &[u8; 16], &nerd_chat_net::tor::CancelToken) -> Result<BoxStream, PairDialError> + Send + Sync>;
+pub type PairDialFn = Arc<dyn Fn(&str, &[u8; 16], &sine_loco_net::tor::CancelToken) -> Result<BoxStream, PairDialError> + Send + Sync>;
 
 pub trait Transport: Send {
     /// Host a one-shot pairing service (None: this transport cannot). Cloned out at engine start, like `dial_fn`.
@@ -97,12 +97,12 @@ impl Transport for MemTransport {
         Some(Arc::new(move || {
             let mut raw = [0u8; 32];
             getrandom::fill(&mut raw).map_err(|_| "no OS randomness".to_string())?;
-            let id = nerd_chat_core::onion::service_id(&raw);
+            let id = sine_loco_core::onion::service_id(&raw);
             let (tx, rx) = channel::<BoxStream>();
             net.1.lock().unwrap().insert(id.clone(), (tx, false));
             let (net2, id2, delay) = (net.clone(), id.clone(), *net.2.lock().unwrap());
             let started = std::time::Instant::now();
-            let wait = Box::new(move |cancel: &nerd_chat_net::tor::CancelToken| -> Result<bool, String> {
+            let wait = Box::new(move |cancel: &sine_loco_net::tor::CancelToken| -> Result<bool, String> {
                 loop {
                     if cancel.is_cancelled() { return Ok(false); }
                     if started.elapsed() >= delay { if let Some(e) = net2.1.lock().unwrap().get_mut(&id2) { e.1 = true; } return Ok(true); }
@@ -116,7 +116,7 @@ impl Transport for MemTransport {
     }
     fn pair_dial_fn(&self) -> Option<PairDialFn> {
         let net = self.net.clone();
-        Some(Arc::new(move |id: &str, _iso: &[u8; 16], cancel: &nerd_chat_net::tor::CancelToken| {
+        Some(Arc::new(move |id: &str, _iso: &[u8; 16], cancel: &sine_loco_net::tor::CancelToken| {
             if cancel.is_cancelled() { return Err(PairDialError::Cancelled); }
             let tx = match net.1.lock().unwrap().get(id) { Some((tx, true)) => tx.clone(), Some((_, false)) => return Err(PairDialError::NotFound), None => return Err(PairDialError::Unreachable) };
             let (a, b) = UnixStream::pair().map_err(|e| PairDialError::Other(e.to_string()))?;
@@ -201,7 +201,7 @@ impl Transport for TorTransport {
                 let addr = l.local_addr().map_err(|e| e.to_string())?;
                 // ANY local user can connect to this port: only tor (its account), root or we may, unless the user vouched for all
                 (Target::Tcp(addr), Box::new(move || l.accept().ok().and_then(|(s, from)| {
-                    if !trust_local && !nerd_chat_net::tor::trust::check_tcp_client(&from).verified { return None; } // dropped unread
+                    if !trust_local && !sine_loco_net::tor::trust::check_tcp_client(&from).verified { return None; } // dropped unread
                     let _ = s.set_nonblocking(false);
                     Some(Box::new(s) as BoxStream)
                 })))
@@ -235,9 +235,9 @@ impl Transport for TorTransport {
     }
 
     fn pair_dial_fn(&self) -> Option<PairDialFn> {
-        use nerd_chat_net::tor::socks::SocksError as S;
+        use sine_loco_net::tor::socks::SocksError as S;
         let d = self.dialer.clone();
-        Some(Arc::new(move |id: &str, iso: &[u8; 16], cancel: &nerd_chat_net::tor::CancelToken| d.dial_pairing(id, iso, cancel).map_err(|e| match e {
+        Some(Arc::new(move |id: &str, iso: &[u8; 16], cancel: &sine_loco_net::tor::CancelToken| d.dial_pairing(id, iso, cancel).map_err(|e| match e {
             S::OnionNotFound => PairDialError::NotFound,
             S::OnionUnreachable => PairDialError::Unreachable,
             S::Refused => PairDialError::Refused,
@@ -267,7 +267,7 @@ impl Transport for TorTransport {
                     l.set_nonblocking(true).map_err(|e| e.to_string())?;
                     let addr = l.local_addr().map_err(|e| e.to_string())?;
                     (Target::Tcp(addr), Box::new(move || l.accept().ok().and_then(|(s, from)| {
-                        if !trust_local && !nerd_chat_net::tor::trust::check_tcp_client(&from).verified { return None; }
+                        if !trust_local && !sine_loco_net::tor::trust::check_tcp_client(&from).verified { return None; }
                         let _ = s.set_nonblocking(false);
                         Some(Box::new(s) as BoxStream)
                     })), None)
@@ -285,7 +285,7 @@ impl Transport for TorTransport {
             });
             struct Guard(Arc<AtomicBool>, Option<std::path::PathBuf>);
             impl Drop for Guard { fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); if let Some(p) = &self.1 { let _ = std::fs::remove_file(p); } } }
-            let wait = Box::new(move |cancel: &nerd_chat_net::tor::CancelToken| svc.wait_published(Duration::from_secs(180), Duration::from_secs(60), cancel).map_err(|e| e.to_string()));
+            let wait = Box::new(move |cancel: &sine_loco_net::tor::CancelToken| svc.wait_published(Duration::from_secs(180), Duration::from_secs(60), cancel).map_err(|e| e.to_string()));
             Ok(PairHost::new(id, rx, wait, Box::new(Guard(stop, sock_file))))
         }))
     }
@@ -303,7 +303,7 @@ impl Drop for TorTransport {
 #[cfg(test)]
 mod pairing_tests {
     use super::*;
-    use nerd_chat_net::tor::CancelToken;
+    use sine_loco_net::tor::CancelToken;
 
     #[test]
     fn memory_pairing_service_models_publication_delay_one_shot_use_and_removal() {

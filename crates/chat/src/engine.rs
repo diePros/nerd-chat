@@ -18,8 +18,8 @@ use crate::{
     proto,
     transport::{BoxStream, DialFn, Transport},
 };
-use nerd_chat_core::{bundle::Bundle, identity::ContactIdentity};
-use nerd_chat_net::{guard::HandshakeGuard, link};
+use sine_loco_core::{bundle::Bundle, identity::ContactIdentity};
+use sine_loco_net::{guard::HandshakeGuard, link};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, mpsc::{channel, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
@@ -147,7 +147,7 @@ pub enum Event {
     /// An offer or transfer ended without a file (expired, stalled, refused, failed its check): clear any "offered" state.
     FileCancelled { id: [u8; 8] },
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
-    File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: nerd_chat_strip::Format, report: Vec<String>, resanitised: bool },
+    File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: sine_loco_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
     /// The contact's app confirmed the text with this id ("their client has it", not "they read it": no read receipts, by design), or,
     /// for a v0.1.0-style peer that cannot confirm anything, the text was written to the connection (the old meaning of "sent").
@@ -242,22 +242,22 @@ impl Engine {
 
     /// Clean (metadata stripped by allowlist, unknown formats refused), pad to a size bucket and offer a file to a CONNECTED
     /// contact. Returns the cleaning report. Files are never queued: if the contact is offline the engine says so.
-    pub fn send_file(&self, id: [u8; 8], raw: &[u8], mode: nerd_chat_strip::Mode) -> Result<Vec<String>, nerd_chat_strip::StripError> {
+    pub fn send_file(&self, id: [u8; 8], raw: &[u8], mode: sine_loco_strip::Mode) -> Result<Vec<String>, sine_loco_strip::StripError> {
         let (f, report) = Self::prepare_file(raw, mode)?;
         self.offer_file(id, f);
         Ok(report)
     }
 
     /// The CPU-heavy part (cleaning, padding, hashing) as a pure function: run it on a worker thread so the UI/panic key stay live.
-    pub fn prepare_file(raw: &[u8], mode: nerd_chat_strip::Mode) -> Result<(FileOut, Vec<String>), nerd_chat_strip::StripError> {
-        let c = nerd_chat_strip::clean_hooked(raw, mode)?;
+    pub fn prepare_file(raw: &[u8], mode: sine_loco_strip::Mode) -> Result<(FileOut, Vec<String>), sine_loco_strip::StripError> {
+        let c = sine_loco_strip::clean_hooked(raw, mode)?;
         let report = c.report;
         let data = Zeroizing::new(c.data);
-        let Some(stream) = file::build_stream(&data) else { return Err(nerd_chat_strip::StripError::TooLarge) };
+        let Some(stream) = file::build_stream(&data) else { return Err(sine_loco_strip::StripError::TooLarge) };
         let bucket = stream.len() as u32;
         let mut xid = [0u8; 8];
         getrandom::fill(&mut xid).expect("OS RNG unavailable");
-        let mode = if mode == nerd_chat_strip::Mode::PlainText { file::MODE_TEXT } else { file::MODE_AUTO };
+        let mode = if mode == sine_loco_strip::Mode::PlainText { file::MODE_TEXT } else { file::MODE_AUTO };
         Ok((FileOut { xid, bucket, mode, hash: file::hash(&data), padded: Zeroizing::new(stream) }, report))
     }
 
@@ -948,7 +948,7 @@ mod tests {
         for _ in 0..60 {                                        // far beyond the old burst of 5
             if let Ok(mut s) = dial(&lb, &[3; 16]) {
                 use std::io::Write;
-                let _ = s.write_all(&vec![0xAB; nerd_chat_core::session::MSG1_LEN]);
+                let _ = s.write_all(&vec![0xAB; sine_loco_core::session::MSG1_LEN]);
             }
         }
         let ed = start(&net, &d, &lb, ID);                       // now the real peer arrives
@@ -1335,7 +1335,7 @@ mod tests {
     fn file_is_stripped_accepted_padded_and_delivered() {
         let (el, ed) = pair();
         let raw = jpeg(40_000);
-        let report = ed.send_file(ID, &raw, nerd_chat_strip::Mode::Auto).unwrap();
+        let report = ed.send_file(ID, &raw, sine_loco_strip::Mode::Auto).unwrap();
         assert!(!report.is_empty(), "report lists what was removed");
         let (xid, bucket) = offer_xid(&el);
         assert_eq!(bucket as usize, 65_536, "offer announces only the padded bucket, not the size");
@@ -1355,13 +1355,13 @@ mod tests {
     #[test]
     fn declined_file_sends_no_content_and_unsupported_formats_are_refused() {
         let (el, ed) = pair();
-        ed.send_file(ID, &jpeg(1000), nerd_chat_strip::Mode::Auto).unwrap();
+        ed.send_file(ID, &jpeg(1000), sine_loco_strip::Mode::Auto).unwrap();
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, false);
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("declined"))));
         assert!(!wait_for(&el, Duration::from_millis(500), |ev| matches!(ev, Event::File { .. })));
-        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01", nerd_chat_strip::Mode::Auto).is_err(), "unknown format must be refused");
-        assert!(ed.send_file(ID, &[], nerd_chat_strip::Mode::Auto).is_err());
+        assert!(ed.send_file(ID, b"%PDF-1.7\x00\x01", sine_loco_strip::Mode::Auto).is_err(), "unknown format must be refused");
+        assert!(ed.send_file(ID, &[], sine_loco_strip::Mode::Auto).is_err());
     }
 
     #[test]
@@ -1369,15 +1369,15 @@ mod tests {
         let net = MemNet::new();
         let ((_l, lb), (d, _db)) = ordered();
         let ed = start(&net, &d, &lb, ID);
-        ed.send_file(ID, &jpeg(100), nerd_chat_strip::Mode::Auto).unwrap();
+        ed.send_file(ID, &jpeg(100), sine_loco_strip::Mode::Auto).unwrap();
         assert!(wait(&ed, |ev| matches!(ev, Event::Notice { text, .. } if text.contains("never queued"))));
     }
 
     /// The next application frame from the engine, skipping keepalives and the key announcements sent on every connection.
-    fn raw_next(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity) -> Vec<u8> {
+    fn raw_next(s: &mut crate::transport::BoxStream, sess: &mut sine_loco_core::session::Session, me: &ContactIdentity) -> Vec<u8> {
         use std::io::Read;
         for _ in 0..100 {
-            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+            let mut cell = vec![0u8; sine_loco_core::session::WIRE_CELL_LEN];
             s.read_exact(&mut cell).unwrap();
             let body = sess.recv(me, &cell).unwrap().body;
             let k = body[0];
@@ -1387,9 +1387,9 @@ mod tests {
         panic!("no application frame");
     }
 
-    fn raw_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) { raw_connect_caps(net, lb, d, proto::CAP_CONFIRM) }
+    fn raw_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, sine_loco_core::session::Session) { raw_connect_caps(net, lb, d, proto::CAP_CONFIRM) }
 
-    fn raw_connect_caps(net: &MemNet, lb: &Bundle, d: &ContactIdentity, caps: u8) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) {
+    fn raw_connect_caps(net: &MemNet, lb: &Bundle, d: &ContactIdentity, caps: u8) -> (crate::transport::BoxStream, sine_loco_core::session::Session) {
         let dial = net.transport().dial_fn();
         let end = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1440,9 +1440,9 @@ mod tests {
     }
 
     /// The next frame, whatever it is (keepalives included).
-    fn raw_any(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity) -> Vec<u8> {
+    fn raw_any(s: &mut crate::transport::BoxStream, sess: &mut sine_loco_core::session::Session, me: &ContactIdentity) -> Vec<u8> {
         use std::io::Read;
-        let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+        let mut cell = vec![0u8; sine_loco_core::session::WIRE_CELL_LEN];
         s.read_exact(&mut cell).unwrap();
         sess.recv(me, &cell).expect("the cell must decrypt: a rekey that one side did not follow would end here").body.to_vec()
     }
@@ -1495,7 +1495,7 @@ mod tests {
     fn id_text(mid: &proto::MsgId, t: &str) -> Vec<u8> { [&[proto::KIND_TEXT_ID_FINAL][..], &mid[..], t.as_bytes()].concat() }
 
     /// Read frames until a confirmation arrives; the ids it names.
-    fn raw_acks(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity) -> Vec<proto::MsgId> {
+    fn raw_acks(s: &mut crate::transport::BoxStream, sess: &mut sine_loco_core::session::Session, me: &ContactIdentity) -> Vec<proto::MsgId> {
         loop { let f = raw_next(s, sess, me); if f[0] == proto::KIND_MSG_ACK { return proto::parse_msg_acks(&f).expect("well-formed ack"); } }
     }
 
@@ -1564,12 +1564,12 @@ mod tests {
     }
 
     /// The next application frame, or `None` if nothing (but keepalives and announcements) arrives within `wait`.
-    fn raw_try_next(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity, wait: Duration) -> Option<Vec<u8>> {
+    fn raw_try_next(s: &mut crate::transport::BoxStream, sess: &mut sine_loco_core::session::Session, me: &ContactIdentity, wait: Duration) -> Option<Vec<u8>> {
         use std::io::Read;
         let end = Instant::now() + wait;
         s.set_timeout(Some(Duration::from_millis(50))).unwrap();
         while Instant::now() < end {
-            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+            let mut cell = vec![0u8; sine_loco_core::session::WIRE_CELL_LEN];
             if s.read_exact(&mut cell).is_err() { continue; }
             let body = sess.recv(me, &cell).unwrap().body;
             let k = body[0];
@@ -1580,7 +1580,7 @@ mod tests {
     }
 
     /// A raw peer that does NOT announce capabilities: exactly what a v0.1.0 peer looks like on the wire.
-    fn raw_legacy_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) {
+    fn raw_legacy_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, sine_loco_core::session::Session) {
         let dial = net.transport().dial_fn();
         let end = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1706,9 +1706,9 @@ mod tests {
     }
 
     /// A raw authenticated peer that speaks the file protocol badly.
-    fn raw_peer() -> (Engine, crate::transport::BoxStream, nerd_chat_core::session::Session, ContactIdentity) { raw_peer_with(fast()) }
+    fn raw_peer() -> (Engine, crate::transport::BoxStream, sine_loco_core::session::Session, ContactIdentity) { raw_peer_with(fast()) }
 
-    fn raw_peer_with(timing: Timing) -> (Engine, crate::transport::BoxStream, nerd_chat_core::session::Session, ContactIdentity) {
+    fn raw_peer_with(timing: Timing) -> (Engine, crate::transport::BoxStream, sine_loco_core::session::Session, ContactIdentity) {
         let net = MemNet::new();
         let ((l, lb), (d, db)) = ordered();
         let el = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &l, db.clone())], timing);
@@ -1722,17 +1722,17 @@ mod tests {
         (el, s, sess, d)
     }
 
-    fn raw_send(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity, body: &[u8]) {
+    fn raw_send(s: &mut crate::transport::BoxStream, sess: &mut sine_loco_core::session::Session, me: &ContactIdentity, body: &[u8]) {
         use std::io::Write;
         let w = sess.send(me, body).unwrap();
         let _ = s.write_all(&w); // the engine may already have cut an abusive peer off
     }
 
     /// Read cells until the engine's ACCEPT for `xid` arrives (a correct sender never sends content before it).
-    fn raw_wait_accept(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity, xid: file::Xid) {
+    fn raw_wait_accept(s: &mut crate::transport::BoxStream, sess: &mut sine_loco_core::session::Session, me: &ContactIdentity, xid: file::Xid) {
         use std::io::Read;
         for _ in 0..50 {
-            let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+            let mut cell = vec![0u8; sine_loco_core::session::WIRE_CELL_LEN];
             s.read_exact(&mut cell).unwrap();
             let m = sess.recv(me, &cell).unwrap();
             if m.body.first() == Some(&file::KIND_FILE_ACCEPT) && file::parse_ctl(&m.body) == Some(xid) { return; }
@@ -1826,16 +1826,16 @@ mod tests {
     #[test]
     fn plain_text_is_an_explicit_mode_and_structured_documents_are_refused() {
         let (el, ed) = pair();
-        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", nerd_chat_strip::Mode::Auto).is_err());
-        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", nerd_chat_strip::Mode::PlainText).is_err());
-        let report = ed.send_file(ID, "note\u{202E}\u{E0041} plain".as_bytes(), nerd_chat_strip::Mode::PlainText).unwrap();
+        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", sine_loco_strip::Mode::Auto).is_err());
+        assert!(ed.send_file(ID, b"{\\rtf1{\\info{\\author Jane}}}", sine_loco_strip::Mode::PlainText).is_err());
+        let report = ed.send_file(ID, "note\u{202E}\u{E0041} plain".as_bytes(), sine_loco_strip::Mode::PlainText).unwrap();
         assert!(report.iter().any(|l| l.contains("NOT understood")));
         let (xid, _) = offer_xid(&el);
         el.reply_file(ID, xid, true);
         let mut r = None;
         assert!(wait(&el, |ev| if let Event::File { data, format, .. } = ev { r = Some((data.to_vec(), *format)); true } else { false }));
         let (data, f) = r.unwrap();
-        assert_eq!(f, nerd_chat_strip::Format::Text);
+        assert_eq!(f, sine_loco_strip::Format::Text);
         assert_eq!(data, b"note plain");
     }
 
