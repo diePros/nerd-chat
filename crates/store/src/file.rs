@@ -9,6 +9,8 @@ pub struct VaultFile {
     path: Option<PathBuf>,
     counter_path: Option<PathBuf>,
     vault: Vault,
+    /// The newest history-file generation known to have been written: stored (encrypted) in the counter file so that an OLDER copy of the history file is noticed.
+    hist_gen: u64,
     pub store: Store,
 }
 
@@ -97,28 +99,32 @@ const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 /// an attacker's file) -> chmod 0600 -> fsync -> rename -> fsync(dir). Temp file removed on error.
 /// The rollback-counter file: `nonce[24] | AEAD(counter u64 LE)[8+16]` = 48 bytes, ALWAYS the same size, under a key only the unlocked vault has, a fresh nonce on every write.
 /// (Before, it was the 8 plain bytes of the counter: anyone who could look at the folder saw how many times the vault had been saved.)
-const COUNTER_FILE_LEN: usize = 24 + 8 + 16;
+/// v2: counter (8) + history generation (8). v1 (counter only, 48 bytes) is still read; the plain 8-byte form is the oldest.
+const COUNTER_FILE_LEN: usize = 24 + 16 + 16;
+const COUNTER_FILE_LEN_V1: usize = 24 + 8 + 16;
 const COUNTER_AAD: &[u8] = b"nerd-chat-counter-file-v1";
 
-fn counter_file(vault: &Vault) -> Vec<u8> {
+fn counter_file(vault: &Vault, hist_gen: u64) -> Vec<u8> {
     use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce).expect("OS RNG unavailable");
     let key = vault.subkey(b"counter-file");
-    let ct = XChaCha20Poly1305::new((&*key).into()).encrypt(XNonce::from_slice(&nonce), Payload { msg: &vault.counter().to_le_bytes(), aad: COUNTER_AAD }).expect("encrypt");
+    let ct = XChaCha20Poly1305::new((&*key).into()).encrypt(XNonce::from_slice(&nonce), Payload { msg: &[vault.counter().to_le_bytes(), hist_gen.to_le_bytes()].concat(), aad: COUNTER_AAD }).expect("encrypt");
     [nonce.as_slice(), ct.as_slice()].concat()
 }
 
 /// Read the counter file (new 48-byte form, or the old 8 plain bytes: it is rewritten in the new form on the next save).
 /// The flag says "legacy plain form": it carries no authentication (anybody who can write the file can put any number there), so the caller must not claim rollback protection.
-fn read_counter(path: &Path, vault: &Vault) -> Result<(u64, bool), StoreError> {
+fn read_counter(path: &Path, vault: &Vault) -> Result<(u64, bool, u64), StoreError> {
     use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
     let b = read_regular_file(path, COUNTER_FILE_LEN as u64)?;
-    if b.len() == 8 { return Ok((u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?), true)); }
-    if b.len() != COUNTER_FILE_LEN { return Err(StoreError::Corrupt); }
+    if b.len() == 8 { return Ok((u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?), true, 0)); }
+    if b.len() != COUNTER_FILE_LEN && b.len() != COUNTER_FILE_LEN_V1 { return Err(StoreError::Corrupt); }
     let key = vault.subkey(b"counter-file");
     let pt = XChaCha20Poly1305::new((&*key).into()).decrypt(XNonce::from_slice(&b[..24]), Payload { msg: &b[24..], aad: COUNTER_AAD }).map_err(|_| StoreError::Corrupt)?;
-    Ok((u64::from_le_bytes(pt.try_into().map_err(|_| StoreError::Corrupt)?), false))
+    let counter = u64::from_le_bytes(pt[..8].try_into().map_err(|_| StoreError::Corrupt)?);
+    let hist = if pt.len() == 16 { u64::from_le_bytes(pt[8..16].try_into().map_err(|_| StoreError::Corrupt)?) } else if pt.len() == 8 { 0 } else { return Err(StoreError::Corrupt) };
+    Ok((counter, false, hist))
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StoreError> {
@@ -180,6 +186,7 @@ impl VaultFile {
             path: path.map(Path::to_path_buf),
             counter_path: counter_path.map(Path::to_path_buf).or_else(|| path.map(default_counter_path)),
             vault,
+            hist_gen: 0,
             store: Store::new(),
         };
         vf.save_unless(cancel)?;
@@ -191,11 +198,11 @@ impl VaultFile {
         let cpath = counter_path.map(Path::to_path_buf).unwrap_or_else(|| default_counter_path(path));
         // open first, THEN read the counter: its file is encrypted under a key that only the unlocked vault has
         let (vault, data) = Vault::open_checked(&blob, pw, keyfile, 0)?;
-        let (min, legacy) = if cpath.exists() { let (m, l) = read_counter(&cpath, &vault)?; (Some(m), l) } else { (None, false) };
+        let (min, legacy, hist_gen) = if cpath.exists() { let (m, l, h) = read_counter(&cpath, &vault)?; (Some(m), l, h) } else { (None, false, 0) };
         if let Some(m) = min { if vault.counter() < m { return Err(StoreError::Vault(VaultError::Rollback { found: vault.counter(), expected: m })); } }
         let store = Store::decode(&data).map_err(|_| StoreError::Vault(VaultError::Malformed))?;
         let info = OpenInfo { rollback_unchecked: min.is_none() || legacy, counter: vault.counter(), counter_same_device: same_device(path, &cpath) };
-        Ok((Self { path: Some(path.to_path_buf()), counter_path: Some(cpath), vault, store }, info))
+        Ok((Self { path: Some(path.to_path_buf()), counter_path: Some(cpath), vault, hist_gen, store }, info))
     }
 
     /// Touch the vault file and its counter file (modification time = now), without writing any data. The grid calls this on every tick, so that the times of these
@@ -207,6 +214,19 @@ impl VaultFile {
             if !f.metadata().map_err(io)?.is_file() { return Err(StoreError::Corrupt); }
             f.set_modified(std::time::SystemTime::now()).map_err(io)?;
         }
+        Ok(())
+    }
+
+    /// The oldest history-file generation that is acceptable (0: none known). A history file whose newest slot is older than this was put back from a copy.
+    pub fn history_floor(&self) -> u64 { self.hist_gen }
+
+    /// The history file was just written with generation `gen`: record it in the counter file (encrypted, written atomically), so that a later swap for an older copy is noticed.
+    /// A failure leaves the old floor, which is only weaker, never wrong (the counter never runs ahead of the file).
+    pub fn record_history_gen(&mut self, gen: u64) -> Result<(), StoreError> {
+        // written on EVERY grid tick, changed or not: a fresh counter file (new inode, new birth time) only ever says "the app was running until about T", like the touches
+        let gen = gen.max(self.hist_gen);
+        if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault, gen)).map_err(|e| StoreError::CounterWrite(e.to_string()))?; }
+        self.hist_gen = gen;
         Ok(())
     }
 
@@ -224,7 +244,7 @@ impl VaultFile {
             if cancel.load(Ordering::SeqCst) { return Err(StoreError::Cancelled); }
             write_atomic(p, &blob)?;
             // the vault file IS written at this point: a failure of the counter file must be told apart (the caller must not roll its memory back)
-            if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault)).map_err(|e| StoreError::CounterWrite(e.to_string()))?; }
+            if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault, self.hist_gen)).map_err(|e| StoreError::CounterWrite(e.to_string()))?; }
         }
         Ok(())
     }
@@ -235,7 +255,7 @@ impl VaultFile {
         let blob = self.vault.change_credentials(old_pw, old_kf, new_pw, new_kf, profile, &data)?;
         if let Some(p) = &self.path {
             write_atomic(p, &blob)?;
-            if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault))?; }
+            if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault, self.hist_gen))?; }
         }
         Ok(())
     }

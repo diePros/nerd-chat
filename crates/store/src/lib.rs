@@ -28,6 +28,8 @@ pub enum StoreError {
     Exists,
     #[error("the platform key store did not answer; the history file was left untouched")]
     KeysUnavailable,
+    #[error("the history file is OLDER than what this vault last wrote: a copy of it was put back")]
+    HistoryRolledBack,
     #[error("cancelled")]
     Cancelled,
     #[error("the saved messages are full ({MAX_SAVED} per contact, {} KiB in total): delete some first", MAX_SAVED_TOTAL / 1024)]

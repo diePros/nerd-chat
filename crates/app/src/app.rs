@@ -463,7 +463,7 @@ impl App {
         let moved: Vec<([u8; 8], [u8; 8], Zeroizing<String>)> = vf.store.contacts.iter().flat_map(|c| c.outbox.iter().map(move |m| (c.id, m.mid, m.text.clone()))).collect();
         let platform: Arc<dyn PlatformKeys> = self.cfg.platform_keys.clone().unwrap_or_else(|| Arc::new(NoPlatformKeys));
         let clock: Arc<dyn Clock> = self.cfg.clock.clone().unwrap_or_else(|| Arc::new(SystemClock::new()));
-        match History::open(&path, self.cfg.history_slot, fk, platform, clock, p) {
+        match History::open_with_floor(&path, self.cfg.history_slot, fk, platform, clock, p, vf.history_floor()) {
             Ok(mut h) => {
                 for (cid, mid, text) in &moved { if !h.knows(*cid, *mid) { h.push(*cid, MsgState::Queued, Some(*mid), text); } }
                 let swept = h.sweep();
@@ -474,6 +474,7 @@ impl App {
                 }
                 self.after_sweep(swept);
             }
+            Err(StoreError::HistoryRolledBack) => self.err("WARNING: the message history file is OLDER than the vault last wrote: an old copy of it was put back (or a backup restored). It is not used and not changed, nothing is kept this session. Switch the history off (O) and on again to start a new one."),
             Err(e) => self.err(format!("Cannot open the message history ({e}): nothing is kept this session.")),
         }
     }
@@ -517,6 +518,7 @@ impl App {
         match (self.history.is_some(), p.keeps_anything()) {
             (_, false) => {
                 if let Some(h) = self.history.take() { let _ = h.shred(); }
+                else if let Some(p) = self.hist_path() { if std::fs::symlink_metadata(&p).is_ok() { let _ = nerd_chat_store::shred_file(&p); } } // a refused (rolled-back) file is removed too
                 self.pending_sends.clear();
                 // what is not in the history any more is held by the engine only if it is running (or was handed the text when it started)
                 if self.engine.is_none() {
@@ -599,6 +601,10 @@ impl App {
         if let Some(h) = self.history.as_mut() {
             let swept = h.sweep();
             let r = h.tick();
+            // remember the file's generation in the counter file (every tick, so the counter file's times stay on the grid), so that an older copy of the file is noticed at the next start
+            if let (Ok(_), Some(v)) = (&r, self.vf.as_mut()) {
+                if let Err(e) = v.record_history_gen(h.generation()) { self.counter_warn = true; self.status = format!("WARNING: the history was written but its rollback record could not be ({e})."); self.error = true; }
+            }
             self.after_sweep(swept);
             if let Err(e) = r { durable = false; self.err(format!("The message history could not be written ({e}): confirmations and sends wait.")); }
         }

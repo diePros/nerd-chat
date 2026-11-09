@@ -124,6 +124,7 @@ pub struct History {
     dirty: bool,
     /// the older generation may still hold keys that were just erased: overwrite it in the next write
     scrub_other: bool,
+    floor: u64,
     persist: Persist,
 }
 
@@ -152,6 +153,12 @@ impl<'a> R<'a> {
 impl History {
     /// Open (or create) the history file next to the vault. `fk` is the vault's subkey for this file. `slot_len` is `SLOT_LEN` except in tests.
     pub fn open(path: &Path, slot_len: usize, fk: Zeroizing<[u8; 32]>, platform: Arc<dyn PlatformKeys>, clock: Arc<dyn Clock>, persist: Persist) -> Result<Self, StoreError> {
+        Self::open_with_floor(path, slot_len, fk, platform, clock, persist, 0)
+    }
+
+    /// Like `open`, with the oldest generation the vault will accept (`VaultFile::history_floor`): a file whose newest slot is older was swapped for an old copy and is refused
+    /// untouched (an old copy would bring back deleted lines and make delivered texts look unsent). A file with no readable slot is simply empty; its generations continue above the floor.
+    pub fn open_with_floor(path: &Path, slot_len: usize, fk: Zeroizing<[u8; 32]>, platform: Arc<dyn PlatformKeys>, clock: Arc<dyn Clock>, persist: Persist, floor: u64) -> Result<Self, StoreError> {
         assert!(slot_len >= 4096, "slot too small");
         let exists = fs::symlink_metadata(path).is_ok();
         let file = if exists {
@@ -166,7 +173,7 @@ impl History {
             f.sync_all().map_err(io)?;
             f
         };
-        let mut h = Self { path: path.to_path_buf(), file, slot_len, fk, platform, clock, buckets: Vec::new(), gen: 0, active: None, hwm: 0, hwm_at_open: 0, mono_at_open: 0, dirty: false, scrub_other: false, persist };
+        let mut h = Self { path: path.to_path_buf(), file, slot_len, fk, platform, clock, buckets: Vec::new(), gen: floor, floor, active: None, hwm: 0, hwm_at_open: 0, mono_at_open: 0, dirty: false, scrub_other: false, persist };
         h.load()?;
         h.hwm_at_open = h.hwm.max(h.clock.wall());
         h.hwm = h.hwm_at_open;
@@ -188,6 +195,7 @@ impl History {
     fn load(&mut self) -> Result<(), StoreError> {
         let best = [0usize, 1].into_iter().filter_map(|s| self.read_slot(s).map(|x| (s, x))).max_by_key(|(_, x)| x.0);
         let Some((slot, (gen, hwm, body))) = best else { return Ok(()) };
+        if gen < self.floor { return Err(StoreError::HistoryRolledBack); }
         let mut r = R(&body);
         let n = r.u16().ok_or(StoreError::Corrupt)?;
         let mut lost = false;
