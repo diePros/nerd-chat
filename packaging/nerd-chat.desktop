@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Nerd-chat
+GenericName=Private chat
+Comment=Serverless chat over Tor, messages only in memory
+Exec=nerd-chat-gui
+Icon=nerd-chat
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=chat;tor;private;secure;
+StartupWMClass=Nerd-chat
