@@ -36,7 +36,7 @@ pub enum Cmd {
     SetOnline(bool),
 }
 #[derive(Default)]
-pub struct Cmds { v: Vec<Cmd>, pub panic: bool }
+pub struct Cmds { v: Vec<Cmd>, pub panic: bool, pub settings: bool }
 impl Cmds { fn push(&mut self, c: Cmd) { self.v.push(c); } pub fn take(&mut self) -> Vec<Cmd> { std::mem::take(&mut self.v) } }
 
 pub fn apply(app: &mut App, c: Cmd, user_offline: &mut bool, started: &mut bool) {
@@ -271,6 +271,8 @@ fn contacts(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
     });
     ui.add_space(6.0);
     if ui.button("+  Add someone").clicked() { cmds.push(Cmd::Command('n')); }
+    ui.add_space(4.0);
+    if ui.button("Settings").clicked() { cmds.settings = true; }
 }
 
 fn details(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
@@ -336,7 +338,20 @@ fn chat(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
         });
         ui.separator();
     }
+    if app.screen == Screen::Main && app.mode == Mode::Normal { cmds.push(Cmd::Insert); } // typing always goes to the draft: the GUI has no modes
     egui::Panel::bottom("composer").show(ui, |ui| {
+        // files: the same cleaning pipeline as the terminal version (JPEG/PNG metadata stripped, text sanitised, always re-cleaned here)
+        if let Some(fs) = app.file_state() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(if fs.contains("a = accept") { "A file is being offered. Accept it? It is cleaned again here and kept in memory until you save it." } else if fs.contains("s = save") { "A file arrived (cleaned, in memory)." } else { "A file is arriving ..." }).color(AMBER));
+                if fs.contains("a = accept") { if ui.button("Accept").clicked() { cmds.push(Cmd::Command('a')); } if ui.button("Decline").clicked() { cmds.push(Cmd::Command('r')); } }
+                if fs.contains("s = save") { if ui.button("Save to a file").clicked() { cmds.push(Cmd::Command('s')); } if ui.button("Discard").clicked() { cmds.push(Cmd::Command('r')); } }
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("Send a photo (JPEG/PNG)").clicked() { cmds.push(Cmd::Command('f')); }
+            if ui.small_button("Send a text file").clicked() { cmds.push(Cmd::Command('t')); }
+        });
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
         ui.painter().rect(rect, 6.0, Color32::from_gray(24), Stroke::new(1.0, Color32::from_gray(90)), egui::StrokeKind::Inside);
         // the draft is drawn from the core's zeroizing buffer (borrowed, never copied into a widget state)
@@ -475,4 +490,29 @@ fn offer_card(ui: &mut egui::Ui, name: &str, o: &nerd_chat_app::app::TorLink, cm
     let left = o.expires.saturating_duration_since(std::time::Instant::now()).as_secs();
     ui.label(RichText::new(format!("Works once, for {} more minutes. Anyone holding the link could see that you are online, so keep it private.", left / 60 + 1)).color(MUTED));
     if ui.button("Cancel").clicked() { cmds.push(Cmd::Command('x')); }
+}
+
+/// Settings window: the application-menu entry, and what the program does and does not protect (plain words).
+pub fn settings(ctx: &egui::Context, open: &mut bool, hidden: &mut bool, entry: Option<&std::path::Path>, note: &mut String) {
+    egui::Window::new("Settings").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+        ui.set_min_width(460.0);
+        ui.label(RichText::new("Application menu").strong());
+        match entry {
+            Some(p) => {
+                let mut h = *hidden;
+                if ui.checkbox(&mut h, "Hide Nerd-chat from the application menu").changed() {
+                    match crate::menu::set_hidden(p, h) { Ok(()) => { *hidden = h; note.clear(); } Err(e) => *note = e }
+                }
+                ui.label(RichText::new("Hiding writes a small file in your user folder (it shows that the program is installed); showing it again removes the file. The program still starts with the command nerd-chat-gui.").color(MUTED).small());
+            }
+            None => { ui.label(RichText::new("No home folder found: the menu entry cannot be changed.").color(MUTED)); }
+        }
+        if !note.is_empty() { ui.label(RichText::new(note.as_str()).color(RED)); }
+        ui.separator();
+        ui.label(RichText::new("About").strong());
+        ui.label(format!("Nerd-chat {}. Unaudited software: read SECURITY.md before you rely on it.", env!("CARGO_PKG_VERSION")));
+        ui.label(RichText::new("Messages exist only in memory. There is no screen-reader support on purpose: a screen reader would receive a copy of every message. The panic button wipes everything and exits.").color(MUTED).small());
+        ui.add_space(8.0);
+        if ui.button("Close").clicked() { *open = false; }
+    });
 }

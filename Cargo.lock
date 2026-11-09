@@ -2125,6 +2125,7 @@ dependencies = [
  "nerd-chat-strip",
  "nerd-chat-vault",
  "png",
+ "tempfile",
  "zeroize",
 ]
 

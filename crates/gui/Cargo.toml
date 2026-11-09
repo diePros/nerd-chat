@@ -26,3 +26,6 @@ nerd-chat-chat = { path = "../chat", optional = true }
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
 zeroize = "1"
 png = "0.18"
+
+[dev-dependencies]
+tempfile = "3"

@@ -6,7 +6,9 @@
 //!    of the draft. There is no egui `TextEdit` for a secret or a message.
 //!  * Panic (F12, Ctrl+\) and purge (Ctrl+]) are forwarded on every screen, exactly like the terminal version, and the process exits.
 //!  * Process hardening, the swap refusal and the sandboxed file-cleaning helper are set up before any secret exists.
-//!  * No AccessKit (a screen reader would get a copy of every message), no clipboard, no notifications.
+//!  * No AccessKit (a screen reader would get a copy of every message), no notifications; the clipboard is used ONLY for the pairing link
+//!    (explicit Copy button, Ctrl+V in the link field): paste events never reach a secret and labels are not selectable.
+mod menu;
 mod shell;
 mod view;
 

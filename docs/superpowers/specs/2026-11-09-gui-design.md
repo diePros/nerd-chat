@@ -112,10 +112,10 @@ The .deb for the GUI installs a menu entry (`.desktop` file) named *Nerd-chat* w
 | 0 | Throwaway spike: egui window, zeroizing text buffer, software rendering, library list, Tails start | go/no-go on the toolkit and on the live-USB claim. **DONE 2026-11-09: GO** (spike report) |
 | 1 | Extract `crates/app` (section 5.1); TUI rebuilt on it | all existing tests pass unchanged; static terminal build identical in behaviour. **DONE 2026-11-09** (review 27) |
 | 2 | **(first version DONE 2026-11-09)** GUI shell: first-run dialog, create/unlock, contact list, chat, composer, status and offline switch, automatic connect/reconnect | **presentable milestone M1**: a person can unlock, see contacts, chat with one over Tor |
-| 3 | **Pairing over Tor (D11)**: own spec first, then protocol, tests, live Tor test, GUI screens | the main way to add contacts works end to end |
-| 4 | Add contact via file and same Wi-Fi; verify screen; unverified notice (D3) | M1 plus all three ways to add someone |
-| 5 | Files, inspector, settings, panic/purge, privacy screen | feature parity with the terminal version |
-| 6 | Packaging: dynamic release artifact, .deb with menu entry and icon, hide-entry option, Tails test report, docs | **release candidate** |
+| 3 | **Pairing over Tor (D11)**: own spec first, then protocol, tests, live Tor test, GUI screens | the main way to add contacts works end to end. **DONE 2026-11-09** (reviews 28, 29; live test passes) |
+| 4 | Add contact via file and same Wi-Fi; verify screen; unverified notice (D3) | M1 plus all three ways to add someone. **DONE** |
+| 5 | Files, inspector, settings, panic/purge, privacy screen | feature parity with the terminal version. **PARTLY DONE**: files, settings, panic; open: key rotation / host-anyway buttons, privacy screen |
+| 6 | **(GUI .deb with menu entry and icon DONE in release.sh)** Packaging: dynamic release artifact, .deb with menu entry and icon, hide-entry option, Tails test report, docs | **release candidate** |
 
 M1 (end of phase 2) is the first thing worth showing to people. Phase 1 shapes the core's pairing API for the Tor protocol from the start (D11), so that phase 3 does not have to retrofit it.
 
