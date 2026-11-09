@@ -10,6 +10,9 @@ mode=${1:?usage: $0 --print-rules|--install <wg0.conf>}
 src=${2:?path to your WireGuard config}
 [ -r "$src" ] || { echo "cannot read $src"; exit 1; }
 IF=wg0
+# paths can be redirected so the whole install can be tested without touching a real system
+WGDIR=${WGDIR:-/etc/wireguard}; NFT_CONF=${NFT_CONF:-/etc/nftables.conf}
+CHECK_BIN=${CHECK_BIN:-/usr/local/sbin/sineloco-vpn-check}
 
 grep -qi '^[[:space:]]*PrivateKey' "$src" || { echo "$src has no PrivateKey line; is it a WireGuard config?"; exit 1; }
 grep -Eqi '^[[:space:]]*AllowedIPs[[:space:]]*=.*0\.0\.0\.0/0' "$src" ||
@@ -84,7 +87,8 @@ if [ "$mode" = "--print-rules" ]; then
   exit 0
 fi
 [ "$mode" = "--install" ] || { echo "unknown mode $mode"; exit 1; }
-[ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
+[ "$(id -u)" = 0 ] || [ -n "${VPN_SETUP_TEST:-}" ] || { echo "run as root"; exit 1; }
+trap 'echo; echo "vpn-setup stopped at line $LINENO"' ERR
 
 diagnose() { # prints what is needed to tell DNS, routing and firewall problems apart
   echo "--- diagnostics (safe to paste: no private key is shown)"
@@ -118,13 +122,21 @@ if ! ip link add dev wgprobe type wireguard 2>/dev/null; then
 fi
 ip link del wgprobe
 
+echo "== preparing"
+# Restartable: stop everything that depends on the tunnel, then take down any earlier tunnel and firewall,
+# so the "before" address below is really the one WITHOUT the VPN. (Nothing network-facing runs meanwhile.)
+systemctl stop tor@default tor nginx sineloco-mirror-sync 2>/dev/null || true
+systemctl stop wg-quick@$IF 2>/dev/null || true
+ip link del $IF 2>/dev/null || true
+nft delete table inet killswitch 2>/dev/null || true
 before=$(egress_ip || true)
-[ -n "$before" ] || echo "(could not read the current public IP; continuing)"
+echo "   public IP without the VPN: ${before:-unknown}"
+[ -n "$before" ] || echo "   (could not read it; the later check will only compare against what it can see)"
 
 echo "== WireGuard config"
-install -d -m 700 /etc/wireguard
-if [ "$src" -ef "/etc/wireguard/$IF.conf" ]; then chmod 600 "/etc/wireguard/$IF.conf"   # already in place
-else install -m 600 "$src" "/etc/wireguard/$IF.conf"; fi
+install -d -m 700 $WGDIR
+if [ "$src" -ef "$WGDIR/$IF.conf" ]; then chmod 600 "$WGDIR/$IF.conf"   # already in place
+else install -m 600 "$src" "$WGDIR/$IF.conf"; fi
 pin_endpoints() { # $1 = file; replaces each resolved hostname by its IP
   local r h ip
   for r in "${rewrites[@]:-}"; do
@@ -134,21 +146,21 @@ pin_endpoints() { # $1 = file; replaces each resolved hostname by its IP
     echo "   Endpoint host ${h} pinned to ${ip} (rerun the installer if your VPN changes that address)"
   done
 }
-pin_endpoints /etc/wireguard/$IF.conf
-grep -Eqi '^[[:space:]]*DNS[[:space:]]*=' /etc/wireguard/$IF.conf && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openresolv >/dev/null
+pin_endpoints $WGDIR/$IF.conf
+grep -Eqi '^[[:space:]]*DNS[[:space:]]*=' $WGDIR/$IF.conf && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openresolv >/dev/null
 
 echo "== kill switch"
-[ -f /etc/nftables.conf ] && [ ! -f /etc/nftables.conf.pre-sineloco ] && cp /etc/nftables.conf /etc/nftables.conf.pre-sineloco
-rules > /etc/nftables.conf.new
-nft -c -f /etc/nftables.conf.new                 # a syntax error stops here, before anything is applied
-mv /etc/nftables.conf.new /etc/nftables.conf
+[ -f $NFT_CONF ] && [ ! -f $NFT_CONF.pre-sineloco ] && cp $NFT_CONF $NFT_CONF.pre-sineloco
+rules > $NFT_CONF.new
+nft -c -f $NFT_CONF.new                 # a syntax error stops here, before anything is applied
+mv $NFT_CONF.new $NFT_CONF
 systemctl enable nftables >/dev/null 2>&1
 # Safety net against locking yourself out: if this script has not confirmed success within 3 minutes,
 # the live rules are removed again. (Tor is not running yet at this point, so nothing is exposed;
-# the rules in /etc/nftables.conf still load at boot.)
+# the rules in $NFT_CONF still load at boot.)
 setsid sh -c 'sleep 180; nft delete table inet killswitch 2>/dev/null' >/dev/null 2>&1 &
 watchdog=$!
-nft -f /etc/nftables.conf
+nft -f $NFT_CONF
 
 echo "== tunnel"
 systemctl enable wg-quick@$IF >/dev/null 2>&1
@@ -166,12 +178,13 @@ fi
 sleep 3
 after=$(egress_ip || true)
 echo "   public IP before: ${before:-unknown}"
-echo "   public IP now:    ${after:-unknown}"
+echo "   public IP now:    ${after:-unknown}   (this is what the internet sees)"
 if [ -z "$after" ]; then echo "Cannot reach the internet through the tunnel."; diagnose; exit 1; fi
 if [ -n "$before" ] && [ "$before" = "$after" ]; then
   echo "The public IP did not change, so traffic is NOT going through the VPN. Stopping."
   exit 1
 fi
-/usr/local/sbin/sineloco-vpn-check --quiet || { echo "The VPN check failed (see above). Stopping."; exit 1; }
+echo "== checks"
+"$CHECK_BIN" || { echo "The VPN check failed (see above). Stopping."; exit 1; }
 kill "$watchdog" 2>/dev/null || true             # confirmed: keep the kill switch
 echo "   leak test passed: nothing leaves outside the tunnel"
