@@ -86,13 +86,13 @@ if ! ip link add dev wgprobe type wireguard 2>/dev/null; then
 fi
 ip link del wgprobe
 
-default_if=$(ip route show default | awk '{print $5; exit}')
 before=$(egress_ip || true)
 [ -n "$before" ] || echo "(could not read the current public IP; continuing)"
 
 echo "== WireGuard config"
 install -d -m 700 /etc/wireguard
-install -m 600 "$src" /etc/wireguard/$IF.conf
+if [ "$src" -ef "/etc/wireguard/$IF.conf" ]; then chmod 600 "/etc/wireguard/$IF.conf"   # already in place
+else install -m 600 "$src" "/etc/wireguard/$IF.conf"; fi
 pin_endpoints() { # $1 = file; replaces each resolved hostname by its IP
   local r h ip
   for r in "${rewrites[@]:-}"; do
@@ -134,8 +134,5 @@ if [ -n "$before" ] && [ "$before" = "$after" ]; then
   echo "The public IP did not change, so traffic is NOT going through the VPN. Stopping."
   exit 1
 fi
-if [ -n "$default_if" ] && curl -fsS --max-time 6 --interface "$default_if" -o /dev/null https://check.torproject.org/ 2>/dev/null; then
-  echo "LEAK: traffic can leave through $default_if outside the tunnel. Stopping."
-  exit 1
-fi
+/usr/local/sbin/sineloco-vpn-check --quiet || { echo "The VPN check failed (see above). Stopping."; exit 1; }
 echo "   leak test passed: nothing leaves outside the tunnel"

@@ -10,6 +10,7 @@
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 [ -f /etc/debian_version ] || { echo "Debian or Ubuntu only"; exit 1; }
+trap 'echo; echo "INSTALL STOPPED at line $LINENO (see the message above). Nothing network-facing was started after that point."' ERR
 here=$(cd "$(dirname "$0")" && pwd)
 SRC=$(cd "${1:-$here/../public}" && pwd)
 SINGLE_HOP=${SINGLE_HOP:-1}
@@ -36,7 +37,7 @@ export DEBIAN_FRONTEND=noninteractive
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d
 trap 'rm -f /usr/sbin/policy-rc.d' EXIT
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends tor nginx curl jq gnupg ca-certificates wireguard-tools nftables iproute2
+apt-get install -y -qq --no-install-recommends tor nginx curl jq gnupg ca-certificates wireguard-tools nftables iproute2 openresolv
 systemctl stop tor@default tor nginx 2>/dev/null || true
 rm -f /usr/sbin/policy-rc.d
 
