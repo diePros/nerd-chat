@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 
-use nerd_chat_app::{app::{self, Action, App, Config, Key}, cleaner, hardening::{harden, swap_problem}, ui, vault_path};
+use nerd_chat_app::{app::{self, Action, App, Config, Key}, hardening::{harden, swap_problem}, ui, vault_path};
 use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -257,12 +257,9 @@ survive power-off and be recovered later. Turn swap off first:\n\
 }
 
 fn main() {
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if cleaner::is_worker_invocation(&args) { cleaner::worker_main(); }
-        if !args.iter().any(|a| a == "--no-sandbox") { nerd_chat_strip::set_cleaner(cleaner::sandboxed_clean); }
-    }
-    for w in harden() { eprintln!("warning: {w}"); }
+    let args: Vec<String> = std::env::args().collect();
+    let started = nerd_chat_app::startup::startup(&args); // FIRST: cleaner helper dispatch, sandboxed cleaner, hardening
+    for w in started.warnings { eprintln!("warning: {w}"); }
     let cfg = parse_args();
     if !cfg.allow_swap { refuse_if_swap(); }
     if cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_err()) {

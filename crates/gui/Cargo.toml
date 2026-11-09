@@ -1,0 +1,27 @@
+[package]
+publish = false
+name = "nerd-chat-gui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Nerd-chat graphical front end (egui). A second skin over nerd-chat-app: passwords and message drafts live only in the app core's zeroizing buffers."
+
+[[bin]]
+name = "nerd-chat-gui"
+path = "src/main.rs"
+
+[features]
+# developer demo: two linked in-memory accounts so that the screens can be shown without Tor (never in a release build)
+demo = ["dep:nerd-chat-chat", "nerd-chat-app/test-transport"]
+
+[dependencies]
+nerd-chat-app = { path = "../app", default-features = false }
+nerd-chat-core = { path = "../core" }
+nerd-chat-vault = { path = "../vault" }
+nerd-chat-strip = { path = "../strip" }
+nerd-chat-net = { path = "../net" }
+nerd-chat-chat = { path = "../chat", optional = true }
+# GUI toolkit: NO accesskit (a screen reader would receive every message: spike report), NO clipboard, NO web screen reader
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+zeroize = "1"
+png = "0.18"

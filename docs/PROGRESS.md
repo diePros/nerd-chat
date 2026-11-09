@@ -61,4 +61,4 @@ remaining candidates are the fuzz targets, R8-I7, R12-5 and the GUI-core extract
 Done: R12-5 (see tracker review 25), live Tor tests re-run, `docs/REVIEW_PROMPT_VAULT_PATH.md` written and the Opus review of the default vault
 location started (findings go into the tracker as review 26; not yet integrated). Open: re-test R12-5 on Tails (user), review 26 fixes,
 R24-L2 (per-turn text budget, not reachable from the TUI), cross-machine reproducible build, CI, cargo-vet audits, professional audit.
-Next big item: the GUI (0.2). It needs the UI-agnostic core extracted from `crates/tui/src/app.rs` first (see docs/ROADMAP.md and the GUI plan).
+GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phase 0 spike DONE (go, report in the same folder), phase 1 core extraction DONE (crate `crates/app`, review 27), phase 2 first GUI shell DONE (`crates/gui`, `cargo build -p nerd-chat-gui`; developer demo: `--features demo` and `nerd-chat-gui --demo --screenshot out.png`). Next: phase 3, pairing over Tor (own spec first), then add-contact flows, unverified notice, parity, packaging.

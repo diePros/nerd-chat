@@ -10,7 +10,7 @@ Honest status first. "Verified" means somebody actually ran it.
 | Reproducible build | verified on the dev machine and by the project owner on WSL Ubuntu (`scripts/repro-check.sh`); a hash comparison between two machines is still open, procedure in §4 |
 | Running on a generic live USB distro | **NOT verified** — checklist in §7 |
 | Running on Tails | **NOT verified, deferred** — plan in §8 |
-| Chat screens | built: contact sidebar + details/conversation pane, vim-style normal/insert modes, privacy screen (3rd Esc), history scrolling; tests in `crates/tui` (the screens have not been tried on Tails) |
+| Chat screens | built: contact sidebar + details/conversation pane, vim-style normal/insert modes, privacy screen (3rd Esc), history scrolling; tests in `crates/app` (the screens have not been tried on Tails) |
 
 ---
 ## 1. Prerequisites (build machine)

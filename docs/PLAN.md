@@ -71,7 +71,9 @@ crates/core      # protocol, bundle format, Noise+PQ handshake, cells
 crates/vault     # Argon2id + AEAD vault, zeroize/mlock
 crates/exchange  # file/QR/PAKE local exchange (BLE via bluer/btleplug, LAN)
 crates/net       # transport trait; embedded-tor driver; system-tor driver; bridge/proxy cfg
-crates/tui       # ratatui front end (core stays UI-agnostic for later GUI)
+crates/app       # UI-agnostic application core (state machine, vault, pairing, panic/purge): shared by the front ends
+crates/tui       # terminal front end (ratatui) on top of crates/app
+crates/gui       # graphical front end (egui) on top of crates/app
 bin/nerd-chat     # single static binary: embeds tor, loads via memfd
 docs/THREAT_MODEL.md, docs/PROTOCOL.md
 ```

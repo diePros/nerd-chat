@@ -9,6 +9,8 @@ description = "UI-agnostic application core: the state machine (vault, contacts,
 [features]
 # the ratatui renderer (the terminal front end turns it on; the GUI does not)
 terminal-ui = ["dep:ratatui"]
+# lets a front end inject an in-memory test network instead of Tor (developer demo and tests only; never enabled by a release build)
+test-transport = []
 
 [dependencies]
 nerd-chat-core = { path = "../core" }

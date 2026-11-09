@@ -58,7 +58,7 @@ it: the terminal version stays fully maintained, because it is the one that runs
 ### 5.1 A UI-agnostic core crate (prerequisite)
 Move the state machine out of `crates/tui/src/app.rs` (3,300 lines incl. tests) into a new crate `crates/app` (`nerd-chat-app`) with no
 terminal and no GUI dependency: screens and modes, vault access, engine events, pairing, the Tor hosting probe, the panic/purge logic.
-- Input is a **command** (`Command::OpenChat(id)`, `SendText`, `GoOffline`, `StartPairing(..)`, `Panic`, ...), not a keypress. The TUI maps keys to commands (its behaviour must not change); the GUI maps clicks to the same commands.
+- **As built (phase 1/2, a deliberate deviation):** input stays the core's existing `Key` interface; the GUI maps widgets to the same `Key`s (and reads the same public state), so there is ONE state machine with ONE set of tests and no new entry points. Passwords, the pairing code and the message draft are therefore held only by the core's zeroizing buffers; the GUI never gives them to the toolkit. A real command layer (`Command::OpenChat(id)`, ...) is optional later work.
 - Output is a **view model** (read-only queries like today's `contact_rows`, `chat_lines`, `online_label`, `selected_detail`) plus a list of **notices** (alerts, status).
 - All existing `app.rs` tests move with the code and must pass unchanged against the TUI front end before any GUI work starts.
 - This step touches panic wipe, purge, the pairing worker and the probe: it is security-critical (reviewed by the strongest model, section 9).
@@ -102,16 +102,16 @@ The .deb for the GUI installs a menu entry (`.desktop` file) named *Nerd-chat* w
 - No clipboard by default (no clipboard feature in the toolkit build); an explicit "copy" is allowed only for the pairing link and the contact file text, with a notice.
 - Message text, passwords and the composer use zeroizing buffers; the spike proves the toolkit does not keep copies (undo history, per-frame layout caches, IME buffers). If it cannot, the toolkit decision is revisited.
 - No notifications that contain message text or names; no contact names in window titles; no thumbnails or recent-file entries that name the vault.
-- Core dumps off, swap refusal, `no_new_privs` and the file-cleaning helper as in the terminal version; the GUI process itself parses no hostile files.
+- Core dumps off, not ptrace-readable, swap refusal and the sandboxed file-cleaning helper (which alone runs under `no_new_privs` and seccomp) as in the terminal version, all through `nerd_chat_app::startup::startup`; the GUI process itself parses no hostile files.
 - Screenshots and screen-capture exposure are documented as outside what the app can control.
 - The panic path must work while the GUI is busy (probe, pairing, Tor start run on worker threads; the UI thread never blocks on I/O).
 
 ## 8. Plan in phases (each ends with tests, a review, a commit)
 | Phase | Content | Done when |
 |---|---|---|
-| 0 | Throwaway spike: egui window, zeroizing text buffer, software rendering, library list, Tails start | go/no-go on the toolkit and on the live-USB claim |
-| 1 | Extract `crates/app` (section 5.1); TUI rebuilt on it | all existing tests pass unchanged; static terminal build identical in behaviour |
-| 2 | GUI shell: first-run dialog, create/unlock, contact list, chat, composer, status and offline switch, automatic connect/reconnect | **presentable milestone M1**: a person can unlock, see contacts, chat with one over Tor |
+| 0 | Throwaway spike: egui window, zeroizing text buffer, software rendering, library list, Tails start | go/no-go on the toolkit and on the live-USB claim. **DONE 2026-11-09: GO** (spike report) |
+| 1 | Extract `crates/app` (section 5.1); TUI rebuilt on it | all existing tests pass unchanged; static terminal build identical in behaviour. **DONE 2026-11-09** (review 27) |
+| 2 | **(first version DONE 2026-11-09)** GUI shell: first-run dialog, create/unlock, contact list, chat, composer, status and offline switch, automatic connect/reconnect | **presentable milestone M1**: a person can unlock, see contacts, chat with one over Tor |
 | 3 | **Pairing over Tor (D11)**: own spec first, then protocol, tests, live Tor test, GUI screens | the main way to add contacts works end to end |
 | 4 | Add contact via file and same Wi-Fi; verify screen; unverified notice (D3) | M1 plus all three ways to add someone |
 | 5 | Files, inspector, settings, panic/purge, privacy screen | feature parity with the terminal version |

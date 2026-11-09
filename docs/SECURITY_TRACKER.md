@@ -483,3 +483,21 @@ No critical/high. All vault_path tests pass; new tests: dangling symlink / direc
 | R26-L8 | Tails detection fails open; Whonix/other live systems get no warning | OPEN (optional) | statfs tmpfs/overlay or `boot=live` heuristic |
 | R26-I1 | the "ignoring ./nerd-chat.vault" notes go to stderr right before the alternate screen and are practically never seen | OPEN | the header shows the path; show the note in the first status line |
 | R26-I3 | an inspect error other than NotFound was treated as "no vault" | FIXED | refused |
+
+## Review 27 (Opus, GUI phase 1a: core extraction into crates/app, commit 10fe8a4) — fixed in the commit that follows
+No critical/high. Moved files verified byte-identical (`similarity index 100%`); 306 tests passed before and after, no test lost.
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R27-M1 | the moved code lost `#![forbid(unsafe_code)]` (it used to be covered by the tui binary's attribute) | FIXED | `#![forbid(unsafe_code)]` in `crates/app/src/lib.rs` |
+| R27-M2 | nothing forced a front end to run the process-level safety nets (cleaner helper dispatch, sandboxed cleaner, hardening); a GUI that forgot `set_cleaner` would parse hostile files in the key-holding process | FIXED | `startup::startup(&args)` does all three; `App::new` asserts that it ran (off only in tests); the order and reasons are in the crate docs. Not done: strip's silent in-process fallback when no cleaner is installed (the assert makes it unreachable through `App`) |
+| R27-L1 | "tests only" fields (`Config::transport`, `host_probe_test`) became public | FIXED | `pub(crate)`; a front end can inject a test network only through `Config::with_test_transport`, behind the non-default feature `test-transport` (enabled only by the GUI's developer `demo` feature) |
+| R27-L2 | lib.rs doc described `cmd_*` methods that do not exist | FIXED | reworded: the GUI maps widgets to the same `Key`s; a command layer is planned, not built |
+| R27-L3 | a dynamic GUI binary doubles as the cleaning helper (re-exec of `/proc/self/exe`) | ACCEPTED (partial) | the binary links only libc/libm/libgcc_s (windowing and GL libraries are `dlopen`ed by the toolkit AFTER `startup`), so the helper loads none of them before seccomp; the cleaner integration tests still run only against the terminal binary: duplicate them for the GUI binary in phase 6 |
+| R27-L4 | stale docs | FIXED | BUILD_AND_RUN, PLAN, PROGRESS updated |
+| R27-I1 | `parse_args` reads the keyfile before the swap refusal (older) | OPEN (info) | move the swap check before reading the keyfile |
+| R27-I2 | design §7 listed `no_new_privs` for the main process; `harden()` sets only RLIMIT_CORE=0 and non-dumpable | ACCEPTED | `no_new_privs` on the main process could break AppArmor transitions for the spawned Tor (Ubuntu `system_tor`); it stays a property of the cleaning helper. Design text corrected |
+| R27-I3 | cargo feature unification: `cargo build --workspace` turns `terminal-ui` on for the GUI | NOTED | build the GUI with `-p nerd-chat-gui`, never from a workspace-wide release build |
+
+## D-5 GUI dependencies (owner approved, 2026-11-09)
+egui/eframe 0.37 with features `default_fonts, glow, wayland, x11` only (no AccessKit, no clipboard, no web screen reader, no system fonts) enter the project in `crates/gui`; the terminal binary and its static build do not link them. `cargo deny` stays green with ONE narrow exception: `epaint_default_fonts` (bundled fonts) is allowed the SIL OFL 1.1 and the Ubuntu Font Licence. `cargo vet` exemptions grew from about 210 to 395 crates (all UNAUDITED, like the existing ones); `cargo vet` and `cargo deny` pass. Audit backlog is listed by `cargo vet`.

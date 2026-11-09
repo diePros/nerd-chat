@@ -44,18 +44,22 @@ pub struct Config {
     pub keyfile_path: Option<PathBuf>,
     pub profile: Profile,
     pub tor: TorCfg,
-    pub transport: Option<TransportFactory>,
+    pub(crate) transport: Option<TransportFactory>,
     pub timing: Timing,
     /// Our Tor cannot host onion services (e.g. a Tails with a restricted control port): said in our exported bundles, so the
     /// contact hosts for us and nothing needs to be published speculatively. (`--cannot-host`; `--probe-tor --probe-onion` tells you.)
     pub can_host: bool,
     /// Tests only: the answer of the automatic hosting probe (None = really probe, when an external tor is configured).
-    pub host_probe_test: Option<HostProbe>,
+    pub(crate) host_probe_test: Option<HostProbe>,
     /// Start even though swap is active (secrets could be written to the disk by the OS). Default: refuse.
     pub allow_swap: bool,
 }
 
 impl Config {
+    /// Replace Tor by a test network (the in-memory `MemNet`): only for the developer demo and tests, never in a release build.
+    #[cfg(feature = "test-transport")]
+    pub fn with_test_transport(mut self, f: TransportFactory) -> Self { self.transport = Some(f); self }
+
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
         Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false }
     }
@@ -250,6 +254,7 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config) -> Self {
+        assert!(cfg!(test) || crate::startup::is_done(), "nerd_chat_app::startup::startup(&args) must be the first thing a front end runs (cleaner helper, hardening)");
         let exists = cfg.path.as_ref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok());
         let ram = cfg.path.is_none();
         let mut a = Self {
@@ -323,6 +328,8 @@ impl App {
     }
     /// Number of typed characters in the (hidden) join-code buffer.
     pub fn code_chars(&self) -> usize { self.code_buf.chars() }
+    /// Number of typed characters in the repeat-password buffer (only the count leaves the core).
+    pub fn confirm_chars(&self) -> usize { self.pw2.chars() }
     pub fn view_number(&self) -> Option<&str> { self.view.as_ref().map(|v| v.number.as_str()) }
     pub fn is_ram_only(&self) -> bool { self.cfg.path.is_none() }
 

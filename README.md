@@ -19,6 +19,7 @@ key pair and its own onion service, and everything runs from a **single static L
 - **Panic:** F12 or Ctrl+\ (panic-lock) wipes memory and screen and exits immediately; Ctrl+] (purge) additionally overwrites and deletes the vault, counter, keyfile and exported files. No logs, no automatic history, no clipboard.
 - **Keeping messages is manual:** nothing is ever saved by itself; you can save a chosen message into the encrypted vault (message cursor `m`, `y`) and delete it again.
 - **Key rotation:** you can replace the onion address and auth key of a contact so that old copies of your bundle stop revealing when you are online.
+- **GUI (in progress):** `cargo build -p nerd-chat-gui` (dynamically linked, needs X11/Wayland and OpenGL; no screen-reader support on purpose, see `docs/superpowers/specs/2026-11-09-gui-spike-report.md`). Build it with `-p`, never from a workspace-wide release build.
 - **UI:** terminal UI with a permanent contact list, a vim-style Normal/Insert input and a privacy screen (3rd Esc). A GUI is planned (`docs/ROADMAP.md`).
 
 ## Build
