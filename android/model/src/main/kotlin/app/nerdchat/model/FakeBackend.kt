@@ -9,10 +9,10 @@ import kotlinx.coroutines.flow.update
  * confirming). The first run has no vault: with `seed = true` the demo opens with any password of at least 12 characters (the same rule
  * as the core), with any shorter one it explains why not. Used by previews, screenshot tests and demo builds.
  */
-class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true) : ChatBackend {
+class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true, keepOutbox: Boolean = false) : ChatBackend {
     private val s = MutableStateFlow(
         (if (seed) demoState() else AppState()).copy(stage = if (hasVault) Stage.Unlock else Stage.CreatePassword,
-            status = if (hasVault) "Enter your password to unlock." else "No vault found. Creating a NEW one (min 12 characters)."))
+            status = if (hasVault) "Enter your password to unlock." else "No vault found. Creating a NEW one (min 12 characters).", keepOutbox = keepOutbox))
     override val state: StateFlow<AppState> = s
     private var nextId = 100L
     private var firstPw: String? = null
@@ -116,6 +116,8 @@ class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true) : 
     }
 
     override fun acknowledgeAlert() { s.update { it.copy(alerts = it.alerts.drop(1)) } }
+
+    override fun setKeepOutbox(keep: Boolean) { s.update { it.copy(keepOutbox = keep) } }
 
     companion object {
         private val SAFETY = listOf("48213", "07791", "36502", "91844", "20365", "77018")

@@ -13,8 +13,22 @@ const MAX_SAVED_LEN: usize = 32 * 1024;
 
 /// A message the user saved by hand. Order = order of saving; there is deliberately NO timestamp.
 pub struct SavedMsg { pub mine: bool, pub text: Zeroizing<String> }
+
+/// The ENCRYPTED OUTBOX (opt-in): texts we sent that the contact's app has not confirmed yet, kept in the vault so that they survive a restart
+/// or the OS killing the app. At most this many per contact (the same number as the engine's `MAX_UNCONFIRMED`: a test pins that) ...
+pub const MAX_OUTBOX: usize = 50;
+/// ... and at most this many bytes of text in the whole vault (a delivered text is removed again at once) ...
+pub const MAX_OUTBOX_TOTAL: usize = 1024 * 1024;
+/// ... one text is at most one chat message (the chat caps a message at 32 KiB).
+const MAX_OUTBOX_LEN: usize = 32 * 1024;
+
+/// One unconfirmed text of OUR side: the message id the engine and the contact know it by, and the text. Order = order of sending; NO timestamp.
+pub struct OutMsg { pub mid: [u8; 8], pub text: Zeroizing<String> }
+
+const MAGIC_V6: &[u8; 4] = b"SBS6";
 const MAGIC: &[u8; 4] = b"SBS5";
-/// SBS4 (no saved messages) and SBS3 (no rotation state either) are still read.
+/// SBS6 (vault flags + the encrypted outbox) is written ONLY when the outbox feature was chosen or an outbox is not empty: any other vault stays SBS5 and
+/// stays readable by older binaries. SBS4 (no saved messages) and SBS3 (no rotation state either) are still read.
 const MAGIC_V4: &[u8; 4] = b"SBS4";
 const MAGIC_V3: &[u8; 4] = b"SBS3";
 /// Older vaults (no capability / host-anyway bits) are still read; they are written back as SBS5 on the next save (a ONE-WAY upgrade: older binaries cannot open it).
@@ -41,6 +55,8 @@ pub struct Contact {
     pub peer_old: Option<([u8; 32], [u8; 32])>,
     /// Messages of this conversation that the user saved by hand (never automatic). Encrypted with the rest of the vault.
     pub saved: Vec<SavedMsg>,
+    /// Texts not yet confirmed by this contact (only filled while the encrypted outbox is on): resent on every new connection until confirmed.
+    pub outbox: Vec<OutMsg>,
 }
 
 impl std::fmt::Debug for Contact {
@@ -50,7 +66,11 @@ impl std::fmt::Debug for Contact {
 }
 
 #[derive(Default, Debug)]
-pub struct Store { pub contacts: Vec<Contact> }
+pub struct Store {
+    pub contacts: Vec<Contact>,
+    /// The user's choice to keep unconfirmed texts in the vault (`None` = never chosen: the front end's default applies).
+    pub keep_outbox: Option<bool>,
+}
 
 fn valid_name(n: &str) -> bool {
     let t = n.trim();
@@ -99,7 +119,7 @@ impl Store {
         if self.contacts.iter().any(|c| c.name == name) { return Err(StoreError::Duplicate); }
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).expect("OS RNG unavailable");
-        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None, next_transport: None, peer_old: None, saved: Vec::new() });
+        self.contacts.push(Contact { id, name: name.to_string(), identity: ContactIdentity::generate(), peer: None, trust: Trust::Unverified, host_anyway: false, adv_can_host: None, next_transport: None, peer_old: None, saved: Vec::new(), outbox: Vec::new() });
         Ok(self.contacts.len() - 1)
     }
 
@@ -123,9 +143,32 @@ impl Store {
         Ok(())
     }
 
+    /// Total bytes of unconfirmed text in the encrypted outbox of the whole vault.
+    pub fn outbox_bytes(&self) -> usize { self.contacts.iter().flat_map(|c| &c.outbox).map(|m| m.text.len()).sum() }
+
+    /// Keep one unconfirmed text of contact `idx` in the vault. Refuses beyond the caps and for a contact without a peer instead of dropping anything silently.
+    pub fn queue_outbox(&mut self, idx: usize, mid: [u8; 8], text: &str) -> Result<(), StoreError> {
+        if text.is_empty() || text.len() > MAX_OUTBOX_LEN { return Err(StoreError::Corrupt); }
+        if self.outbox_bytes() + text.len() > MAX_OUTBOX_TOTAL { return Err(StoreError::OutboxFull); }
+        let c = self.contacts.get_mut(idx).ok_or(StoreError::Corrupt)?;
+        if c.peer.is_none() || c.outbox.len() >= MAX_OUTBOX || c.outbox.iter().any(|m| m.mid == mid) { return Err(StoreError::OutboxFull); }
+        c.outbox.push(OutMsg { mid, text: Zeroizing::new(text.to_string()) });
+        Ok(())
+    }
+
+    /// The contact confirmed (or the engine refused) text `mid` of the contact with this id: forget it (the text is zeroized). `false`: it was not there.
+    pub fn outbox_done(&mut self, contact: [u8; 8], mid: [u8; 8]) -> bool {
+        let Some(c) = self.contacts.iter_mut().find(|c| c.id == contact) else { return false };
+        match c.outbox.iter().position(|m| m.mid == mid) { Some(k) => { c.outbox.remove(k); true } None => false }
+    }
+
+    /// Forget every kept text (the user switched the outbox off): each is zeroized.
+    pub fn clear_outbox(&mut self) { for c in &mut self.contacts { c.outbox.clear(); } }
+
     /// Exact upper bound of the encoding (every optional part counted), so `encode` never reallocates.
     fn encoded_size(&self) -> usize {
-        6 + self.contacts.iter().map(|c| 8 + 1 + c.name.len() + SECRET_LEN + 1 + (32 * 4 + KEM_PUB_LEN) + 1 + 64 + 64 + 2 + c.saved.iter().map(|m| 3 + m.text.len()).sum::<usize>()).sum::<usize>()
+        7 + self.contacts.iter().map(|c| 8 + 1 + c.name.len() + SECRET_LEN + 1 + (32 * 4 + KEM_PUB_LEN) + 1 + 64 + 64 + 2 + c.saved.iter().map(|m| 3 + m.text.len()).sum::<usize>()
+            + 2 + c.outbox.iter().map(|m| 8 + 2 + m.text.len()).sum::<usize>()).sum::<usize>()
     }
 
     /// Serialize (wiped on drop). Format: magic | count:u16 | per contact:
@@ -133,8 +176,12 @@ impl Store {
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         // reserve the final size up front: a growing Vec would leave copies of keys and saved messages in freed heap
         let mut v = Zeroizing::new(Vec::with_capacity(self.encoded_size()));
-        v.extend_from_slice(MAGIC);
+        // SBS6 only when the feature is in use: every other vault stays SBS5 and stays readable by older binaries
+        let sbs6 = self.keep_outbox.is_some() || self.contacts.iter().any(|c| !c.outbox.is_empty());
+        v.extend_from_slice(if sbs6 { MAGIC_V6 } else { MAGIC });
         v.extend_from_slice(&(self.contacts.len() as u16).to_be_bytes());
+        // SBS6: vault flags: bit0 = the outbox choice was made, bit1 = its value
+        if sbs6 { v.push(self.keep_outbox.is_some() as u8 | ((self.keep_outbox == Some(true)) as u8) << 1); }
         for c in &self.contacts {
             v.extend_from_slice(&c.id);
             v.push(c.name.len() as u8);
@@ -156,6 +203,11 @@ impl Store {
             // SBS5: the messages the user saved: count:u16 | per message: flags:u8 (bit0 mine) | len:u16 | text
             v.extend_from_slice(&(c.saved.len() as u16).to_be_bytes());
             for m in &c.saved { v.push(m.mine as u8); v.extend_from_slice(&(m.text.len() as u16).to_be_bytes()); v.extend_from_slice(m.text.as_bytes()); }
+            // SBS6: the unconfirmed texts: count:u16 | per text: mid[8] | len:u16 | text
+            if sbs6 {
+                v.extend_from_slice(&(c.outbox.len() as u16).to_be_bytes());
+                for m in &c.outbox { v.extend_from_slice(&m.mid); v.extend_from_slice(&(m.text.len() as u16).to_be_bytes()); v.extend_from_slice(m.text.as_bytes()); }
+            }
         }
         v
     }
@@ -163,13 +215,19 @@ impl Store {
     pub fn decode(b: &[u8]) -> Result<Self, StoreError> {
         let mut r = Reader(b);
         let magic = r.take(4)?;
-        let v5 = magic == MAGIC;
+        let v6 = magic == MAGIC_V6;
+        let v5 = v6 || magic == MAGIC;
         let v4 = v5 || magic == MAGIC_V4;
         let v3 = v4 || magic == MAGIC_V3;
         if !v3 && magic != MAGIC_V2 { return Err(StoreError::Corrupt); }
         let n = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
         if n > MAX_CONTACTS { return Err(StoreError::Corrupt); }
         let mut s = Store::new();
+        if v6 {
+            let vf = r.take(1)?[0];
+            if vf & !0b11 != 0 || (vf & 0b10 != 0 && vf & 1 == 0) { return Err(StoreError::Corrupt); } // unknown bits, or a value without 'set'
+            if vf & 1 != 0 { s.keep_outbox = Some(vf & 0b10 != 0); }
+        }
         for _ in 0..n {
             let id: [u8; 8] = r.take(8)?.try_into().unwrap();
             let nl = r.take(1)?[0] as usize;
@@ -216,9 +274,22 @@ impl Store {
                     saved.push(SavedMsg { mine: flags == 1, text: Zeroizing::new(text.to_string()) });
                 }
             }
-            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host, next_transport, peer_old, saved });
+            let mut outbox: Vec<OutMsg> = Vec::new();
+            if v6 {
+                let n = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
+                // texts waiting for a contact that has no peer key could never be sent: corrupt
+                if n > MAX_OUTBOX || (n > 0 && peer.is_none()) { return Err(StoreError::Corrupt); }
+                for _ in 0..n {
+                    let mid: [u8; 8] = r.take(8)?.try_into().unwrap();
+                    let len = u16::from_be_bytes(r.take(2)?.try_into().unwrap()) as usize;
+                    if len == 0 || len > MAX_OUTBOX_LEN || outbox.iter().any(|m| m.mid == mid) { return Err(StoreError::Corrupt); }
+                    let text = std::str::from_utf8(r.take(len)?).map_err(|_| StoreError::Corrupt)?;
+                    outbox.push(OutMsg { mid, text: Zeroizing::new(text.to_string()) });
+                }
+            }
+            s.contacts.push(Contact { id, name, identity, peer, trust, host_anyway, adv_can_host, next_transport, peer_old, saved, outbox });
         }
-        if !r.0.is_empty() || s.saved_bytes() > MAX_SAVED_TOTAL { return Err(StoreError::Corrupt); }
+        if !r.0.is_empty() || s.saved_bytes() > MAX_SAVED_TOTAL || s.outbox_bytes() > MAX_OUTBOX_TOTAL { return Err(StoreError::Corrupt); }
         Ok(s)
     }
 }
@@ -236,6 +307,87 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paired(s: &mut Store, name: &str) -> usize {
+        let i = s.add_contact(name).unwrap();
+        s.contacts[i].peer = Some(Bundle::from_identity(&ContactIdentity::generate()));
+        i
+    }
+
+    #[test]
+    fn a_vault_that_never_used_the_outbox_stays_sbs5_and_old_binaries_keep_working() {
+        let mut s = Store::new(); paired(&mut s, "alice");
+        assert_eq!(&s.encode()[..4], b"SBS5", "untouched vaults keep the old format");
+        let d = Store::decode(&s.encode()).unwrap();
+        assert_eq!(d.keep_outbox, None); assert!(d.contacts[0].outbox.is_empty());
+    }
+
+    #[test]
+    fn the_outbox_roundtrips_in_sbs6_in_order_with_its_flags() {
+        let mut s = Store::new();
+        let a = paired(&mut s, "alice"); let b = paired(&mut s, "bob");
+        s.keep_outbox = Some(true);
+        s.queue_outbox(a, [1; 8], "first \u{1F600}").unwrap(); s.queue_outbox(a, [2; 8], "second").unwrap(); s.queue_outbox(b, [3; 8], "for bob").unwrap();
+        let enc = s.encode();
+        assert_eq!(&enc[..4], b"SBS6");
+        let d = Store::decode(&enc).unwrap();
+        assert_eq!(d.keep_outbox, Some(true));
+        assert_eq!(d.contacts[a].outbox.iter().map(|m| (m.mid, m.text.to_string())).collect::<Vec<_>>(), vec![([1; 8], "first \u{1F600}".to_string()), ([2; 8], "second".to_string())]);
+        assert_eq!(d.contacts[b].outbox.len(), 1, "an outbox belongs to one contact only");
+        // an explicit "off" is remembered too (so the front end's default does not come back)
+        let mut off = Store::new(); paired(&mut off, "carol"); off.keep_outbox = Some(false);
+        assert_eq!(Store::decode(&off.encode()).unwrap().keep_outbox, Some(false));
+    }
+
+    #[test]
+    fn confirming_removes_a_text_and_switching_off_clears_everything() {
+        let mut s = Store::new(); let a = paired(&mut s, "alice"); let id = s.contacts[a].id;
+        s.queue_outbox(a, [1; 8], "x").unwrap(); s.queue_outbox(a, [2; 8], "y").unwrap();
+        assert!(s.outbox_done(id, [1; 8]) && !s.outbox_done(id, [1; 8]), "removed once");
+        assert!(!s.outbox_done([9; 8], [2; 8]), "unknown contact");
+        assert_eq!(s.contacts[a].outbox.len(), 1);
+        s.clear_outbox(); assert!(s.contacts[a].outbox.is_empty());
+    }
+
+    #[test]
+    fn the_outbox_caps_are_enforced_and_nothing_is_dropped_silently() {
+        let mut s = Store::new(); let a = paired(&mut s, "alice"); let b = paired(&mut s, "bob");
+        for k in 0..MAX_OUTBOX { s.queue_outbox(a, [k as u8; 8], "x").unwrap(); }
+        assert!(matches!(s.queue_outbox(a, [200; 8], "x"), Err(StoreError::OutboxFull)), "per contact");
+        assert!(matches!(s.queue_outbox(a, [0; 8], "x"), Err(StoreError::OutboxFull)), "a repeated id is refused");
+        let big = "y".repeat(32 * 1024);
+        let mut n = 0u8; while s.outbox_bytes() + big.len() <= MAX_OUTBOX_TOTAL { s.queue_outbox(b, [100 + n; 8], &big).unwrap(); n += 1; }
+        assert!(matches!(s.queue_outbox(b, [250; 8], &big), Err(StoreError::OutboxFull)), "in total");
+        assert!(matches!(s.queue_outbox(b, [251; 8], ""), Err(StoreError::Corrupt)) && matches!(s.queue_outbox(b, [252; 8], &"q".repeat(32 * 1024 + 1)), Err(StoreError::Corrupt)));
+        let mut np = Store::new(); let c = np.add_contact("nopeer").unwrap();
+        assert!(matches!(np.queue_outbox(c, [1; 8], "x"), Err(StoreError::OutboxFull)), "no peer key: it could never be sent");
+    }
+
+    #[test]
+    fn hostile_sbs6_blobs_are_refused() {
+        let mut s = Store::new(); let a = paired(&mut s, "alice");
+        s.keep_outbox = Some(true); s.queue_outbox(a, [7; 8], "ab").unwrap();
+        let enc = s.encode().to_vec();
+        let at = enc.len() - (8 + 2 + 2);                                // mid(8) len(2) "ab"(2)
+        let mutate = |f: &dyn Fn(&mut Vec<u8>)| { let mut t = enc.clone(); f(&mut t); Store::decode(&t) };
+        assert!(mutate(&|_| {}).is_ok());
+        assert!(mutate(&|t| t[6] = 0b100).is_err(), "unknown vault flag");
+        assert!(mutate(&|t| t[6] = 0b10).is_err(), "a value without 'set'");
+        assert!(mutate(&|t| { t[at + 8] = 0; t[at + 9] = 0; }).is_err(), "zero length");
+        assert!(mutate(&|t| t[at + 9] = 3).is_err(), "length larger than the data left");
+        assert!(mutate(&|t| t[at + 10] = 0xff).is_err(), "invalid UTF-8");
+        assert!(mutate(&|t| { let l = t.len(); t.truncate(l - 1); }).is_err(), "truncated");
+        assert!(mutate(&|t| t.push(0)).is_err(), "trailing data");
+        // count above the cap
+        assert!(mutate(&|t| { t[at - 2] = 0; t[at - 1] = (MAX_OUTBOX + 1) as u8; }).is_err());
+        // an outbox for a contact without a peer, and a duplicate id
+        let mut np = Store::new(); let c = np.add_contact("nopeer").unwrap(); np.keep_outbox = Some(true);
+        np.contacts[c].outbox.push(OutMsg { mid: [1; 8], text: Zeroizing::new("x".into()) });
+        assert!(Store::decode(&np.encode()).is_err());
+        let mut dup = Store::new(); let d = paired(&mut dup, "dave");
+        for _ in 0..2 { dup.contacts[d].outbox.push(OutMsg { mid: [5; 8], text: Zeroizing::new("x".into()) }); }
+        assert!(Store::decode(&dup.encode()).is_err());
+    }
 
     #[test]
     fn capability_and_host_anyway_roundtrip_and_old_vaults_still_load() {

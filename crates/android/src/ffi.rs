@@ -25,13 +25,13 @@ fn err_json(msg: &str) -> String {
     w.finish().to_string()
 }
 
-/// `nInit(dir: String, lowMem: Boolean, torPath: String?): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
+/// `nInit(dir: String, lowMem: Boolean, torPath: String?, keepOutboxDefault: Boolean): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
 #[no_mangle]
-pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>) -> jstring {
+pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, keep_outbox: jboolean) -> jstring {
     let dir: String = match env.get_string(&dir) { Ok(s) => s.into(), Err(_) => return out(&mut env, &err_json("bad directory argument")) };
     let tor_path = if tor.is_null() { None } else { env.get_string(&tor).ok().map(|s| PathBuf::from(String::from(s))) };
     let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
-    let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path }) {
+    let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path, keep_outbox_default: keep_outbox == JNI_TRUE }) {
         Ok(b) => { let s = b.snapshot(None); *g = Some(b); s.to_string() }
         Err(e) => err_json(&e),
     };

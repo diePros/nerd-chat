@@ -67,6 +67,13 @@ class FakeBackendTest {
         assertEquals("Sam", o.forContact); assertTrue(o.link.startsWith("nerdchat:pair/")); assertEquals(12, o.code.length)
     }
 
+    @Test fun theEncryptedOutboxSwitchIsRememberedInState() {
+        val b = FakeBackend(); assertFalse(b.state.value.keepOutbox)
+        b.setKeepOutbox(true); assertTrue(b.state.value.keepOutbox)
+        b.setKeepOutbox(false); assertFalse(b.state.value.keepOutbox)
+        assertTrue(FakeBackend(keepOutbox = true).state.value.keepOutbox, "the phone's default")
+    }
+
     @Test fun modelHasNoTimestampsOrReadState() {
         val fields = listOf(Message::class, ChatSummary::class, Contact::class, AppState::class, TorOffer::class).flatMap { it.java.declaredFields.toList() }.map { it.name.lowercase() }
         assertTrue(fields.none { "time" in it || "seen" in it || "typing" in it || ("read" in it && "unread" !in it) }, "design rule: $fields")

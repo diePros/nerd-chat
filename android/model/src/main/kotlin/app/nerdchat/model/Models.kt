@@ -77,4 +77,6 @@ data class AppState(
     val alerts: List<String> = emptyList(),
     /** why the last command was refused by the bridge's guards (None: accepted) */
     val rejected: String? = null,
+    /** unconfirmed messages are kept in the encrypted vault until the contact confirms them (they survive a restart or the OS killing the app) */
+    val keepOutbox: Boolean = false,
 )

@@ -5,7 +5,7 @@
 mod book;
 mod file;
 
-pub use book::{Contact, SavedMsg, Store, MAX_CONTACTS, MAX_NAME, MAX_SAVED, MAX_SAVED_TOTAL};
+pub use book::{Contact, OutMsg, SavedMsg, Store, MAX_CONTACTS, MAX_NAME, MAX_OUTBOX, MAX_OUTBOX_TOTAL, MAX_SAVED, MAX_SAVED_TOTAL};
 pub use file::{counter_path_for, read_regular_file, shred_file, OpenInfo, VaultFile};
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +28,8 @@ pub enum StoreError {
     Cancelled,
     #[error("the saved messages are full ({MAX_SAVED} per contact, {} KiB in total): delete some first", MAX_SAVED_TOTAL / 1024)]
     SavedFull,
+    #[error("the encrypted outbox is full (50 texts per contact, 1 MiB in total) or the contact cannot receive: wait until earlier texts are confirmed")]
+    OutboxFull,
     #[error("a rollback-counter file already exists for this path: the vault may have been deleted or the path is wrong. Refusing to create a new vault that would reset it (remove the counter file yourself if this is intentional)")]
     CounterExists,
 }

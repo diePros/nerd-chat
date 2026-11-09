@@ -2,8 +2,8 @@ package app.nerdchat.model
 
 /** The two JNI calls into `libnerdchat_bridge.so` (`crates/android`). Kept behind an interface so [RustBackend] can be tested with a fake. */
 interface Native {
-    /** Open the vault directory; returns the first snapshot (a `"screen":"error"` snapshot if the directory is unusable). */
-    fun init(vaultDir: String, lowMem: Boolean, torPath: String?): String
+    /** Open the vault directory; returns the first snapshot (a `"screen":"error"` snapshot if the directory is unusable). [keepOutboxDefault]: what the encrypted outbox does until the user chooses. */
+    fun init(vaultDir: String, lowMem: Boolean, torPath: String?, keepOutboxDefault: Boolean): String
 
     /** One operation (see `crates/android/src/bridge.rs`); returns the new snapshot. [arg] is NOT wiped here, the caller does it. */
     fun call(op: String, arg: CharArray?): String
@@ -23,9 +23,9 @@ object NativeBridge : Native {
         loaded = true
     }
 
-    private external fun nInit(dir: String, lowMem: Boolean, torPath: String?): String
+    private external fun nInit(dir: String, lowMem: Boolean, torPath: String?, keepOutbox: Boolean): String
     private external fun nCall(op: String, arg: CharArray?): String
 
-    override fun init(vaultDir: String, lowMem: Boolean, torPath: String?): String = nInit(vaultDir, lowMem, torPath)
+    override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, keepOutboxDefault: Boolean): String = nInit(vaultDir, lowMem, torPath, keepOutboxDefault)
     override fun call(op: String, arg: CharArray?): String = nCall(op, arg)
 }

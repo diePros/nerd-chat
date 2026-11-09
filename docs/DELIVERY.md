@@ -61,3 +61,26 @@ The quit guard counts unconfirmed lines too.
 Tests: `engine.rs` (resend with the same id, repeat handling with and without UI confirmation, `a_text_the_ui_never_saw_is_not_confirmed...`,
 dead-connection resend, stale connection, full outbox, re-add, old-style peer, malformed frames), `proto.rs` (frames, one cell per
 short text, id consistency), `app.rs` (confirmation by id, offline warning and marks, full outbox keeps the draft).
+
+## Encrypted outbox (opt-in, key `O`; on by default in the Android app)
+**Problem.** Unconfirmed texts live in the sender's RAM, so the OS killing the app (every phone does it) or closing the terminal loses them, and you cannot write
+while offline. Session solves this with storage nodes run by strangers (`docs/COMPARISON_SESSION.md`, S1); we keep a stranger out of the loop and use the vault.
+
+**What is stored.** Only texts the contact has NOT confirmed yet: per text `mid(8) | len | text`, per contact at most 50 (the engine's `MAX_UNCONFIRMED`; a test pins
+the equality) and at most 1 MiB in the whole vault. No timestamp, no history, no received text, no confirmed text. A confirmed (or engine-refused) text is removed at once
+and the vault is written ONCE per batch of confirmations. The choice itself (`on`/`off`) is stored in the vault and beats the front end's default.
+
+**Order of operations.** Send: the text is written to the vault FIRST under the id the engine will use (`Engine::send_with_mid`); if the vault refuses (cap, write error) the
+draft stays and nothing is sent. Start: `ContactCfg::with_outbox` seeds the engine's unconfirmed queue, so the texts go out in order on the first connection, exactly like texts queued while the contact was away, and are
+confirmed under their own ids. Unlock: the kept texts show again as `(queued)` lines. Offline: with the outbox on you can still type; going offline neither warns nor marks anything
+"not confirmed" for kept texts (a text that did not fit stays RAM-only and is still warned about). Switching it OFF removes the kept texts from the vault; switching it ON keeps what is already waiting.
+
+**Format.** SBS6 (`vault flags` + a per-contact outbox) is written ONLY when the choice was made or an outbox is not empty; every other vault stays SBS5 and stays readable by older binaries.
+SBS6 is a one-way upgrade (an older binary cannot open it).
+
+**What it costs (honest).**
+- The vault file now changes whenever you send or a message is confirmed: anyone who can look at your disk sees WHEN you wrote, not what.
+- A deleted text may still sit in an old copy of the vault (flash wear levelling, backups, a copied file) until that copy is overwritten; it stays encrypted under the vault key.
+- After a restart the receiver's list of already-seen ids is gone: a text it already showed, whose confirmation was lost, can appear twice. A duplicate was chosen over a loss.
+- An older vault copy brought back would resend texts already delivered; the rollback counter exists to catch exactly that.
+

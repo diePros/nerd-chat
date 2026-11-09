@@ -7,6 +7,7 @@
   instead of dropping an old one; going offline with unconfirmed messages asks first and marks them "(NOT CONFIRMED)". The id travels inside the text frame; a peer
   announces its capabilities first, and a peer that does not (v0.1.0) gets the old plain frames, so the two versions interoperate (tested
   with the real 0.1.0 binary over Tor). Confirmations wait 1-5 s and are batched, so a reply cannot be timed. Tracker: review 24.
+- Encrypted outbox (opt-in, key `O`; the Android app turns it on by default): texts the contact has not confirmed yet are kept in the password-locked vault until they are confirmed, survive a restart, and can be written while offline. Vault format SBS6, written only when the feature is used (every other vault stays SBS5). Costs and limits: `docs/DELIVERY.md`; open findings OB-1..OB-10 in the tracker; not yet reviewed adversarially.
 - `.deb` package: `scripts/release.sh` also builds `nerd-chat_<version>_amd64.deb` (same static binary, deterministic, no maintainer scripts, `Recommends: tor`), listed in SHA256SUMS.
 - Default vault location: without `--vault`, an existing `~/.local/share/nerd-chat/nerd-chat.vault` ($XDG_DATA_HOME) is used from any
   directory, else an existing `./nerd-chat.vault`; a new vault is created there only after the user confirms the shown path (Tails gets a

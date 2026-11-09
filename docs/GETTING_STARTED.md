@@ -28,7 +28,7 @@ Type a passphrase of at least 12 characters, Enter, repeat it, Enter (takes ~4 s
 Keys work like vim: **NORMAL** mode (every key is a command) and **INSERT** mode (keys are text only, nothing typed there can trigger a command).
 - Contacts / details: Up/Down (or `j`/`k`, Tab/Shift+Tab) select, `Enter` opens the chat, `i` opens it and starts typing.
 - Commands (in the details view AND while reading a chat): `n` new contact, `e` export, `I` import (capital i), `l` listen, `c` connect,
-  `x` cancel pairing, `v` verify, `d` delete, `o` online/offline, `f` send file, `t` send text, `a`/`r` accept/decline, `s` save,
+  `x` cancel pairing, `v` verify, `d` delete, `o` online/offline, `O` encrypted outbox on/off (keeps unsent messages in the vault so they survive a restart; off by default on the desktop), `f` send file, `t` send text, `a`/`r` accept/decline, `s` save,
   `K` rotate keys, `h` host-anyway, `z` acknowledge an alert, `?` help, `q` quit.
 - In a chat: `i` or `Enter` starts typing, `Enter` sends, `Esc` leaves typing; `j`/`k`/PageUp/PageDown scroll the history, `g`/`G` oldest/newest,
   Tab/Shift+Tab switch to the next/previous contact.

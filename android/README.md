@@ -54,6 +54,8 @@ No `INTERNET` permission (yet) · `allowBackup=false` and empty backup/transfer 
 thumbnail) · clipboard copies marked sensitive · no analytics, no push, no Google services · launcher icon independent of the palette ·
 arm64-v8a + x86_64 only.
 
+- Encrypted outbox: unsent messages are kept in the vault (default ON on the phone, a switch in Settings), so they survive the OS killing the app and can be written offline. Costs are stated in the app and in `docs/DELIVERY.md`.
+
 ## Known gaps (tracked, not hidden)
 - **G1** text fields keep their content in a Kotlin `String` (cannot be wiped). `SecureField` is the single place to replace with an input
   view that feeds IME text straight into the core's zeroizing buffers. Messages shown on screen also live in the JVM heap.

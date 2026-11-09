@@ -58,6 +58,7 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     w.f_num("code_chars", app.code_chars() as i64);
     w.f_bool("privacy_locked", app.locked);
     w.f_bool("ram_only", app.is_ram_only());
+    w.f_bool("keep_outbox", app.keep_outbox());
     w.f_bool("user_offline", x.user_offline);
 
     let (online, pct, fail) = match &app.online {

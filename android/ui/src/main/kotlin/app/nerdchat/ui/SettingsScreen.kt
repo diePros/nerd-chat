@@ -23,8 +23,8 @@ import app.nerdchat.model.TorState
 
 @Composable
 fun SettingsScreen(
-    palette: Palette, mode: DarkMode, online: Boolean, tor: TorState = TorState.Off,
-    onPalette: (Palette) -> Unit, onMode: (DarkMode) -> Unit, onOnline: (Boolean) -> Unit,
+    palette: Palette, mode: DarkMode, online: Boolean, tor: TorState = TorState.Off, keepOutbox: Boolean = false,
+    onPalette: (Palette) -> Unit, onMode: (DarkMode) -> Unit, onOnline: (Boolean) -> Unit, onKeepOutbox: (Boolean) -> Unit = {},
     onLock: () -> Unit, onPurge: () -> Unit,
 ) {
     var confirmPurge by remember { mutableStateOf(false) }
@@ -51,6 +51,7 @@ fun SettingsScreen(
                 TorState.Ready -> Text("Tor is connected.", color = NerdTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
                 TorState.Off -> {}
             }
+            ToggleRow("Keep unsent messages", "A message your contact has not confirmed yet is kept in your password-locked vault and sent again until it arrives. It survives a restart and lets you write while offline. Costs: the vault file changes whenever you send or a message arrives, and an old copy may stay in flash memory.", keepOutbox, onKeepOutbox)
             InfoRow("Bridges", "Not configured. Needed where Tor is blocked (comes with the Tor integration).")
             InfoRow("Presence", "Online only while the app is open. A phone that is always on shows a daily pattern to anyone who knows your address.")
 

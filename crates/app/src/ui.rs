@@ -331,7 +331,7 @@ fn help_popup(f: &mut Frame, area: Rect) {
         "  Enter / i  open the chat, or start typing      Esc  leave typing, then the chat",
         "  j k PgUp PgDn  scroll   g / G  oldest / newest   Tab / Shift+Tab  next / previous contact",
         "  f send JPEG/PNG   t send plain text   a / r accept / decline   s save   r also discards a file",
-        "  v verify   d delete   o online/offline   K rotate keys   h host-anyway   z acknowledge alert   P answer a finished pairing",
+        "  v verify   d delete   o online/offline   O encrypted outbox on/off   K rotate keys   h host-anyway   z acknowledge alert   P answer a finished pairing",
         "",
         "Esc, Esc, Esc: typing -> normal -> details -> PRIVACY SCREEN (Enter unlocks, q quits).",
         "  The privacy screen only hides the screen: the vault stays open, anyone can press Enter.",

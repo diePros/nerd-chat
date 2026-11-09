@@ -26,11 +26,11 @@ import app.nerdchat.model.TorState
 
 /** Round avatar with the contact's initial; the colour comes from a hash of the name, so a contact keeps its colour. */
 @Composable
-fun Avatar(name: String, size: Dp = 48.dp, link: Link? = null, modifier: Modifier = Modifier, seed: Int = name.hashCode()) {
+fun Avatar(name: String, size: Dp = 48.dp, link: Link? = null, modifier: Modifier = Modifier, seed: Int = name.hashCode(), ring: Color? = null) {
     val colors = NerdTheme.colors.avatars
     val bg = colors[(seed and 0x7fffffff) % colors.size]
     Box(modifier.size(size)) {
-        Box(Modifier.size(size).clip(CircleShape).background(bg), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(size).clip(CircleShape).background(bg).then(if (ring != null) Modifier.border(1.5.dp, ring, CircleShape) else Modifier), contentAlignment = Alignment.Center) {
             Text(name.firstOrNull()?.uppercase() ?: "?", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = (size.value * 0.42f).sp)
         }
         if (link != null) {

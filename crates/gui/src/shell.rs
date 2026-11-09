@@ -194,7 +194,7 @@ impl Gui {
         if cmds.settings { self.settings_open = true; }
         if self.settings_open {
             let entry = crate::menu::user_entry_path();
-            let purge = match self.app.as_ref() { Some(app) => view::settings(ctx, app, &mut self.settings_open, &mut self.menu_hidden, entry.as_deref(), &mut self.menu_note, &mut self.purge_ok), None => false };
+            let purge = match self.app.as_mut() { Some(app) => view::settings(ctx, app, &mut self.settings_open, &mut self.menu_hidden, entry.as_deref(), &mut self.menu_note, &mut self.purge_ok), None => false };
             if purge { if let Some(app) = self.app.as_mut() { if app.handle(Key::Purge) == Action::Purge { self.wipe_and_exit(ctx, true); } } }
         }
         if cmds.panic { self.wipe_and_exit(ctx, false); }

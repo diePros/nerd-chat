@@ -537,3 +537,20 @@ No critical/high; 225 tests passed in the reviewed crates. Fixed in the commit t
 | R29-I2 | "someone used your link" alert also fires when an honest partner's circuit breaks after a well-formed message | ACCEPTED | counting is right; wording could hedge |
 
 Clipboard (owner decision 2026-11-09): enabled ONLY for the pairing link (explicit Copy button, Ctrl+V in the link field). The GUI drops every paste event and disables selectable labels, so passwords, the code, chat text and everything else stay out of it.
+
+## Review 30 - encrypted outbox (not reviewed by anyone but its author yet)
+Code: `store/src/book.rs` (SBS6, `OutMsg`, caps), `chat/src/engine.rs` (`with_outbox`, `send_with_mid`), `app/src/app.rs` (`keep_outbox`, `set_keep_outbox`, `send_compose`, event handling), bridge op `keep_outbox`.
+**This touches persistence of message text, the vault format and the offline/quit warnings: it needs the strongest adversarial review before anyone relies on it (see the stage rule above).**
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| OB-1 | the vault file changes on every send and confirmation: activity timing is visible to someone with the disk | ACCEPTED | opt-in on the desktop; documented in `docs/DELIVERY.md` and in the settings text |
+| OB-2 | a removed text may remain in older copies of the vault (flash remnants, backups) | OPEN | encrypted under the vault key; no key rotation per save. Consider re-keying the vault data key when an outbox text is confirmed |
+| OB-3 | duplicate display after a restart of the receiver whose confirmation was lost (its `seen` ring is RAM-only) | ACCEPTED | duplicate chosen over loss |
+| OB-4 | rollback of the vault resurrects confirmed texts | INFO | the rollback counter detects it; resend is deduplicated by id while the receiver remembers it |
+| OB-5 | SBS6 is a one-way upgrade | INFO | written only when the feature is used; tests: `a_vault_that_never_used_the_outbox_stays_sbs5...` |
+| OB-6 | hostile SBS6 data (counts, ids, lengths, UTF-8, outbox without a peer) | FIXED | `hostile_sbs6_blobs_are_refused`; total and per-contact caps checked on decode |
+| OB-7 | `save()` failure after the text is in memory | PARTIAL | by construction the vault write happens BEFORE the engine gets the text; on failure the draft stays and the in-memory entry is rolled back. **Not tested:** the build environment runs as root, so the permission trick the existing save-failure tests use cannot make a write fail here (those tests fail here for the same reason). Test on a normal user |
+| OB-8 | enabling the feature with more waiting texts than fit | PARTIAL | the rest stays RAM-only, the user is told, and going offline still warns about exactly those (`queued_not_kept`); no test of the 1 MiB total through the app |
+| OB-9 | each confirmation batch writes the vault and the counter once (fsync) on the poll thread | INFO | measure on a phone; a slow flash could stall the UI thread |
+| OB-10 | the Android default is ON: a phone user who never opens Settings keeps unsent texts on flash | ACCEPTED | stated in the chat banner and in Settings |
+

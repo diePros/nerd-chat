@@ -533,7 +533,7 @@ fn offer_card(ui: &mut egui::Ui, name: &str, o: &nerd_chat_app::app::TorLink, cm
 
 /// Settings window: the application-menu entry, and what the program does and does not protect (plain words).
 /// Returns true when the user confirmed a PURGE.
-pub fn settings(ctx: &egui::Context, app: &App, open: &mut bool, hidden: &mut bool, entry: Option<&std::path::Path>, note: &mut String, purge_ok: &mut bool) -> bool {
+pub fn settings(ctx: &egui::Context, app: &mut App, open: &mut bool, hidden: &mut bool, entry: Option<&std::path::Path>, note: &mut String, purge_ok: &mut bool) -> bool {
     let mut purge = false;
     egui::Window::new("Settings").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
         ui.set_min_width(460.0);
@@ -557,6 +557,11 @@ pub fn settings(ctx: &egui::Context, app: &App, open: &mut bool, hidden: &mut bo
         });
         ui.label(RichText::new("Kept in memory only, until you close the app or press panic.").color(MUTED).small());
         ui.separator();
+        ui.label(RichText::new("Unsent messages").strong());
+        let mut keep = app.keep_outbox();
+        if ui.checkbox(&mut keep, "Keep unsent messages in the encrypted vault (they survive a restart)").changed() { app.set_keep_outbox(keep); }
+        ui.label(RichText::new("Off: messages exist only in memory. On: a message the contact has not confirmed yet is kept in your password-locked vault until it is confirmed, so it survives closing the app. The vault file then changes whenever you send or a message is confirmed (visible to anyone who can see your disk), and an old copy of a removed message may stay in flash memory. Texts never carry a timestamp.").color(MUTED).small());
+        ui.separator();
         ui.label(RichText::new("Purge").strong().color(RED));
         ui.label(RichText::new("Like panic, and in addition every file this session made (your vault, saved contact files, saved received files) is overwritten and deleted. This cannot be undone.").color(MUTED).small());
         ui.checkbox(purge_ok, "I understand: my vault and these files will be destroyed");
@@ -564,7 +569,7 @@ pub fn settings(ctx: &egui::Context, app: &App, open: &mut bool, hidden: &mut bo
         ui.separator();
         ui.label(RichText::new("About").strong());
         ui.label(format!("Nerd-chat {}. Unaudited software: read SECURITY.md before you rely on it.", env!("CARGO_PKG_VERSION")));
-        ui.label(RichText::new("Messages exist only in memory. There is no screen-reader support on purpose: a screen reader would receive a copy of every message. The panic button wipes everything and exits.").color(MUTED).small());
+        ui.label(RichText::new("Messages exist only in memory unless you keep unsent ones in the encrypted outbox. There is no screen-reader support on purpose: a screen reader would receive a copy of every message. The panic button wipes everything and exits.").color(MUTED).small());
         ui.add_space(8.0);
         if ui.button("Close").clicked() { *open = false; *purge_ok = false; }
     });

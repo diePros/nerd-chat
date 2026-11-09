@@ -60,4 +60,11 @@ interface ChatBackend {
     fun confirmVerify(matches: Boolean)
 
     fun acknowledgeAlert()
+
+    /**
+     * The ENCRYPTED OUTBOX. On: a message the contact has not confirmed yet is written to the password-locked vault and sent again on every new connection
+     * until it is confirmed, so it survives a restart or the OS killing the app, and can even be typed while offline. Off: messages exist only in memory.
+     * Costs: the vault file changes whenever a message is sent or confirmed, and an old copy of a removed message may stay in flash memory.
+     */
+    fun setKeepOutbox(keep: Boolean)
 }

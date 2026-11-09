@@ -54,6 +54,9 @@ pub struct Config {
     pub(crate) host_probe_test: Option<HostProbe>,
     /// Start even though swap is active (secrets could be written to the disk by the OS). Default: refuse.
     pub allow_swap: bool,
+    /// What the encrypted outbox does until the user has chosen: the front end's default (the terminal keeps RAM-only behaviour; a phone, whose OS kills the
+    /// app at will, turns it on). The user's own choice is stored in the vault and wins.
+    pub keep_outbox_default: bool,
 }
 
 impl Config {
@@ -62,7 +65,7 @@ impl Config {
     pub fn with_test_transport(mut self, f: TransportFactory) -> Self { self.transport = Some(f); self }
 
     pub fn new(path: Option<PathBuf>, counter: Option<PathBuf>, keyfile: Option<Zeroizing<Vec<u8>>>, profile: Profile) -> Self {
-        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false }
+        Self { path, counter, keyfile, keyfile_path: None, profile, tor: TorCfg::default(), transport: None, timing: Timing::default(), can_host: true, host_probe_test: None, allow_swap: false, keep_outbox_default: false }
     }
 }
 
@@ -382,6 +385,64 @@ impl App {
     pub fn path_display(&self) -> String {
         self.cfg.path.as_ref().map_or("RAM-only".into(), |p| p.display().to_string())
     }
+    /// Is the ENCRYPTED OUTBOX on? Then texts the contact has not confirmed are kept in the vault (never a timestamp) until they are confirmed, so they survive
+    /// a restart or the OS killing the app. The user's choice (key `O`) is stored in the vault; until it is made the front end's default applies.
+    pub fn keep_outbox(&self) -> bool { self.vf.as_ref().and_then(|v| v.store.keep_outbox).unwrap_or(self.cfg.keep_outbox_default) }
+
+    /// Texts that are queued on a line but NOT in the encrypted outbox: they live in RAM only and are lost if the app ends or the engine stops.
+    fn queued_not_kept(&self) -> usize {
+        let kept: HashSet<[u8; 8]> = self.vf.as_ref().map(|v| v.store.contacts.iter().flat_map(|c| c.outbox.iter().map(|m| m.mid)).collect()).unwrap_or_default();
+        self.chats.values().flatten().filter(|x| x.mine && x.queued && !x.mid.is_some_and(|m| kept.contains(&m))).count()
+    }
+
+    pub fn set_keep_outbox(&mut self, on: bool) {
+        if self.screen != Screen::Main || self.vf.is_none() { return; }
+        let before = self.vf.as_ref().and_then(|v| v.store.keep_outbox);
+        if before == Some(on) { return; }
+        if on {
+            // keep what is waiting right now (the lines hold the text and the id), within the caps; what does not fit stays RAM-only and says so
+            let waiting: Vec<([u8; 8], [u8; 8], Zeroizing<String>)> = self.chats.iter().flat_map(|(id, l)| l.iter().filter(|x| x.mine && x.queued).filter_map(move |x| x.mid.map(|m| (*id, m, x.text.clone())))).collect();
+            let v = self.vf.as_mut().expect("checked");
+            v.store.keep_outbox = Some(true);
+            let mut refused = 0;
+            for (cid, mid, text) in waiting {
+                match v.store.contacts.iter().position(|c| c.id == cid) {
+                    Some(i) if v.store.queue_outbox(i, mid, &text).is_ok() => {}
+                    _ => refused += 1,
+                }
+            }
+            if !self.save() { let v = self.vf.as_mut().expect("checked"); v.store.clear_outbox(); v.store.keep_outbox = before; return; }
+            if refused > 0 { self.err(format!("Encrypted outbox ON, but {refused} waiting message(s) did not fit and stay in RAM only.")); }
+            else { self.ok("Encrypted outbox ON: unsent messages are kept in the vault until the contact confirms them, and survive a restart."); }
+        } else {
+            // take the texts out first: if the vault cannot be written they come back and nothing changed
+            let v = self.vf.as_mut().expect("checked");
+            let taken: Vec<Vec<nerd_chat_store::OutMsg>> = v.store.contacts.iter_mut().map(|c| std::mem::take(&mut c.outbox)).collect();
+            v.store.keep_outbox = Some(false);
+            if !self.save() {
+                let v = self.vf.as_mut().expect("checked");
+                for (c, o) in v.store.contacts.iter_mut().zip(taken) { c.outbox = o; }
+                v.store.keep_outbox = before;
+                return;
+            }
+            drop(taken); // zeroized
+            // without the engine the RAM copies are gone too: those lines may or may not have arrived (the same words as going offline)
+            if self.engine.is_none() { for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unconfirmed = true; } }
+            self.ok("Encrypted outbox OFF: messages are RAM-only again and the kept ones were removed from the vault.");
+        }
+    }
+
+    fn toggle_keep_outbox(&mut self) { let on = !self.keep_outbox(); self.set_keep_outbox(on); }
+
+    /// After unlocking: show the texts the vault kept as "(queued)" lines, so the user sees what is still waiting.
+    fn seed_outbox_lines(&mut self) {
+        let kept: Vec<([u8; 8], Vec<([u8; 8], Zeroizing<String>)>)> = self.vf.as_ref().map(|v| v.store.contacts.iter().filter(|c| !c.outbox.is_empty())
+            .map(|c| (c.id, c.outbox.iter().map(|m| (m.mid, m.text.clone())).collect())).collect()).unwrap_or_default();
+        for (id, msgs) in kept {
+            for (mid, text) in msgs { self.push_line(id, ChatLine { mine: true, text, queued: true, saved: false, unsent: false, unconfirmed: false, mid: Some(mid) }); }
+        }
+    }
+
     pub fn contacts_len(&self) -> usize { self.vf.as_ref().map_or(0, |v| v.store.contacts.len()) }
     /// Borrowed rows: no per-frame copies of contact names.
     pub fn contact_rows(&self) -> Vec<(&str, Trust, bool, bool, u32)> {
@@ -678,6 +739,7 @@ impl App {
         match msg {
             KdfMsg::Opened(Ok((vf, info))) => {
                 self.vf = Some(vf);
+                self.seed_outbox_lines();
                 self.screen = Screen::Main;
                 self.failures = 0;
                 if info.rollback_unchecked {
@@ -800,6 +862,7 @@ impl App {
             Key::Char('J') => if self.require_no_peer() { self.open_prompt(Prompt::JoinLink, "") },
             Key::Char('x') => self.cancel_pairing(),
             Key::Char('o') => self.toggle_online(),
+            Key::Char('O') => self.toggle_keep_outbox(),
             Key::Char('f') => if self.sel_linked() { self.open_prompt(Prompt::SendFile, "") },
             Key::Char('t') => if self.sel_linked() { self.open_prompt(Prompt::SendText, "") },
             Key::Char('a') => self.reply_offer(true),
@@ -818,7 +881,7 @@ impl App {
     /// What quitting would throw away, as a short list for the warning (unconfirmed lines, files in RAM
     /// or being cleaned, a pairing in progress/unanswered, a half-written draft). Conservative: it says "may".
     fn at_risk(&self) -> Vec<String> {
-        let queued: usize = self.chats.values().map(|l| l.iter().filter(|x| x.mine && x.queued).count()).sum();
+        let queued = self.queued_not_kept();
         let files = self.inbox.len() + self.offers.len() + self.accepted.len() + usize::from(self.prep_rx.is_some());
         let mut v = Vec::new();
         if queued > 0 { v.push(format!("{queued} unconfirmed message(s)")); }
@@ -1567,7 +1630,7 @@ impl App {
             Online::Stopping => self.err("Still shutting down; wait a moment."),
             Online::Online => {
                 // going offline throws away the engine's copies of texts the contact has not confirmed: say so first (second `o` goes)
-                let open: usize = self.chats.values().map(|l| l.iter().filter(|x| x.mine && x.queued).count()).sum();
+                let open = self.queued_not_kept(); // texts in the encrypted outbox are NOT lost by going offline
                 if open > 0 && !self.offline_armed {
                     self.offline_armed = true;
                     return self.err(format!("{open} message(s) are not confirmed by the contact yet: going offline may lose them. Press o again to go offline anyway, any other key to stay."));
@@ -1618,8 +1681,10 @@ impl App {
     /// Everything the engine needs for a contact, incl. an unfinished key rotation (both directions).
     fn cfg_of(&self, c: &nerd_chat_store::Contact) -> Option<ContactCfg> {
         let p = c.peer.as_ref()?;
-        Some(ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.our_cap(c), c.host_anyway)
-            .with_rotation(&c.identity, c.next_transport.as_deref(), c.peer_old))
+        let cfg = ContactCfg::new(c.id, &c.identity, p.clone()).with_caps(self.our_cap(c), c.host_anyway)
+            .with_rotation(&c.identity, c.next_transport.as_deref(), c.peer_old);
+        // texts kept from an earlier run start out as the engine's own unconfirmed queue
+        Some(if self.keep_outbox() { cfg.with_outbox(c.outbox.iter().map(|m| (m.mid, m.text.clone())).collect()) } else { cfg })
     }
 
     /// A peer bundle must not reuse an onion key that another contact already uses (ours or theirs): a crafted bundle
@@ -1648,25 +1713,39 @@ impl App {
         self.compose.clear();
         self.scroll = 0;
         self.max_scroll.set(None);
-        if self.online == Online::Offline { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type; messages are sent only while online."); }
+        if self.online == Online::Offline {
+            if self.keep_outbox() { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type: messages are kept in your encrypted outbox and sent when you are online."); }
+            else { self.ok("You are OFFLINE: press Esc, then o to go online. You can still type; messages are sent only while online."); }
+        }
     }
 
     fn send_compose(&mut self) {
         let Some(id) = self.chat_id() else { return };
         if self.compose.is_empty() { return; }
-        if self.engine.is_none() { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
+        let keep = self.keep_outbox();
+        if self.engine.is_none() && !keep { return self.err("You are offline: press Esc for normal mode, then o. (Nothing was sent.)"); }
         // refuse BEFORE taking the draft, so nothing is lost: the engine keeps at most MAX_UNCONFIRMED unconfirmed texts per contact
         let open = self.chats.get(&id).map_or(0, |l| l.iter().filter(|x| x.mine && x.queued).count());
         if open >= nerd_chat_chat::engine::MAX_UNCONFIRMED { return self.err("Outbox full: the contact has not confirmed your earlier messages yet. Your draft is kept; try again when they come online."); }
+        // the id is made HERE so that the vault copy and the engine's copy are the same message
+        let mid = nerd_chat_chat::proto::new_msg_id();
+        if keep {
+            // write it into the encrypted outbox FIRST: if the vault cannot take it, the draft stays and nothing is sent
+            let sel = self.sel;
+            let queued = match self.vf.as_mut() { Some(v) => v.store.queue_outbox(sel, mid, self.compose.as_str()), None => return };
+            if let Err(e) = queued { return self.err(format!("Cannot keep the message: {e}. Your draft is kept.")); }
+            if !self.save() { if let Some(v) = self.vf.as_mut() { v.store.outbox_done(id, mid); } return; } // `save` said why; the draft is kept
+        }
         let text = self.compose.take_string();
         let linked = self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
         let shown = Zeroizing::new((*text).clone());
-        let mid = self.engine.as_ref().map(|e| e.send(id, text));
+        if let Some(e) = &self.engine { e.send_with_mid(id, mid, text); }
         // "(queued)" = not yet CONFIRMED by the contact's app (connected or not): the engine resends it on every new connection
-        self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false, unconfirmed: false, mid });
+        self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false, unconfirmed: false, mid: Some(mid) });
         self.scroll = 0; // sending jumps to the newest line
-        if !linked { self.ok("Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)."); }
+        if self.engine.is_none() { self.ok("Saved in your encrypted outbox. It is sent when you are online and the contact is reachable."); }
+        else if !linked { self.ok(if keep { "Peer is not connected: message kept in your encrypted outbox, delivered when they come online." } else { "Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)." }); }
     }
 
     fn push_line(&mut self, id: [u8; 8], l: ChatLine) {
@@ -1715,7 +1794,9 @@ impl App {
                 Err(TryRecvError::Empty) => self.stop_rx = Some(rx),
                 _ => {
                     self.online = Online::Offline;
-                    for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unconfirmed = true; } // the engine's copy is gone: they may or may not have arrived
+                    // the engine's copy is gone: what is not in the encrypted outbox may or may not have arrived (what IS kept is sent again next time)
+                    let kept: HashSet<[u8; 8]> = self.vf.as_ref().map(|v| v.store.contacts.iter().flat_map(|c| c.outbox.iter().map(|m| m.mid)).collect()).unwrap_or_default();
+                    for x in self.chats.values_mut().flatten().filter(|x| x.queued && !x.mid.is_some_and(|m| kept.contains(&m))) { x.queued = false; x.unconfirmed = true; }
                     self.ok("Offline. Connections closed, onion services and credentials removed.");
                 }
             }
@@ -1734,6 +1815,7 @@ impl App {
             if keep { self.start_rx = Some(rx); }
         }
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
+        let mut outbox_changed = false;
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
             let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Delivered { id, .. } | Event::Unsent { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
@@ -1749,9 +1831,15 @@ impl App {
                     if !(self.screen == Screen::Main && self.pane == Pane::Chat && self.sel_id() == Some(id)) { *self.unread.entry(id).or_insert(0) += 1; }
                 }
                 // the contact's app confirmed exactly this text (found by its id: order, trimming and refusals cannot mislead us)
-                Event::Delivered { id, mid } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; },
+                Event::Delivered { id, mid } => {
+                    if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; }
+                    outbox_changed |= self.vf.as_mut().is_some_and(|v| v.store.outbox_done(id, mid)); // confirmed: the kept copy goes (wiped)
+                }
                 // the engine refused exactly this text: it was NOT sent
-                Event::Unsent { id, mid } => if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; x.unsent = true; },
+                Event::Unsent { id, mid } => {
+                    if let Some(x) = self.chats.get_mut(&id).and_then(|l| l.iter_mut().find(|x| x.mine && x.queued && x.mid == Some(mid))) { x.queued = false; x.unsent = true; }
+                    outbox_changed |= self.vf.as_mut().is_some_and(|v| v.store.outbox_done(id, mid)); // refused: it will never be sent, so it must not be kept
+                }
                 Event::Rotate { id, kind, onion, auth } => self.on_rotate(id, kind, onion, auth),
                 Event::Notice { id, text, alert } => {
                     let t = if alert { self.record_alert(id, &text) } else { text.chars().take(300).collect() };
@@ -1776,6 +1864,8 @@ impl App {
                 Event::FileSent { .. } => self.status = "File delivered.".into(),
             }
         }
+        // one vault write for every confirmation of this poll (a batched ack names many texts)
+        if outbox_changed { let _ = self.save(); }
     }
 
     /// The worker is done (or gone): forget its handles and the code/address line.
@@ -3694,5 +3784,182 @@ mod tests {
         tor_join(&mut b, &ghost, "1234567890");
         assert!(pump_until(&mut [&mut b], |x| x[0].pair_ctl.is_none()), "{}", b.status);
         assert!(b.error && b.status.contains("Could not reach your partner"), "{}", b.status);
+    }
+
+    // ---------------------------------------------------------------- the encrypted outbox
+
+    fn reopen_net_app(dir: &std::path::Path, name: &str, net: &nerd_chat_chat::MemNet) -> App {
+        let mut c = cfg(Some(dir.join(name)));
+        let net = net.clone();
+        c.transport = Some(std::sync::Arc::new(move |_p: &mut dyn FnMut(u8)| Ok(Box::new(net.transport()) as Box<dyn Transport>)));
+        c.timing = fast_timing();
+        let mut a = App::new(c);
+        assert_eq!(a.screen, Screen::Unlock, "the vault exists");
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert_eq!(a.screen, Screen::Main, "{}", a.status);
+        a
+    }
+    fn kept(a: &App) -> Vec<String> { a.vf.as_ref().unwrap().store.contacts[0].outbox.iter().map(|m| m.text.to_string()).collect() }
+    fn say_in_chat(a: &mut App, text: &str) { a.handle(Key::Char('i')); type_str(a, text); a.handle(Key::Enter); }
+
+    #[test]
+    fn the_engine_and_the_vault_agree_on_how_many_unconfirmed_texts_fit() {
+        assert_eq!(nerd_chat_store::MAX_OUTBOX, nerd_chat_chat::engine::MAX_UNCONFIRMED);
+    }
+
+    #[test]
+    fn the_outbox_is_off_by_default_and_the_ram_only_behaviour_is_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        assert!(!a.keep_outbox());
+        a.handle(Key::Enter); a.handle(Key::Char('i')); type_str(&mut a, "offline text"); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("offline") && a.chat_lines().is_empty(), "refused as before: {}", a.status);
+        a.handle(Key::Esc); a.handle(Key::Esc);
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        a.handle(Key::Enter); say_in_chat(&mut a, "ram only");
+        assert!(kept(&a).is_empty(), "nothing is written to the vault while the feature is off");
+        assert_eq!(a.vf.as_ref().unwrap().store.keep_outbox, None, "an untouched vault stays in the old format");
+    }
+
+    #[test]
+    fn a_text_typed_offline_is_kept_survives_a_restart_and_is_delivered_when_both_are_online() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, mut b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        assert!(a.keep_outbox() && !a.error, "{}", a.status);
+        // offline: the text is accepted and written to the vault
+        a.handle(Key::Enter); say_in_chat(&mut a, "see you thursday");
+        assert!(!a.error && a.status.contains("encrypted outbox"), "{}", a.status);
+        assert!(a.chat_lines()[0].queued && kept(&a) == ["see you thursday"]);
+        // the app is killed: nothing but the vault file is left
+        drop(a);
+        let mut a = reopen_net_app(d.path(), "a.vault", &net);
+        assert!(a.keep_outbox(), "the choice survived");
+        assert_eq!(kept(&a), ["see you thursday"], "the text survived");
+        a.handle(Key::Enter);
+        let l = &a.chat_lines()[0];
+        assert!(l.mine && l.queued && &*l.text == "see you thursday", "shown again as (queued)");
+        // both come online: the kept text is sent and confirmed, and then it is gone from the vault
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "see you thursday"))), "the contact received it");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "and confirmed it");
+        assert!(kept(&a).is_empty(), "a confirmed text is removed from the vault");
+        drop(a);
+        let a = reopen_net_app(d.path(), "a.vault", &net);
+        assert!(kept(&a).is_empty() && a.chats.values().all(|l| l.is_empty()), "the removal was written");
+    }
+
+    #[test]
+    fn a_text_is_kept_before_it_is_confirmed_and_removed_after() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        a.handle(Key::Enter); say_in_chat(&mut a, "in flight");
+        assert_eq!(kept(&a), ["in flight"], "written to the vault the moment it is sent");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued));
+        assert!(kept(&a).is_empty());
+    }
+
+    #[test]
+    fn going_offline_with_a_kept_outbox_neither_warns_nor_loses_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Enter); say_in_chat(&mut a, "still waiting");
+        assert!(a.at_risk().is_empty(), "quitting loses nothing: it is in the vault");
+        a.handle(Key::Esc); a.handle(Key::Char('o'));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline), "one press is enough: nothing to warn about");
+        let l = &a.chat_lines()[0];
+        assert!(l.queued && !l.unconfirmed, "it will be sent again next time");
+        assert_eq!(kept(&a), ["still waiting"]);
+    }
+
+    #[test]
+    fn a_text_that_did_not_fit_the_outbox_is_still_reported_as_lost_when_going_offline() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Enter); say_in_chat(&mut a, "ram only line");                 // feature still off: RAM only
+        a.handle(Key::Esc);
+        for i in 0..nerd_chat_store::MAX_OUTBOX { a.vf.as_mut().unwrap().store.queue_outbox(0, [i as u8 + 1; 8], "filler").unwrap(); } // the vault outbox is full
+        a.handle(Key::Char('O'));
+        assert!(a.error && a.status.contains("did not fit"), "it says so: {}", a.status);
+        assert_eq!(a.queued_not_kept(), 1, "the line is not in the vault");
+        a.handle(Key::Char('o')); assert!(a.status.contains("not confirmed"), "going offline still warns: {}", a.status);
+    }
+
+    #[test]
+    fn switching_the_outbox_off_removes_the_kept_texts_and_the_choice_is_remembered() {
+        let d = tempfile::tempdir().unwrap();
+        let (net, mut a, _b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        a.handle(Key::Enter); say_in_chat(&mut a, "temporary"); a.handle(Key::Esc);
+        assert_eq!(kept(&a), ["temporary"]);
+        a.handle(Key::Char('O'));
+        assert!(!a.keep_outbox() && kept(&a).is_empty() && !a.error, "{}", a.status);
+        assert!(a.chat_lines().iter().all(|l| !l.queued && l.unconfirmed), "offline: the copy is gone, the line says so");
+        drop(a);
+        let a = reopen_net_app(d.path(), "a.vault", &net);
+        assert!(!a.keep_outbox() && kept(&a).is_empty() && a.chats.values().all(|l| l.is_empty()), "nothing came back");
+        assert_eq!(a.vf.as_ref().unwrap().store.keep_outbox, Some(false));
+    }
+
+    #[test]
+    fn switching_the_outbox_on_keeps_what_is_already_waiting() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
+        a.handle(Key::Enter); say_in_chat(&mut a, "already queued"); a.handle(Key::Esc);
+        assert!(kept(&a).is_empty());
+        a.handle(Key::Char('O'));
+        assert_eq!(kept(&a), ["already queued"], "the waiting text moved into the vault under the SAME id");
+        let mid = a.vf.as_ref().unwrap().store.contacts[0].outbox[0].mid;
+        assert_eq!(a.chats.values().flatten().find(|l| l.queued).and_then(|l| l.mid), Some(mid));
+        a.handle(Key::Char('o')); assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Offline), "no warning: it is kept");
+    }
+
+    #[test]
+    fn a_full_vault_outbox_refuses_the_text_keeps_the_draft_and_sends_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, _b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        for i in 0..nerd_chat_store::MAX_OUTBOX { a.vf.as_mut().unwrap().store.queue_outbox(0, [i as u8 + 1; 8], "filler").unwrap(); }
+        a.handle(Key::Enter); a.handle(Key::Char('i')); type_str(&mut a, "one too many"); a.handle(Key::Enter);
+        assert!(a.error && a.status.contains("Cannot keep the message") && a.status.contains("draft is kept"), "{}", a.status);
+        assert_eq!(a.compose_text(), "one too many", "the draft is still there");
+        assert!(a.chat_lines().is_empty(), "no line, nothing sent");
+    }
+
+    #[test]
+    fn the_front_ends_default_applies_until_the_user_chooses_and_then_the_choice_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(Some(d.path().join("p.vault")));
+        c.keep_outbox_default = true;
+        let mut a = open_app(c);
+        assert!(a.keep_outbox() && a.vf.as_ref().unwrap().store.keep_outbox.is_none(), "default on, no choice stored");
+        a.handle(Key::Char('O'));
+        assert!(!a.keep_outbox(), "the user switched it off");
+        drop(a);
+        let mut c = cfg(Some(d.path().join("p.vault"))); c.keep_outbox_default = true;
+        let mut a = App::new(c);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert!(!a.keep_outbox(), "the stored choice beats the default");
+    }
+
+    #[test]
+    fn a_vault_the_outbox_never_touched_opens_with_the_default_and_no_stored_choice() {
+        // (that such a vault is still written as SBS5, readable by older binaries, is pinned in the store tests)
+        let d = tempfile::tempdir().unwrap();
+        let (net, a, _b) = linked_pair(d.path());
+        drop(a);
+        let a = reopen_net_app(d.path(), "a.vault", &net);
+        assert!(!a.keep_outbox() && a.vf.as_ref().unwrap().store.keep_outbox.is_none());
     }
 }

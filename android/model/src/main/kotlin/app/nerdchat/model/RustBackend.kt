@@ -10,13 +10,13 @@ import java.util.concurrent.Executors
  * (the key derivation, Tor start, incoming messages and confirmations all arrive by polling) and every answer replaces [state].
  */
 class RustBackend(
-    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?,
+    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, keepOutboxDefault: Boolean,
     private val pollMillis: Long = 250, private val pollMillisBusy: Long = 80,
 ) : ChatBackend {
     private val thread = Executors.newSingleThreadExecutor { Thread(it, "nerdchat-core").apply { isDaemon = true } }
     private val dispatcher = thread.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
-    private val s = MutableStateFlow(Snapshot.parse(native.init(vaultDir, lowMem, torPath)))
+    private val s = MutableStateFlow(Snapshot.parse(native.init(vaultDir, lowMem, torPath, keepOutboxDefault)))
     override val state: StateFlow<AppState> = s
 
     @Volatile private var closed = false
@@ -63,6 +63,7 @@ class RustBackend(
     override fun startVerify(contactId: Int) = op("select", text(contactId.toString()), "cmd" to text("v"))
     override fun confirmVerify(matches: Boolean) = op("verify", text(if (matches) "1" else "0"))
     override fun acknowledgeAlert() = op("ack_alert")
+    override fun setKeepOutbox(keep: Boolean) = op("keep_outbox", text(if (keep) "1" else "0"))
 
     /** Stop polling (tests, process end). The core itself ends with the process. */
     fun close() { closed = true; scope.cancel(); thread.shutdown() }

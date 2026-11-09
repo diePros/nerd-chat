@@ -31,6 +31,7 @@ class NerdChatApp : Application() {
         val lowMem = mem.totalMem < 6L * 1024 * 1024 * 1024
         // Tor ships as libtor.so in the native library directory (the only place Android 10+ allows executing from); not bundled yet
         val tor = File(applicationInfo.nativeLibraryDir, "libtor.so").takeIf { it.canExecute() }?.path
-        return RustBackend(NativeBridge, dir.path, lowMem, tor)
+        // Encrypted outbox ON by default on the phone: the OS kills the app at will, and the contact is rarely online at the same moment. The user can switch it off in Settings.
+        return RustBackend(NativeBridge, dir.path, lowMem, tor, keepOutboxDefault = true)
     }
 }

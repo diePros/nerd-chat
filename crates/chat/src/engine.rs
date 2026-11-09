@@ -93,10 +93,19 @@ pub struct ContactCfg {
     next: Option<Zeroizing<Vec<u8>>>,
     /// The peer's previous (onion, auth): its old auth key stays authorized on our hosted service until its rotation is done.
     peer_old: Option<([u8; 32], [u8; 32])>,
+    /// Texts the contact has not confirmed that were kept from an earlier run (the encrypted outbox): they start out as `unacked`, so they are
+    /// written (again) on the first connection exactly like texts queued while the contact was away.
+    outbox: Vec<(proto::MsgId, Zeroizing<String>)>,
 }
 
 impl ContactCfg {
-    pub fn new(id: [u8; 8], identity: &ContactIdentity, peer: Bundle) -> Self { Self { id, secret: identity.secret_bytes(), peer, our_can_host: true, host_anyway: false, next: None, peer_old: None } }
+    pub fn new(id: [u8; 8], identity: &ContactIdentity, peer: Bundle) -> Self { Self { id, secret: identity.secret_bytes(), peer, our_can_host: true, host_anyway: false, next: None, peer_old: None, outbox: Vec::new() } }
+    /// Unconfirmed texts from an earlier run (oldest first). At most `MAX_UNCONFIRMED` are taken, each must be a valid text; a re-add of a
+    /// contact the engine already serves keeps ITS queue instead (it is the newer one).
+    pub fn with_outbox(mut self, texts: Vec<(proto::MsgId, Zeroizing<String>)>) -> Self {
+        self.outbox = texts.into_iter().filter(|(_, t)| !t.is_empty() && t.len() <= proto::MAX_TEXT_BYTES).take(MAX_UNCONFIRMED).collect();
+        self
+    }
     /// `our_can_host`: whether OUR Tor can host (what we put in our bundle). `host_anyway`: the user's choice to host for this
     /// contact even when we would only dial (e.g. the contact flipped because it cannot host although its bundle says it can).
     /// Key rotation state from the vault: `next` = our proposed transport secret, `peer_old` = the peer's previous keys.
@@ -199,8 +208,14 @@ impl Engine {
     /// line (the id is made here, on the caller's thread).
     pub fn send(&self, id: [u8; 8], text: Zeroizing<String>) -> proto::MsgId {
         let mid = proto::new_msg_id();
-        let _ = self.tx.send(In::Cmd(Command::Send { id, mid, text }));
+        self.send_with_mid(id, mid, text);
         mid
+    }
+
+    /// Like [`send`](Self::send) with an id the caller made: the app writes the text into the encrypted outbox UNDER that id before it hands
+    /// the text over, so a later `Delivered`/`Unsent` finds the stored copy too.
+    pub fn send_with_mid(&self, id: [u8; 8], mid: proto::MsgId, text: Zeroizing<String>) {
+        let _ = self.tx.send(In::Cmd(Command::Send { id, mid, text }));
     }
 
     /// The UI holds the text of `Event::Message { mid: Some(mid), .. }`: tell the sender so. NEVER call it before the text is safely in
@@ -409,7 +424,7 @@ impl Core {
             }
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: carried, seen: carried_seen, peer_mode: PeerMode::Unknown, up_at: Instant::now(), dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: if carried.is_empty() { cfg.outbox.into_iter().collect() } else { carried }, seen: carried_seen, peer_mode: PeerMode::Unknown, up_at: Instant::now(), dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -1208,6 +1223,41 @@ mod tests {
         let (el, ed) = (start(&net, &l, &db, ID), start(&net, &d, &lb, ID));
         assert!(connected(&el) && connected(&ed));
         (el, ed)
+    }
+
+    #[test]
+    fn texts_kept_from_an_earlier_run_are_delivered_in_order_and_confirmed_under_their_own_ids() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let (m1, m2) = ([0x11u8; 8], [0x22u8; 8]);
+        // the sender "restarts" with two unconfirmed texts from the encrypted outbox; the contact is not even online yet
+        let seeded = ContactCfg::new(ID, &d, lb.clone()).with_outbox(vec![(m1, Zeroizing::new("kept one".into())), (m2, Zeroizing::new("kept two".into()))]);
+        let ed = Engine::start(Box::new(net.transport()), vec![seeded], fast());
+        let el = start(&net, &l, &db, ID);
+        assert!(connected(&el) && connected(&ed));
+        assert!(got(&el, "kept one") && got(&el, "kept two"), "both arrive, in order, as soon as the contact is there");
+        let mut delivered = vec![];
+        assert!(wait(&ed, |e| if let Event::Delivered { mid, .. } = e { delivered.push(*mid); delivered.len() == 2 } else { false }), "the sender hears about both");
+        assert_eq!(delivered, vec![m1, m2], "confirmed under the ids the outbox stored, so the stored copies can be removed");
+    }
+
+    #[test]
+    fn a_seeded_outbox_is_bounded_and_invalid_texts_are_dropped() {
+        let ids: Vec<(proto::MsgId, Zeroizing<String>)> = (0..MAX_UNCONFIRMED + 7).map(|i| ([i as u8; 8], Zeroizing::new(format!("t{i}")))).collect();
+        let (a, _) = ordered();
+        let cfg = ContactCfg::new(ID, &a.0, a.1.clone()).with_outbox(ids);
+        assert_eq!(cfg.outbox.len(), MAX_UNCONFIRMED, "never more than the engine would hold");
+        let cfg = ContactCfg::new(ID, &a.0, a.1.clone()).with_outbox(vec![([1; 8], Zeroizing::new(String::new())), ([2; 8], Zeroizing::new("x".repeat(proto::MAX_TEXT_BYTES + 1))), ([3; 8], Zeroizing::new("ok".into()))]);
+        assert_eq!(cfg.outbox.len(), 1, "empty and over-long texts are dropped");
+    }
+
+    #[test]
+    fn a_caller_chosen_message_id_is_the_one_in_the_events() {
+        let (el, ed) = pair();
+        let mid = [0x5Au8; 8];
+        ed.send_with_mid(ID, mid, Zeroizing::new("with my id".into()));
+        assert!(got(&el, "with my id"));
+        assert!(wait(&ed, |e| matches!(e, Event::Delivered { mid: m, .. } if *m == mid)));
     }
 
     fn offer_xid(e: &Engine) -> (file::Xid, u32) {
