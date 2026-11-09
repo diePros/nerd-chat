@@ -504,112 +504,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sine-loco-chat"
-version = "0.1.0"
-dependencies = [
- "blake2 0.11.0",
- "getrandom 0.3.4",
- "sine-loco-core",
- "sine-loco-net",
- "sine-loco-strip",
- "zeroize",
-]
-
-[[package]]
-name = "sine-loco-core"
-version = "0.1.0"
-dependencies = [
- "blake2 0.11.0",
- "ed25519-dalek",
- "getrandom 0.3.4",
- "ml-kem",
- "sha2 0.11.1",
- "sha3",
- "snow",
- "thiserror",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "sine-loco-exchange"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake2 0.11.0",
- "chacha20poly1305",
- "curve25519-dalek 4.1.3",
- "getrandom 0.3.4",
- "sine-loco-core",
- "sine-loco-net",
- "spake2",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "sine-loco-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "sine-loco-chat",
- "sine-loco-core",
- "sine-loco-exchange",
- "sine-loco-net",
- "sine-loco-store",
- "sine-loco-strip",
-]
-
-[[package]]
-name = "sine-loco-net"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake2 0.11.0",
- "getrandom 0.3.4",
- "hmac 0.13.0",
- "libc",
- "sine-loco-core",
- "rustix",
- "sha2 0.11.1",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "sine-loco-store"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
- "sine-loco-core",
- "sine-loco-vault",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "sine-loco-strip"
-version = "0.1.0"
-dependencies = [
- "sine-loco-core",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "sine-loco-vault"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "blake2 0.11.0",
- "chacha20poly1305",
- "rand_core 0.6.4",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -784,6 +678,113 @@ name = "signature"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+
+[[package]]
+name = "sine-loco-chat"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.11.0",
+ "getrandom 0.3.4",
+ "sine-loco-core",
+ "sine-loco-net",
+ "sine-loco-strip",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-core"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.11.0",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "ml-kem",
+ "sha2 0.11.1",
+ "sha3",
+ "snow",
+ "thiserror",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-exchange"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake2 0.11.0",
+ "chacha20poly1305",
+ "curve25519-dalek 4.1.3",
+ "getrandom 0.3.4",
+ "sine-loco-core",
+ "sine-loco-net",
+ "spake2",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "sine-loco-chat",
+ "sine-loco-core",
+ "sine-loco-exchange",
+ "sine-loco-net",
+ "sine-loco-store",
+ "sine-loco-strip",
+]
+
+[[package]]
+name = "sine-loco-net"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake2 0.11.0",
+ "getrandom 0.3.4",
+ "hmac 0.13.0",
+ "libc",
+ "rustix",
+ "sha2 0.11.1",
+ "sine-loco-core",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-store"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.3.4",
+ "libc",
+ "sine-loco-core",
+ "sine-loco-vault",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-strip"
+version = "0.1.0"
+dependencies = [
+ "sine-loco-core",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-vault"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "blake2 0.11.0",
+ "chacha20poly1305",
+ "rand_core 0.6.4",
+ "thiserror",
+ "zeroize",
+]
 
 [[package]]
 name = "snow"
