@@ -319,7 +319,8 @@ impl Dialer {
         if cancel.is_cancelled() { return Err(socks::SocksError::Io("cancelled".into())); }
         let mut s = open(&self.socks, Duration::from_secs(10)).map_err(|e| socks::SocksError::Io(e.to_string()))?;
         cancel.register(&*s);
-        s.set_timeout(Some(Duration::from_secs(90))).map_err(|e| socks::SocksError::Io(e.to_string()))?;
+        // descriptor fetch + introduction + rendezvous through fresh circuits can take minutes (contact dials allow 120 s too)
+        s.set_timeout(Some(Duration::from_secs(170))).map_err(|e| socks::SocksError::Io(e.to_string()))?;
         let pass: String = isolation.iter().map(|b| format!("{b:02x}")).collect();
         socks::connect(&mut s, &format!("{id}.onion"), VIRT_PORT, Some((self.user.as_bytes(), pass.as_bytes())))?;
         if cancel.is_cancelled() { return Err(socks::SocksError::Io("cancelled".into())); }

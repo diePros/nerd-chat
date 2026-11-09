@@ -46,7 +46,7 @@ fn pairing_over_the_real_tor_network_through_the_screens() {
     b.handle(Key::Char('J')); typed(&mut b, &link); b.handle(Key::Enter);
     typed(&mut b, &code); b.handle(Key::Enter);
     let finished = |x: &[&mut App]| x.iter().all(|a| a.alerts.iter().any(|(t, _)| t.contains("Pairing finished")));
-    assert!(pump(&mut [&mut a, &mut b], 300, finished), "pairing did not finish: {} / {}", a.status, b.status);
+    assert!(pump(&mut [&mut a, &mut b], 420, finished), "pairing did not finish: {} / {}", a.status, b.status);
     eprintln!("paired after {:?}", start.elapsed());
     a.handle(Key::Char('P')); b.handle(Key::Char('P'));
     typed(&mut a, "y"); a.handle(Key::Enter); typed(&mut b, "y"); b.handle(Key::Enter);

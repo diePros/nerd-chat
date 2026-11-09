@@ -219,6 +219,7 @@ fn tor_join_job(dial: PairDialFn, tok: &CancelToken, id: &str, join: PairingJoin
             Err(PairDialError::Unreachable) => { fail("Could not reach your partner through Tor: their pairing is closed or not ready, or Tor is busy. Ask for a new link and try again."); return Err(ExchangeError::Io) }
             Err(PairDialError::Refused) => { fail("Your partner's pairing is already closed (the link was used once). Ask for a new link."); return Err(ExchangeError::Io) }
             Err(PairDialError::Cancelled) => return Err(ExchangeError::Io),
+            Err(PairDialError::Other(m)) if m.contains("os error 11") || m.contains("timed out") => { fail("Tor did not answer in time. The link may not be ready yet, or Tor is slow right now. Ask for a new link and try again."); return Err(ExchangeError::Io) }
             Err(PairDialError::Other(m)) => { fail(&format!("Could not connect through Tor: {m}")); return Err(ExchangeError::Io) }
         }
     };
