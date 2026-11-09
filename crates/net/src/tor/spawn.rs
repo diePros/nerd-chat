@@ -93,25 +93,20 @@ pub fn kill_spawned() {
     }
 }
 
-/// Tell every tor WE spawned whether its network may be used (`SETCONF DisableNetwork=0|1`), over a FRESH control connection (the engine owns its own, and tor accepts several).
-/// Returns how many tors were told. Used when the phone's network goes away or comes back: with the network disabled tor keeps its circuits' state and, above all, does not mark its
-/// guards unreachable and move on to more of them (the real privacy cost of an unstable network), nor burn battery on doomed attempts. Fails per tor, never panics.
-pub fn set_network(enabled: bool) -> Result<usize, TorError> {
-    let targets: Vec<PathBuf> = LIVE.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, d)| d.clone()).collect();
-    let mut told = 0;
-    let mut last_err = None;
-    for dir in targets {
-        let r = (|| -> Result<(), TorError> {
-            let (stream, _) = super::open_control(&Addr::Unix(dir.join("ctl")), Duration::from_secs(5))?;
-            let mut c = super::control::Controller::new(stream);
-            // the endpoint is the unix socket inside OUR 0700 directory of OUR tor: verified by construction (spawn mode)
-            c.authenticate(&super::control::AuthPref { password: None, cookie_path: Some(dir.join("cookie")), peer_verified: true })?;
-            c.command(if enabled { "SETCONF DisableNetwork=0" } else { "SETCONF DisableNetwork=1" })?;
-            Ok(())
-        })();
-        match r { Ok(()) => told += 1, Err(e) => last_err = Some(e) }
-    }
-    match (told, last_err) { (0, Some(e)) => Err(e), _ => Ok(told) }
+/// The tors we spawned and still expect to run: (pid, runtime directory).
+pub fn live_tors() -> Vec<(u32, PathBuf)> { LIVE.lock().unwrap_or_else(|e| e.into_inner()).clone() }
+
+/// Tell ONE tor of ours (its runtime directory) whether its network may be used (`SETCONF DisableNetwork=0|1`) over a FRESH control connection (the engine owns its own, and tor accepts
+/// several). Every step has a short timeout, so a busy tor costs a second or two, not a hang. The caller keeps what it has confirmed per tor and retries until this succeeds: a "network is
+/// back" that never arrived would leave tor silent while the app believes it is reachable.
+/// With the network disabled tor closes its SOCKS listener and every outgoing connection, publishes and fetches nothing, and does not mark its guards unreachable and move on to more of them.
+pub fn set_network_for(dir: &Path, enabled: bool, timeout: Duration) -> Result<(), TorError> {
+    let (stream, _) = super::open_control(&Addr::Unix(dir.join("ctl")), timeout)?;
+    let mut c = super::control::Controller::new(stream);
+    // the endpoint is the unix socket inside OUR 0700 directory of OUR tor: verified by construction (spawn mode); the SAFECOOKIE server proof is still enforced
+    c.authenticate(&super::control::AuthPref { password: None, cookie_path: Some(dir.join("cookie")), peer_verified: true })?;
+    c.command(if enabled { "SETCONF DisableNetwork=0" } else { "SETCONF DisableNetwork=1" })?;
+    Ok(())
 }
 
 /// (running, dead): how many of the tors we spawned are alive. A zombie counts as dead. `/proc/<pid>/stat` is readable for our own children, also on Android.
@@ -236,54 +231,75 @@ mod tests {
     /// the registry of live tors is process-wide: the tests that use it run one at a time
     static REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[test]
-    fn set_network_sends_setconf_disablenetwork_over_a_fresh_authenticated_control_connection() {
+    /// A fake tor control port for ONE connection: SAFECOOKIE server side (`lie`: a wrong server proof). Returns the lines it received. It gives up after 3 s, so a client that never
+    /// connects fails the test instead of hanging it.
+    fn fake_control(dir: &Path, lie: bool) -> std::thread::JoinHandle<Vec<String>> {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
-        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("ramtor-test");
-        fs::create_dir(&dir).unwrap();
         fs::write(dir.join("cookie"), [7u8; 32]).unwrap();
         let l = UnixListener::bind(dir.join("ctl")).unwrap();
+        l.set_nonblocking(true).unwrap();
         let cookie_path = dir.join("cookie");
-        let server = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             use hmac::{Hmac, KeyInit, Mac};
             let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+            let end = Instant::now() + Duration::from_secs(3);
+            let s = loop {
+                match l.accept() { Ok((s, _)) => break s, Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)), Err(_) => return vec!["NO CONNECTION".to_string()] }
+            };
+            s.set_nonblocking(false).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut w = s.try_clone().unwrap();
+            let mut r = BufReader::new(s);
             let mut seen = Vec::new();
-            for _ in 0..2 {
-                let (s, _) = l.accept().unwrap();
-                let mut w = s.try_clone().unwrap();
-                let mut r = BufReader::new(s);
-                loop {
-                    let mut line = String::new();
-                    if r.read_line(&mut line).unwrap() == 0 { break; }
-                    let line = line.trim().to_string();
-                    if line.starts_with("PROTOCOLINFO") {
-                        w.write_all(format!("250-PROTOCOLINFO 1\r\n250-AUTH METHODS=COOKIE,SAFECOOKIE COOKIEFILE=\"{}\"\r\n250-VERSION Tor=\"0.4.9.16\"\r\n250 OK\r\n", cookie_path.display()).as_bytes()).unwrap();
-                    } else if let Some(cn_hex) = line.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
-                        // the server side of SAFECOOKIE: prove that we know the cookie
-                        let cn: Vec<u8> = (0..cn_hex.len() / 2).map(|i| u8::from_str_radix(&cn_hex[2 * i..2 * i + 2], 16).unwrap()).collect();
-                        let (cookie, sn) = ([7u8; 32], [9u8; 32]);
-                        let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(b"Tor safe cookie authentication server-to-controller hash").unwrap();
-                        m.update(&cookie); m.update(&cn); m.update(&sn);
-                        w.write_all(format!("250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n", hex(&m.finalize().into_bytes()), hex(&sn)).as_bytes()).unwrap();
-                    } else { w.write_all(b"250 OK\r\n").unwrap(); }
-                    seen.push(line);
-                    if seen.last().is_some_and(|l| l.starts_with("SETCONF")) { break; }
-                }
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 { break; }
+                let line = line.trim().to_string();
+                if line.starts_with("PROTOCOLINFO") {
+                    w.write_all(format!("250-PROTOCOLINFO 1\r\n250-AUTH METHODS=COOKIE,SAFECOOKIE COOKIEFILE=\"{}\"\r\n250-VERSION Tor=\"0.4.9.16\"\r\n250 OK\r\n", cookie_path.display()).as_bytes()).unwrap();
+                } else if let Some(cn_hex) = line.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
+                    let cn: Vec<u8> = (0..cn_hex.len() / 2).map(|i| u8::from_str_radix(&cn_hex[2 * i..2 * i + 2], 16).unwrap()).collect();
+                    let (cookie, sn) = (if lie { [8u8; 32] } else { [7u8; 32] }, [9u8; 32]);
+                    let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(b"Tor safe cookie authentication server-to-controller hash").unwrap();
+                    m.update(&cookie); m.update(&cn); m.update(&sn);
+                    w.write_all(format!("250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n", hex(&m.finalize().into_bytes()), hex(&sn)).as_bytes()).unwrap();
+                } else { w.write_all(b"250 OK\r\n").unwrap(); }
+                seen.push(line);
+                if seen.last().is_some_and(|l| l.starts_with("SETCONF")) { break; }
             }
             seen
-        });
-        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
-        LIVE.lock().unwrap().push((child.id(), dir.clone()));
-        assert_eq!(set_network(false).unwrap(), 1);
-        assert_eq!(set_network(true).unwrap(), 1);
-        LIVE.lock().unwrap().retain(|(p, _)| *p != child.id());
-        let _ = child.kill(); let _ = child.wait();
+        })
+    }
+
+    #[test]
+    fn set_network_for_sends_setconf_disablenetwork_after_an_authenticated_handshake() {
+        for (enabled, want) in [(false, "SETCONF DisableNetwork=1"), (true, "SETCONF DisableNetwork=0")] {
+            let base = tempfile::tempdir().unwrap();
+            let server = fake_control(base.path(), false);
+            set_network_for(base.path(), enabled, Duration::from_secs(2)).unwrap();
+            let seen = server.join().unwrap();
+            assert!(seen.iter().any(|l| l == want), "{seen:?}");
+            let auth = seen.iter().position(|l| l.starts_with("AUTHENTICATE ")).expect("authenticated first");
+            assert!(auth < seen.iter().position(|l| l == want).unwrap(), "SETCONF only AFTER the handshake: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn a_control_port_that_fails_the_safecookie_proof_gets_no_setconf_and_no_cookie_answer() {
+        let base = tempfile::tempdir().unwrap();
+        let server = fake_control(base.path(), true);
+        assert!(set_network_for(base.path(), false, Duration::from_secs(2)).is_err());
         let seen = server.join().unwrap();
-        assert!(seen.iter().any(|l| l == "SETCONF DisableNetwork=1") && seen.iter().any(|l| l == "SETCONF DisableNetwork=0"), "{seen:?}");
-        assert!(seen.iter().any(|l| l.starts_with("AUTHENTICATE ")), "the connection authenticated first: {seen:?}");
+        assert!(!seen.iter().any(|l| l.starts_with("SETCONF") || l.starts_with("AUTHENTICATE ")), "nothing is sent to a peer that cannot prove it knows the cookie: {seen:?}");
+    }
+
+    #[test]
+    fn a_missing_or_silent_control_socket_is_an_error_not_a_hang() {
+        let base = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        assert!(set_network_for(&base.path().join("gone"), false, Duration::from_secs(1)).is_err());
+        assert!(t.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

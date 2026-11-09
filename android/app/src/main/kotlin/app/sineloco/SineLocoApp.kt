@@ -56,14 +56,27 @@ class SineLocoApp : Application() {
      */
     private fun watchNetwork() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        // The state of THE default network, kept here so that "up" is computed from all of it (there is a network, it has INTERNET, our uid is not BLOCKED from it by a lockdown VPN,
+        // Data Saver or a background restriction) and only CHANGES are sent to the core. Callbacks arrive on a system thread: everything is synchronized.
+        val lock = Any()
+        var current: android.net.Network? = null
+        var caps: android.net.NetworkCapabilities? = null
+        var blocked = false
+        var last: Boolean? = null
+        fun publish() {
+            val up = current != null && caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true && !blocked
+            if (up != last) { last = up; backend.networkChanged(up) }
+        }
         val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
-                backend.networkChanged(caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET))
-            }
-            override fun onLost(network: android.net.Network) { backend.networkChanged(false) }
+            override fun onAvailable(network: android.net.Network) { synchronized(lock) { if (current != network) { current = network; caps = null; blocked = false }; publish() } }
+            override fun onCapabilitiesChanged(network: android.net.Network, c: android.net.NetworkCapabilities) { synchronized(lock) { current = network; caps = c; publish() } }
+            override fun onBlockedStatusChanged(network: android.net.Network, b: Boolean) { synchronized(lock) { if (network == current) { blocked = b; publish() } } }
+            // only the LOST default network counts: a hand-over may report the old one after the new one is already current
+            override fun onLost(network: android.net.Network) { synchronized(lock) { if (network == current) { current = null; caps = null; blocked = false; publish() } } }
         }
         try { cm.registerDefaultNetworkCallback(callback) } catch (_: Exception) { return }
-        if (cm.activeNetwork == null) backend.networkChanged(false) // already no network when the app starts: the callback only reports changes
+        // registration reports the current default network when there is one; when there is NONE it reports nothing, so say so (unless a callback was quicker)
+        synchronized(lock) { if (current == null && last == null) { last = false; backend.networkChanged(false) } }
     }
 
     /**

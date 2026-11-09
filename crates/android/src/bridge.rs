@@ -41,7 +41,46 @@ pub struct Bridge {
     /// nor burns battery on doomed attempts). Coming back is delayed by a random 3-15 s: a flapping network must not make us re-announce ourselves in lock step with it.
     network_up: bool,
     network_up_at: Option<Instant>,
-    network_told: Option<Instant>,
+    /// Applies the desired network state to our tor(s) on its OWN thread (the core thread must never wait for a control socket: the panic path shares it).
+    net: NetWorker,
+}
+
+/// Sets tor's network on/off on a worker thread. It remembers, per tor (pid), what that tor has CONFIRMED and keeps trying until the desired state is confirmed: an "up" that never
+/// arrived would leave tor silent while the screen says "Tor connected". A tor it has not told anything is assumed to be enabled (that is how tor starts), so a tor that appears
+/// during an outage is told once, and nothing is re-sent while nothing changed. The thread ends when the bridge is dropped.
+struct NetWorker { desired: std::sync::Arc<std::sync::atomic::AtomicBool>, kick: std::sync::mpsc::Sender<()> }
+
+type LiveFn = std::sync::Arc<dyn Fn() -> Vec<(u32, PathBuf)> + Send + Sync>;
+type ApplyFn = std::sync::Arc<dyn Fn(&Path, bool) -> bool + Send + Sync>;
+
+impl NetWorker {
+    fn real() -> Self {
+        Self::new(
+            std::sync::Arc::new(sine_loco_net::tor::spawn::live_tors),
+            std::sync::Arc::new(|dir, enabled| sine_loco_net::tor::spawn::set_network_for(dir, enabled, Duration::from_secs(2)).is_ok()),
+            Duration::from_secs(2),
+        )
+    }
+    fn new(live: LiveFn, apply: ApplyFn, period: Duration) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let desired = std::sync::Arc::new(AtomicBool::new(true));
+        let (kick, rx) = std::sync::mpsc::channel::<()>();
+        let d = desired.clone();
+        std::thread::Builder::new().name("sineloco-net".into()).spawn(move || {
+            let mut confirmed: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+            loop {
+                if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = rx.recv_timeout(period) { break; }
+                let want = d.load(Ordering::SeqCst);
+                let tors = live();
+                confirmed.retain(|pid, _| tors.iter().any(|(p, _)| p == pid));
+                for (pid, dir) in tors {
+                    if *confirmed.get(&pid).unwrap_or(&true) != want && apply(&dir, want) { confirmed.insert(pid, want); }
+                }
+            }
+        }).expect("thread");
+        Self { desired, kick }
+    }
+    fn set(&self, up: bool) { self.desired.store(up, std::sync::atomic::Ordering::SeqCst); let _ = self.kick.send(()); }
 }
 
 impl Bridge {
@@ -76,7 +115,7 @@ impl Bridge {
         cfg.lock_timeout_secs = Some(8 * 3600);
         cfg.lock_max_attempts = Some(5);
         cfg.platform_keys = platform_keys;
-        Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None, tor_base, network_up: true, network_up_at: None, network_told: None })
+        Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None, tor_base, network_up: true, network_up_at: None, net: NetWorker::real() })
     }
 
     pub fn app(&self) -> &App { &self.app }
@@ -109,7 +148,9 @@ impl Bridge {
         let (alive, dead) = sine_loco_net::tor::spawn::spawned_status();
         if dead > 0 && alive == 0 { self.app.tor_died(); }
         // (also while LOCKED: reconnecting needs no password. It is a direct call, never a key press: a key would land in the lock's password prompt)
-        if !self.auto_online || self.app.screen != Screen::Main || self.user_offline { return; }
+        // no automatic start or restart while the phone has no network: a tor started into an outage would sit at a few percent, time out after 5 minutes with advice about bridges,
+        // be thrown away with its data directory and come back with a fresh set of guards (the retry loop restarts on "network up")
+        if !self.auto_online || self.app.screen != Screen::Main || self.user_offline || !self.network_up { return; }
         match &self.app.online {
             Online::Offline if !self.started => { self.started = true; self.app.go_online(); }
             Online::Failed(_) => {
@@ -121,19 +162,12 @@ impl Bridge {
         }
     }
 
-    /// Apply what the phone's network is doing to our tor. Called every tick: the "down" state is re-asserted every few seconds, so a tor that starts (or restarts after dying) while
-    /// the network is down also gets its network disabled. Never opens any socket of its own: only the unix control socket of OUR tor.
+    /// The debounce of "the network is back": after the random wait the desired state becomes UP, and a restart that was waiting for a network starts counting from here.
     fn network_tick(&mut self) {
-        let now = Instant::now();
-        if let Some(t) = self.network_up_at {
-            if now >= t {
-                self.network_up_at = None; self.network_up = true; self.network_told = None;
-                let _ = sine_loco_net::tor::spawn::set_network(true);
-            }
-        }
-        if !self.network_up && sine_loco_net::tor::spawn::spawned_status().0 > 0 && self.network_told.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(5)) {
-            self.network_told = Some(now);
-            let _ = sine_loco_net::tor::spawn::set_network(false);
+        if self.network_up_at.is_some_and(|t| Instant::now() >= t) {
+            self.network_up_at = None; self.network_up = true;
+            self.retries = 0; self.retry_at = None; // the automatic restart (which does not run while the network is down) starts afresh
+            self.net.set(true);
         }
     }
 
@@ -267,7 +301,7 @@ impl Bridge {
             "net" => {
                 if self.app.screen == Screen::Wiped { return Err(NOT_NOW); }
                 match arg.as_str() {
-                    "down" => { self.network_up = false; self.network_up_at = None; self.network_told = None; } // applied by the next tick, within a few hundred ms
+                    "down" => { self.network_up = false; self.network_up_at = None; self.net.set(false); }
                     "up" => {
                         if !self.network_up && self.network_up_at.is_none() {
                             let mut r = [0u8; 1];
@@ -436,11 +470,59 @@ mod tests {
         assert!(due >= Duration::from_secs(2) && due <= Duration::from_secs(16), "{due:?}");
         b.network_up_at = Some(Instant::now() - Duration::from_secs(1));
         assert!(call(&mut b, "snapshot", "").contains("\"network_up\":true"));
-        // a new "down" cancels a pending "up"
         call(&mut b, "net", "down"); call(&mut b, "net", "up");
         call(&mut b, "net", "down");
-        assert!(b.network_up_at.is_none() && !b.network_up);
+        assert!(b.network_up_at.is_none() && !b.network_up, "a new down cancels a pending up");
         assert!(call(&mut b, "net", "sideways").contains("unknown network state"));
+    }
+
+    #[test]
+    fn no_automatic_start_or_restart_runs_while_the_network_is_down_and_the_retry_loop_starts_afresh_when_it_is_back() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = Bridge::with_profile(&d.path().join("vault"), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
+        create(&mut b);
+        call(&mut b, "net", "down");
+        b.started = false; b.app.online = Online::Offline;
+        for _ in 0..3 { call(&mut b, "snapshot", ""); }
+        assert!(matches!(b.app.online, Online::Offline) && !b.started, "no start into an outage");
+        b.app.online = Online::Failed("x".into()); b.retries = 4; b.retry_at = Some(Instant::now() - Duration::from_secs(1));
+        call(&mut b, "snapshot", "");
+        assert!(matches!(b.app.online, Online::Failed(_)), "no retry into an outage");
+        b.network_up_at = Some(Instant::now() - Duration::from_secs(1));
+        call(&mut b, "snapshot", "");
+        assert!(b.network_up && b.retries <= 1, "the growing delay starts over when the network is back: {}", b.retries);
+    }
+
+    #[test]
+    fn the_net_worker_retries_until_confirmed_tells_a_new_tor_once_and_never_resends() {
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
+        let live: Arc<Mutex<Vec<(u32, PathBuf)>>> = Arc::new(Mutex::new(vec![(1, PathBuf::from("/one"))]));
+        let calls: Arc<Mutex<Vec<(u32, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let fail_next = Arc::new(AtomicUsize::new(2)); // the first two attempts fail (a busy tor)
+        let (l2, c2, f2) = (live.clone(), calls.clone(), fail_next.clone());
+        let w = NetWorker::new(
+            Arc::new(move || l2.lock().unwrap().clone()),
+            Arc::new(move |dir: &Path, en| {
+                let pid = if dir == Path::new("/one") { 1 } else { 2 };
+                c2.lock().unwrap().push((pid, en));
+                f2.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_err()
+            }),
+            Duration::from_millis(20),
+        );
+        w.set(false);
+        std::thread::sleep(Duration::from_millis(400));
+        let c = calls.lock().unwrap().clone();
+        assert_eq!(c, vec![(1, false), (1, false), (1, false)], "two failures are retried, the third attempt is confirmed, then nothing is re-sent: {c:?}");
+        live.lock().unwrap().push((2, PathBuf::from("/two")));        // a tor that started during the outage
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(calls.lock().unwrap().iter().filter(|(p, _)| *p == 2).count(), 1, "told once");
+        w.set(true);                                                    // the network is back
+        std::thread::sleep(Duration::from_millis(300));
+        let c = calls.lock().unwrap().clone();
+        assert_eq!(c.iter().filter(|(_, en)| *en).count(), 2, "both tors are told 'up' exactly once: {c:?}");
+        live.lock().unwrap().retain(|(p, _)| *p != 1);                  // tor 1 died: forgotten, nothing is sent to it
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.lock().unwrap().len(), c.len());
     }
 
     #[test]
