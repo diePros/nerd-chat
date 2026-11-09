@@ -16,5 +16,5 @@ Static page plus one small Worker, for Cloudflare Workers.
 
 - `REPO` in `wrangler.jsonc` and the GitHub links in `public/index.html` and `public/app.js` point at `diePros/nerd-chat`. Change them after the repository rename (GitHub redirects the API, but the links should be final).
 - Optional: `npx wrangler secret put GITHUB_TOKEN` (read-only, public data) to avoid the unauthenticated rate limit.
-- Add a custom domain in the Cloudflare dashboard.
+- The site is configured for `sineloco.dev` (`routes` in `wrangler.jsonc`, custom domain). The first `npm run deploy` creates the DNS record and certificate; the zone must be in the same Cloudflare account as the Worker.
 - Every row in the facts table cites a source file. Re-check them when the code changes.

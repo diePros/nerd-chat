@@ -3356,6 +3356,7 @@ dependencies = [
  "jni 0.21.1",
  "sine-loco-app",
  "sine-loco-core",
+ "sine-loco-net",
  "sine-loco-store",
  "sine-loco-vault",
  "tempfile",

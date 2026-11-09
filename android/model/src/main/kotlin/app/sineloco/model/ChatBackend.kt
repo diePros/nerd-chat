@@ -25,6 +25,12 @@ interface ChatBackend {
     /** Panic: wipe memory and leave. The host process ends right after. */
     fun panic()
 
+    /** A real lock: the app keeps running (tor, messages arrive) but shows only the password prompt ([Stage.Unlock] with [AppState.locked]) and the core hands out no contact or message data until the password is typed again. */
+    fun lock()
+
+    /** [panic], but waits (at most [timeoutMillis]) until the core has wiped: for the last moments of the process (swipe-away, exit), where an asynchronous call would be killed unfinished. */
+    fun panicBlocking(timeoutMillis: Long = 700) { panic() }
+
     /** Purge: like [panic] and also overwrite and delete the vault and everything exported. */
     fun purge()
 

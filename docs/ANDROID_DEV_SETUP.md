@@ -124,3 +124,5 @@ $ANDROID_HOME/platform-tools/adb shell am start -n app.sineloco/.MainActivity
 `/dev/kvm` must be readable by you (group `kvm`: `sudo usermod -aG kvm $USER`, then log in again). The emulator reaches the internet, so the embedded tor really bootstraps.
 `adb exec-out screencap` is BLACK on purpose (`FLAG_SECURE`); use `adb shell uiautomator dump` to read the screen. The emulator is x86_64: it tests `libtor.so`/the bridge for x86_64, not the arm64 build.
 Build `libtor.so` first (`scripts/build-tor-android.sh arm64-v8a` and `x86_64`). The libraries are not committed.
+
+**One command:** `scripts/android-run.sh` (add `--headless` for no window) builds libtor.so if missing, assembles the debug APK, creates and starts the emulator `sineloco`, installs and launches the app.

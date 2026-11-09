@@ -48,7 +48,7 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     let mut w = W::with_capacity(est);
     w.obj();
     w.f_num("v", VERSION);
-    let (screen, prompt) = screen_str(&app.screen);
+    let (screen, prompt) = if app.lock_auth() && app.screen == Screen::Main { ("unlock", None) } else { screen_str(&app.screen) }; // a real lock looks like the unlock screen
     w.f_str("screen", screen);
     w.f_opt_str("prompt", prompt);
     w.f_str("status", &app.status);
@@ -58,7 +58,8 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     w.f_num("pw_chars", app.pw.chars() as i64);
     w.f_num("confirm_chars", app.confirm_chars() as i64);
     w.f_num("code_chars", app.code_chars() as i64);
-    w.f_bool("privacy_locked", app.locked);
+    w.f_bool("privacy_locked", app.locked && !app.lock_auth());
+    w.f_bool("locked", app.lock_auth()); // the app is locked (and still running underneath)
     w.f_bool("ram_only", app.is_ram_only());
     w.f_str("persist", match app.persist() { Persist::Off => "off", Persist::Outbox => "outbox", Persist::Day => "day", Persist::Week => "week" });
     w.f_bool("user_offline", x.user_offline);
@@ -78,7 +79,8 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     w.f_str("pane", match app.pane { Pane::Details => "details", Pane::Chat => "chat", Pane::Saved => "saved" });
     w.f_str("mode", match app.mode { Mode::Normal => "normal", Mode::Insert => "insert" });
 
-    let main = app.screen == Screen::Main || matches!(app.screen, Screen::Prompt(_) | Screen::Verify);
+    // nothing of the contacts or conversations leaves the core while the app is locked
+    let main = (app.screen == Screen::Main || matches!(app.screen, Screen::Prompt(_) | Screen::Verify)) && !app.lock_auth();
     w.f_arr("contacts");
     if main {
         for (name, trust, paired, connected, unread) in app.contact_rows() {

@@ -68,6 +68,41 @@ pub fn torrc(dir: &Path, owning_pid: u32, extra: &[String]) -> Result<String, To
     Ok(t)
 }
 
+/// Every tor this process started that is still meant to run: (pid, runtime directory). Lets a panic kill tor and remove its directory SYNCHRONOUSLY, without waiting for a Drop that
+/// may never come (the process is about to be killed, or the owner is a start thread that is still waiting), and lets the app notice a tor that died on its own.
+static LIVE: std::sync::Mutex<Vec<(u32, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+/// SIGKILL every tor we spawned and delete its directory (state with guard fingerprints, consensus times, cookie), right now. For panic and purge.
+pub fn kill_spawned() {
+    let v = std::mem::take(&mut *LIVE.lock().unwrap_or_else(|e| e.into_inner()));
+    for (pid, dir) in v {
+        if let Some(p) = rustix::process::Pid::from_raw(pid as i32) { let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL); }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// (running, dead): how many of the tors we spawned are alive. A zombie counts as dead. `/proc/<pid>/stat` is readable for our own children, also on Android.
+pub fn spawned_status() -> (usize, usize) {
+    let v = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let alive = v.iter().filter(|(pid, _)| {
+        fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rsplit_once(')').map(|(_, rest)| rest.trim_start().chars().next())).flatten().is_some_and(|st| st != 'Z' && st != 'X')
+    }).count();
+    (alive, v.len() - alive)
+}
+
+/// Delete EVERY `ramtor-*` directory in `base`, whether or not its owner still runs. Only for an app that knows no tor of its own can be running yet (the Android bridge at its start)
+/// or no longer (purge). Directories not owned by us, and anything not named like ours, are left alone.
+pub fn remove_runtime_dirs(base: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let me = rustix::process::geteuid().as_raw();
+    let Ok(rd) = fs::read_dir(base) else { return };
+    for e in rd.flatten() {
+        if !e.file_name().to_str().is_some_and(|n| n.starts_with("ramtor-")) { continue; }
+        let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
+        if md.is_dir() && md.uid() == me { let _ = fs::remove_dir_all(e.path()); }
+    }
+}
+
 pub struct SpawnedTor {
     child: Child,
     dir: PathBuf,
@@ -126,6 +161,7 @@ impl SpawnedTor {
             Ok(child)
         })();
         let child = match result { Ok(c) => c, Err(e) => { let _ = fs::remove_dir_all(&dir); return Err(e); } };
+        LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((child.id(), dir.clone()));
         let mut me = Self { control: Addr::Unix(dir.join("ctl")), socks: Addr::Unix(dir.join("socks")), child, dir };
         // wait for the control socket to appear (tor exits early on a bad config)
         let end = Instant::now() + Duration::from_secs(30);
@@ -143,6 +179,8 @@ impl SpawnedTor {
 
 impl Drop for SpawnedTor {
     fn drop(&mut self) {
+        let pid = self.child.id();
+        LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.dir);
@@ -152,6 +190,47 @@ impl Drop for SpawnedTor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// the registry of live tors is process-wide: the tests that use it run one at a time
+    static REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn kill_spawned_kills_the_process_and_removes_its_directory_and_the_status_sees_it() {
+        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("ramtor-0123456789abcdef");
+        fs::create_dir(&dir).unwrap(); fs::write(dir.join("state"), "Guard x").unwrap();
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        LIVE.lock().unwrap().push((child.id(), dir.clone()));
+        assert_eq!(spawned_status().0 >= 1, true, "the live child is counted");
+        kill_spawned();
+        assert!(!dir.exists(), "directory gone");
+        let st = child.wait().unwrap();
+        assert!(!st.success(), "killed by a signal, not a normal exit: {st}");
+        assert!(LIVE.lock().unwrap().iter().all(|(p, _)| *p != child.id()));
+    }
+
+    #[test]
+    fn a_tor_that_exited_by_itself_is_reported_dead_even_before_it_is_reaped() {
+        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        LIVE.lock().unwrap().push((pid, PathBuf::from("/nonexistent/x")));
+        std::thread::sleep(Duration::from_millis(300)); // exited, not yet waited for: a zombie
+        let (_, dead) = spawned_status();
+        assert!(dead >= 1, "zombie counts as dead");
+        LIVE.lock().unwrap().retain(|(p, _)| *p != pid);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn remove_runtime_dirs_removes_only_directories_named_like_ours() {
+        let base = tempfile::tempdir().unwrap();
+        for n in ["ramtor-aaaa", "ramtor-bbbb", "somebody-else", "ramtor-file"] { let p = base.path().join(n); if n == "ramtor-file" { fs::write(&p, "x").unwrap(); } else { fs::create_dir(&p).unwrap(); fs::write(p.join("owner.pid"), "1").unwrap(); } }
+        remove_runtime_dirs(base.path());
+        assert!(!base.path().join("ramtor-aaaa").exists() && !base.path().join("ramtor-bbbb").exists());
+        assert!(base.path().join("somebody-else").exists(), "a foreign name is never touched");
+        assert!(base.path().join("ramtor-file").exists(), "a plain file is not a directory of ours");
+    }
 
     #[test]
     fn torrc_is_private_and_fail_closed() {

@@ -1,3 +1,4 @@
+# (The Android Keystore labels `sineloco.hist.` and `sineloco.hist.epoch` are frozen too: crates/core/tests/frozen_labels.rs pins them in the Kotlin sources.)
 # Strings that are part of the DISK and WIRE formats (and `seburity.vault`, the legacy default vault file name the app still falls back to) / cryptographic domain separation. They contain the ORIGINAL project codename
 # and must NEVER change when the project is renamed: changing one would make existing vaults, contact bundles, safety numbers and
 # handshakes incompatible (and silently change the cryptography). scripts/rename-project.py protects every line of this file;

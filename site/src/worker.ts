@@ -148,7 +148,11 @@ async function sampleStars(env: Env): Promise<void> {
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname } = url;
+    if (url.hostname === "www.sineloco.dev") {
+      return Response.redirect(`https://sineloco.dev${pathname}${url.search}`, 301);
+    }
     if (pathname === "/api/github") return handleGithub(request, env, ctx);
     if (pathname.startsWith("/api/")) return json({ error: "not found" }, 404, "no-store");
     return env.ASSETS.fetch(request);

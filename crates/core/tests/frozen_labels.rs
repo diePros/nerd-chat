@@ -54,3 +54,15 @@ fn every_frozen_label_is_still_used_and_unchanged() {
     assert!(missing.is_empty(), "frozen labels that no source uses any more (renamed by accident, or removed?): {missing:?}");
     assert!(list.len() >= 20, "the frozen list was truncated");
 }
+
+/// The Android history keys: the Keystore alias prefix names the keys that hold the user's history, and the associated data binds each wrapped bucket key to its epoch. Changing either
+/// one orphans every kept history on every phone (the keys would not be found / the unwrap would fail), exactly like a vault label. They contain the name of the app AT THE TIME
+/// they were frozen (`sineloco`) and must survive any later rename. This test pins them in the Kotlin sources.
+#[test]
+fn the_android_keystore_labels_are_frozen_in_the_kotlin_sources() {
+    let ks = fs::read_to_string(root().join("android/app/src/main/kotlin/app/sineloco/AndroidKeystoreKeys.kt")).expect("the Android key store file moved: update this test AND keep the labels");
+    let sw = fs::read_to_string(root().join("android/model/src/main/kotlin/app/sineloco/model/PlatformKeys.kt")).expect("PlatformKeys.kt moved: update this test AND keep the labels");
+    assert!(ks.contains("PREFIX = \"sineloco.hist.\""), "the Keystore alias prefix changed");
+    assert!(ks.contains("\"sineloco.hist.epoch\".toByteArray()"), "the AAD label of the Keystore wrap changed");
+    assert!(sw.contains("\"sineloco.hist.epoch\".toByteArray()"), "the AAD label of the software key store changed (it must equal the Keystore's)");
+}

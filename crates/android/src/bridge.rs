@@ -35,6 +35,8 @@ pub struct Bridge {
     retries: u32,
     auto_online: bool,
     purge: Option<(usize, usize)>,
+    /// tor's runtime base inside the app's private storage (None without a tor executable)
+    tor_base: Option<PathBuf>,
 }
 
 impl Bridge {
@@ -51,18 +53,22 @@ impl Bridge {
         if std::fs::symlink_metadata(&path).is_ok() { vault_path::check_existing(&path)?; }
         let mut cfg = Config::new(Some(path), None, None, profile);
         cfg.tor.tor_path = tor_path.clone();
+        let mut tor_base = None;
         if tor_path.is_some() {
             // there is no tmpfs for an app: tor's runtime directory (sockets, its state) lives in the app's private storage, next to the vault directory, and is removed when tor ends
             // (a stale one left by a kill is swept at the next start)
             let base = dir.parent().unwrap_or(dir).join("tor");
             vault_path::prepare_dir(&base)?;
+            // nothing of ours can be running yet: whatever an earlier session left (state with guards, consensus times, cookie) goes now, not at the next going-online
+            sine_loco_net::tor::spawn::remove_runtime_dirs(&base);
+            tor_base = Some(base.clone());
             cfg.tor.runtime_base = Some(base);
             cfg.tor.allow_disk = true;
         }
         cfg.can_host = true;
         cfg.persist_default = persist_default;
         cfg.platform_keys = platform_keys;
-        Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None })
+        Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None, tor_base })
     }
 
     pub fn app(&self) -> &App { &self.app }
@@ -76,7 +82,8 @@ impl Bridge {
     }
 
     fn takes_secret(&self) -> bool {
-        !self.app.locked && matches!(self.app.screen, Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Prompt(Prompt::JoinCode(_)))
+        (!self.app.locked && matches!(self.app.screen, Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Prompt(Prompt::JoinCode(_))))
+            || (self.app.lock_auth() && matches!(self.app.screen, Screen::Main))
     }
     fn in_main(&self) -> bool { self.app.screen == Screen::Main && !self.app.locked }
 
@@ -88,6 +95,9 @@ impl Bridge {
     /// the user switched offline on purpose; a failed start is retried with a growing delay).
     pub fn tick(&mut self) {
         self.app.poll();
+        // a tor that died on its own must show as NOT reachable (the automatic restart below then brings it back)
+        let (alive, dead) = sine_loco_net::tor::spawn::spawned_status();
+        if dead > 0 && alive == 0 { self.app.tor_died(); }
         if !self.auto_online || self.app.screen != Screen::Main || self.user_offline { return; }
         match &self.app.online {
             Online::Offline if !self.started => { self.started = true; self.ensure_normal(); self.app.handle(Key::Char('o')); }
@@ -192,9 +202,16 @@ impl Bridge {
             "online" => {
                 if !self.in_main() { return Err(NOT_NOW); }
                 let want = arg.as_str() == "1";
+                let was = self.user_offline;
                 self.user_offline = !want; self.started = true;
                 let on = matches!(self.app.online, Online::Online | Online::Starting(_));
-                if want != on { self.ensure_normal(); self.app.handle(Key::Char('o')); }
+                if want != on {
+                    self.ensure_normal(); self.app.handle(Key::Char('o'));
+                    // the core may refuse (tor still starting) or ask for a second confirmation first (unconfirmed texts): then NOTHING changed, and the automatic restart
+                    // must not be told that the user went offline on purpose
+                    let moved = if want { matches!(self.app.online, Online::Online | Online::Starting(_)) } else { matches!(self.app.online, Online::Stopping | Online::Offline) };
+                    if !moved { self.user_offline = was; }
+                }
             }
             "hide" => {
                 if self.app.screen != Screen::Main { return Err(NOT_NOW); }
@@ -212,12 +229,14 @@ impl Bridge {
                 let p = match arg.as_str() { "off" => Persist::Off, "outbox" => Persist::Outbox, "day" => Persist::Day, "week" => Persist::Week, _ => return Err("unknown setting") };
                 self.app.set_persist(p);
             }
+            "lock" => { if !self.in_main() { return Err(NOT_NOW); } self.ensure_normal(); self.app.lock(); }
             "panic" => { let _ = self.app.handle(Key::F12); }
             "purge" => {
                 if self.app.handle(Key::Purge) == Action::Purge {
                     self.app.panic_wipe();
                     self.app.purge_finish();
                     self.purge = self.app.purge_report;
+                    if let Some(b) = &self.tor_base { sine_loco_net::tor::spawn::remove_runtime_dirs(b); }
                 }
             }
             _ => return Err("unknown operation"),
@@ -248,6 +267,25 @@ mod tests {
         call(b, "secret", PW);
         let s = call(b, "enter", "");
         assert!(s.contains("\"screen\":\"main\""), "{s}");
+    }
+
+    #[test]
+    fn the_lock_hides_everything_takes_the_password_again_and_leaves_the_state_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        call(&mut b, "new_contact", "Mira");
+        let s = call(&mut b, "lock", "");
+        assert!(s.contains("\"screen\":\"unlock\"") && s.contains("\"locked\":true"), "{s}");
+        assert!(!s.contains("Mira"), "no contact name leaves the core while locked: {s}");
+        assert!(s.contains("\"contacts\":[]"), "{s}");
+        assert!(call(&mut b, "cmd", "d").contains("not possible"), "no command reaches the app under the lock");
+        call(&mut b, "secret", "wrong wrong wrong");
+        let s = call(&mut b, "enter", "");
+        assert!(s.contains("\"locked\":true") && s.contains("Wrong password"), "{s}");
+        call(&mut b, "secret", PW);
+        let s = call(&mut b, "enter", "");
+        assert!(s.contains("\"screen\":\"main\"") && s.contains("\"locked\":false") && s.contains("Mira"), "{s}");
     }
 
     #[test]

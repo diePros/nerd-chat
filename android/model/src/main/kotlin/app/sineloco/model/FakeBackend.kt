@@ -36,6 +36,7 @@ class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true, pe
         }
     }
 
+    override fun lock() { if (s.value.stage == Stage.Ready) s.value = s.value.copy(stage = Stage.Unlock, locked = true) }
     override fun panic() { panicked = true; s.value = AppState(stage = Stage.Wiped) }
     override fun purge() { purged = true; s.value = AppState(stage = Stage.Wiped) }
 

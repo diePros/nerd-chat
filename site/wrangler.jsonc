@@ -6,7 +6,7 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": true
   },
   "vars": {
     // GitHub "owner/name". Change after the repository rename.
@@ -17,5 +17,14 @@
     { "binding": "STATS" }
   ],
   "triggers": { "crons": ["0 4 * * *"] },
+  // Custom domain: Cloudflare creates the DNS record and certificate on deploy.
+  // The zone must be in the same Cloudflare account.
+  "routes": [
+    { "pattern": "sineloco.dev", "custom_domain": true },
+    // Only redirects to the bare domain (see src/worker.ts).
+    { "pattern": "www.sineloco.dev", "custom_domain": true }
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
   "observability": { "enabled": true, "traces": { "enabled": true } }
 }

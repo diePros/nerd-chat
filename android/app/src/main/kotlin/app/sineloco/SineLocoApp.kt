@@ -13,6 +13,7 @@ import android.os.Looper
 import java.io.File
 import kotlin.concurrent.thread
 import app.sineloco.model.Stage
+import app.sineloco.model.TorState
 
 /**
  * Owns the backend so it survives the activity being recreated. The real one is the Rust core over JNI ([RustBackend]); a build with `-Pdemo`
@@ -26,6 +27,7 @@ class SineLocoApp : Application() {
         super.onCreate()
         backend = if (resources.getBoolean(R.bool.sineloco_demo)) FakeBackend(hasVault = false) else rust()
         watchConnection()
+        lockWhenScreenGoesOff()
     }
 
     private fun rust(): ChatBackend {
@@ -46,6 +48,23 @@ class SineLocoApp : Application() {
         return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys)
     }
 
+    /** Screen off (power button, timeout) locks the app, whatever is in front: the next look at the phone meets the password prompt. */
+    private fun lockWhenScreenGoesOff() {
+        registerReceiver(object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: android.content.Intent?) { backend.lock() }
+        }, android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_OFF))
+    }
+
+    /**
+     * The end of the session, in EVERY state (swipe-away, leaving the app, exit): the core wipes first (tor is killed and its directory removed synchronously, the vault and every secret
+     * buffer are zeroized), then the process dies. A bare process kill would skip the zeroizing; the wait is bounded, so a busy core cannot keep the app alive.
+     */
+    fun wipeAndExit() {
+        try { backend.panicBlocking(700) } catch (_: Exception) { }
+        ConnectionService.stop(this)
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
     /**
      * The foreground service runs exactly while the user wants to be reachable AND the vault is unlocked: online, stage Ready. Offline, panic, purge or a locked vault stop it.
      * Only a change is acted on, and only from the main thread.
@@ -57,7 +76,8 @@ class SineLocoApp : Application() {
             try {
                 kotlinx.coroutines.runBlocking {
                     backend.state.collect { st ->
-                        val want = st.online && st.stage == Stage.Ready
+                        // Failed counts: the bridge restarts tor by itself, and a service that stopped on a failure could not be started again from the background (Android 12+)
+                        val want = (st.online || st.tor is TorState.Failed) && (st.stage == Stage.Ready || st.locked || (st.stage == Stage.Working && running))
                         if (want != running) {
                             running = want
                             main.post { if (want) ConnectionService.start(this@SineLocoApp) else ConnectionService.stop(this@SineLocoApp) }

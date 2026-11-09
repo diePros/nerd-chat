@@ -70,6 +70,11 @@ class RustBackend(
 
     override fun submitPassword(password: CharArray) = op("secret", password, "enter" to null)
     override fun panic() { op("panic") }
+    override fun lock() { if (s.value.stage == Stage.Ready) op("lock") } // quiet when there is nothing to lock (a refusal would only show a banner on the unlock screen)
+    override fun panicBlocking(timeoutMillis: Long) {
+        closed = true // stop the polling first: a poll after the wipe would only show the wiped screen
+        try { kotlinx.coroutines.runBlocking { kotlinx.coroutines.withTimeoutOrNull(timeoutMillis) { kotlinx.coroutines.withContext(dispatcher) { native.call("panic", null) } } } } catch (_: Exception) { }
+    }
     override fun purge() { op("purge") }
     override fun setOnline(online: Boolean) = op("online", text(if (online) "1" else "0"))
     override fun open(contactId: Int) = op("select", text(contactId.toString()), "open_chat" to null)

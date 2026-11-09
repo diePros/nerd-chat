@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 
 /**
@@ -28,8 +30,13 @@ class ConnectionService : Service() {
         val app = application as SineLocoApp
         if (intent?.action == ACTION_OFFLINE) {
             // only ASK: the core refuses while tor is still starting (it cannot be cancelled yet) and asks for confirmation when texts are unconfirmed. The service ends when the
-            // state really says offline ([SineLocoApp.watchConnection]), never before.
+            // state really says offline ([SineLocoApp.watchConnection]), never before. If the core did not go offline, the reason (and the confirmation) is in the app: open it.
             app.backend.setOnline(false)
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (app.backend.state.value.online) {
+                    try { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)) } catch (_: Exception) { }
+                }
+            }, 1200)
             return START_NOT_STICKY
         }
         try {
@@ -44,9 +51,9 @@ class ConnectionService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // swiped away from the recent apps: wipe everything. The process dies, and Android kills tor (same process group) with it; tor also watches its owner's pid.
+        // swiped away from the recent apps: the same end of the session as everywhere else (wipe, then die)
         stopForegroundCompat()
-        android.os.Process.killProcess(android.os.Process.myPid())
+        (application as SineLocoApp).wipeAndExit()
     }
 
     private fun stopForegroundCompat() = stopForeground(STOP_FOREGROUND_REMOVE)
@@ -69,6 +76,7 @@ class ConnectionService : Service() {
             .setContentText(getString(R.string.notification_text))
             .setVisibility(Notification.VISIBILITY_SECRET)
             .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
+            .setLocalOnly(true) // never bridged to a paired watch or a companion app
             .setCategory(Notification.CATEGORY_SERVICE)
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, getString(R.string.notification_go_offline), offline).build())

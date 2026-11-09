@@ -60,6 +60,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Leaving the screen (home, recents, another app) locks the app: it keeps running, but whoever opens it next needs the password. A rotation is not leaving. */
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) (application as SineLocoApp).backend.lock()
+    }
+
+    /**
+     * Leaving the app for good (back from the first screen, swipe-away from the recent apps, exit) ends the session in EVERY state: wipe, then die. Without this an unlocked
+     * vault would stay in a cached process whenever the foreground service is not running (offline, failed start), and the launcher icon would open it without a password.
+     * A rotation or other configuration change is not leaving.
+     */
+    override fun onDestroy() {
+        val leaving = isFinishing && !isChangingConfigurations
+        super.onDestroy()
+        if (leaving) (application as SineLocoApp).wipeAndExit()
+    }
+
     /** Clipboard copy marked sensitive (Android 13+ hides it from the paste preview and keyboard suggestions). */
     private fun copySensitive(text: String) {
         val clip = ClipData.newPlainText("", text)

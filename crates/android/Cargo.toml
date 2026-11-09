@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 sine-loco-app = { path = "../app", default-features = false }
 sine-loco-core = { path = "../core" }
+sine-loco-net = { path = "../net" }
 sine-loco-store = { path = "../store" }
 sine-loco-vault = { path = "../vault" }
 jni = "0.21"

@@ -377,6 +377,8 @@ pub struct App {
     pub mode: Mode,
     /// Privacy screen (3rd Esc): the app keeps running underneath but draws nothing; Enter unlocks, q quits. NOT authentication.
     pub locked: bool,
+    /// With `locked`: this is a REAL lock (`lock()`), not the privacy screen. The app keeps running underneath; the screen takes the vault password, and the check re-derives the vault key.
+    lock_auth: bool,
     /// Lines scrolled up from the newest message (the UI clamps what it can show).
     pub scroll: usize,
     /// Message cursor (`m` in a chat): index counted from the NEWEST message (0 = newest). While set, `y`/Enter saves that message.
@@ -423,7 +425,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -494,6 +496,16 @@ impl App {
         if let Some(v) = self.vf.as_mut() { if v.store.persist.is_none() { v.store.persist = Some(chosen); } v.store.clear_outbox(); }
         // only a SUCCESSFUL save ends the migration: a failed one leaves the old copies in the vault, and the next tick tries again
         if self.save() { self.migrate_pending = false; }
+    }
+
+    /// The tor we spawned died on its own (Android's process killer, an OOM kill, a crash): the UI must not keep saying "online". The engine is dropped on a thread (its tor is
+    /// gone, so it has nothing orderly to do) and the state becomes Failed, which the bridge answers with its automatic restart.
+    pub fn tor_died(&mut self) {
+        if !matches!(self.online, Online::Online) { return; }
+        if let Some(e) = self.engine.take() { thread::spawn(move || drop(e)); }
+        self.linked.clear(); self.offers.clear(); self.accepted.clear();
+        self.online = Online::Failed("tor stopped unexpectedly (the system may have ended it)".into());
+        self.err("Tor stopped unexpectedly: you are NOT reachable. Restarting it.");
     }
 
     /// What a sweep removed: texts that expired unsent are marked on screen and forgotten by the engine (they must never be sent later, looking fresh).
@@ -750,6 +762,9 @@ impl App {
 
     /// Everything wiped: vault dropped (secrets zeroize on drop), buffers cleared, screen -> Wiped.
     pub fn panic_wipe(&mut self) {
+        // tor first, and for good: killing it ends every connection and onion service at once and removes its directory (guards, consensus times, cookie), without waiting
+        // for the engine's orderly shutdown or a Drop that a process kill would skip
+        sine_loco_net::tor::spawn::kill_spawned();
         // Stop pairing workers FIRST (they hold identity clones and the code), give them a moment to drop them.
         if let Some(c) = self.pair_ctl.take() {
             c.cancel();
@@ -804,6 +819,7 @@ impl App {
         self.input.shrink_to_fit();
         self.status.clear();
         self.sel = 0;
+        self.lock_auth = false;
         self.screen = Screen::Wiped;
     }
 
@@ -928,6 +944,13 @@ impl App {
         self.kdf_creating = false;
         let back = std::mem::replace(&mut self.kdf_back, Screen::Unlock);
         match msg {
+            KdfMsg::Opened(Ok((vf, _))) if self.lock_auth => {
+                // the password was right: that is all this derivation was for. The freshly opened copy is dropped (zeroized); the running state stays as it is
+                drop(vf);
+                self.lock_auth = false; self.locked = false; self.failures = 0; self.locked_until = None;
+                self.screen = back; self.mode = Mode::Normal;
+                self.ok("Unlocked.");
+            }
             KdfMsg::Opened(Ok((vf, info))) => {
                 self.vf = Some(vf);
                 self.open_history();
@@ -974,8 +997,35 @@ impl App {
         self.key_normal(k)
     }
 
-    /// Privacy screen: nothing but unlock/quit (and the panic key, handled before this).
+    /// A REAL lock, unlike the privacy screen: the engine and tor keep running (messages still arrive), but nothing is shown and nothing can be done until the vault password is
+    /// typed again. The check is the vault's own memory-hard derivation (no password or hash is kept in RAM for it), with the same delays after wrong guesses as the unlock screen.
+    /// Not possible without a password (a RAM-only vault).
+    pub fn lock(&mut self) {
+        if self.screen != Screen::Main || self.locked || self.cfg.path.is_none() || self.vf.is_none() { return; }
+        self.locked = true; self.lock_auth = true;
+        self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
+        self.pw.clear(); self.input.clear();
+        self.ok("Locked. Enter the vault password.");
+    }
+    pub fn lock_auth(&self) -> bool { self.locked && self.lock_auth }
+
+    /// Privacy screen: nothing but unlock/quit (and the panic key, handled before this). With `lock_auth`: a password prompt.
     fn key_lock(&mut self, k: Key) -> Action {
+        if self.lock_auth {
+            if self.screen == Screen::Working { return Action::None; } // the derivation runs: typing now would build a second password
+            if Self::secret_edit(&mut self.pw, k) { return Action::None; }
+            if k == Key::Enter {
+                if let Some(t) = self.locked_until {
+                    if Instant::now() < t { self.err(format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1)); self.pw.clear(); return Action::None; }
+                }
+                let Some(path) = self.cfg.path.clone() else { return Action::None };
+                let pw = Zeroizing::new(self.pw.as_bytes().to_vec());
+                self.pw.clear();
+                let (counter, keyfile) = (self.cfg.counter.clone(), self.cfg.keyfile.clone());
+                self.start_kdf(Screen::Main, move || KdfMsg::Opened(VaultFile::open(&path, counter.as_deref(), &pw, keyfile.as_deref().map(|v| v.as_slice()))));
+            }
+            return Action::None;
+        }
         match k {
             Key::Enter => {
                 self.locked = false;
@@ -3627,6 +3677,49 @@ mod tests {
         assert_eq!(a.select, Some(MAX_CHAT_LINES - 1));
         a.push_line(id, ChatLine { mine: false, text: Zeroizing::new("x".into()), queued: false, saved: false, unsent: false, unconfirmed: false, mid: None });
         assert_eq!(a.select, None, "the chosen message was dropped by the cap: no cursor, nothing saved by accident");
+    }
+
+    #[test]
+    fn a_real_lock_needs_the_password_again_and_shows_nothing_meanwhile() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        add(&mut a, "bob");
+        a.lock();
+        assert!(a.lock_auth() && a.locked);
+        // keys other than the password do nothing: no command letter reaches the app underneath
+        a.handle(Key::Char('d')); a.handle(Key::Backspace);
+        assert_eq!(a.contacts_len(), 1, "a locked app does not delete contacts");
+        a.pw.clear();
+        type_str(&mut a, "wrong password!!"); a.handle(Key::Enter);
+        assert!(a.lock_auth() && a.error && a.status.contains("Wrong password"), "{}", a.status);
+        assert_eq!(a.screen, Screen::Main);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert!(!a.locked && !a.lock_auth(), "{}", a.status);
+        assert_eq!(a.contacts_len(), 1, "the state under the lock is unchanged");
+    }
+
+    #[test]
+    fn the_failure_delay_applies_to_the_lock_too_and_a_ram_only_vault_cannot_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        a.lock();
+        for _ in 0..3 { type_str(&mut a, "nope nope nope nope"); a.handle(Key::Enter); }
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert!(a.lock_auth() && a.status.contains("Too many failures"), "the right password is refused during the delay: {}", a.status);
+        let mut r = App::new(cfg(None)); r.handle(Key::Enter);
+        assert_eq!(r.screen, Screen::Main);
+        r.lock();
+        assert!(!r.locked, "nothing to unlock with: RAM-only vaults have no password");
+    }
+
+    #[test]
+    fn panic_while_locked_still_wipes() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        a.lock();
+        assert_eq!(a.handle(Key::F12), Action::Panic);
+        assert_eq!(a.screen, Screen::Wiped);
+        assert!(!a.lock_auth());
     }
 
     #[test]

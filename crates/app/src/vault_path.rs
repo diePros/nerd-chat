@@ -3,13 +3,17 @@
 //! Order (the first match wins, and the choice never depends on the current directory once a default vault exists):
 //!   1. `<data dir>/sine-loco/sine-loco.vault` exists  -> use it (`$XDG_DATA_HOME`, else `~/.local/share`)
 //!   2. `./sine-loco.vault` or the old `./seburity.vault` exists -> use it (vaults made before this default existed keep working)
+//!      (and, before the rename to Sine Loco: `./nerd-chat.vault`, and `<data dir>/nerd-chat/nerd-chat.vault`, the old default: such vaults keep working too)
 //!   3. nothing exists -> a NEW vault in the data dir, only after the user confirmed the location (`main.rs`)
 //! Pure decisions live here so they can be tested without touching the real home directory.
 use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "sine-loco.vault";
-const LEGACY_FILE: &str = "seburity.vault";
+const LEGACY_FILES: [&str; 2] = ["seburity.vault", "nerd-chat.vault"];
 const DIR: &str = "sine-loco";
+/// The default directory and file of the working title `nerd-chat` (a vault created by an earlier build keeps its place; a new name must never orphan a vault).
+const OLD_DIR: &str = "nerd-chat";
+const OLD_DEFAULT_FILE: &str = "nerd-chat.vault";
 
 pub enum Choice {
     /// An existing vault; `note` (if any) is printed to the user.
@@ -22,17 +26,19 @@ pub enum Choice {
 
 /// The directory for the default vault: `$XDG_DATA_HOME/sine-loco` if that variable is an ABSOLUTE path (the XDG rule), else
 /// `$HOME/.local/share/sine-loco`; `None` if there is no absolute home either.
-pub fn default_dir(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+pub fn default_dir(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> { dir_named(xdg_data_home, home, DIR) }
+
+fn dir_named(xdg_data_home: Option<&Path>, home: Option<&Path>, name: &str) -> Option<PathBuf> {
     let abs = |p: &&Path| p.is_absolute() && !p.as_os_str().is_empty();
     match xdg_data_home.filter(abs) {
-        Some(x) => Some(x.join(DIR)),
-        None => home.filter(abs).map(|h| h.join(".local").join("share").join(DIR)),
+        Some(x) => Some(x.join(name)),
+        None => home.filter(abs).map(|h| h.join(".local").join("share").join(name)),
     }
 }
 
 pub fn resolve(xdg_data_home: Option<&Path>, home: Option<&Path>, cwd: &Path, exists: &dyn Fn(&Path) -> bool) -> Choice {
     let dir = default_dir(xdg_data_home, home);
-    let in_cwd = [FILE, LEGACY_FILE].into_iter().map(|f| cwd.join(f)).find(|p| exists(p));
+    let in_cwd = std::iter::once(FILE).chain(LEGACY_FILES).map(|f| cwd.join(f)).find(|p| exists(p));
     if let Some(dir) = &dir {
         let p = dir.join(FILE);
         if exists(&p) {
@@ -40,11 +46,16 @@ pub fn resolve(xdg_data_home: Option<&Path>, home: Option<&Path>, cwd: &Path, ex
             return Choice::Existing { path: p, note };
         }
     }
+    // the old default location (working title nerd-chat): used as it is, never silently replaced by a NEW empty vault
+    if let Some(old) = dir_named(xdg_data_home, home, OLD_DIR).map(|d| d.join(OLD_DEFAULT_FILE)).filter(|p| exists(p)) {
+        let note = dir.as_ref().map(|d| format!("note: using the existing vault {} of the old name (new vaults go to {})", old.display(), d.join(FILE).display()));
+        return Choice::Existing { path: old, note };
+    }
     if let Some(c) = in_cwd {
         // a relative path as before: it keeps meaning "this directory's file", and the old note for the renamed file stays
         let rel = PathBuf::from(c.file_name().expect("has a file name"));
         let note = match &dir {
-            Some(d) if rel.as_os_str() == LEGACY_FILE => Some(format!("note: using the existing ./{LEGACY_FILE} (the default is now {})", d.join(FILE).display())),
+            Some(d) if LEGACY_FILES.iter().any(|l| rel.as_os_str() == *l) => Some(format!("note: using the existing ./{} (the default is now {})", rel.display(), d.join(FILE).display())),
             Some(d) => Some(format!("note: using ./{FILE} in this directory (the default for new vaults is now {})", d.join(FILE).display())),
             None => None,
         };
@@ -114,6 +125,22 @@ mod tests {
 
     fn p(s: &str) -> PathBuf { PathBuf::from(s) }
     fn set(v: &[&str]) -> HashSet<PathBuf> { v.iter().map(|s| p(s)).collect() }
+
+    #[test]
+    fn a_vault_of_the_old_name_is_found_and_never_replaced_by_a_new_empty_one() {
+        let home = PathBuf::from("/home/u");
+        let old = home.join(".local/share/nerd-chat/nerd-chat.vault");
+        let ex = { let o = old.clone(); move |p: &Path| p == o };
+        match resolve(None, Some(&home), Path::new("/work"), &ex) {
+            Choice::Existing { path, note } => { assert_eq!(path, old); assert!(note.unwrap().contains("old name")); }
+            _ => panic!("the old default vault must be used"),
+        }
+        let cwd_old = |p: &Path| p == Path::new("/work/nerd-chat.vault");
+        match resolve(None, Some(&home), Path::new("/work"), &cwd_old) {
+            Choice::Existing { path, .. } => assert_eq!(path, PathBuf::from("nerd-chat.vault")),
+            _ => panic!("./nerd-chat.vault must be used"),
+        }
+    }
 
     #[test]
     fn the_xdg_variable_wins_only_when_it_is_absolute() {

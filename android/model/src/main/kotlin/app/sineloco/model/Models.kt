@@ -63,6 +63,8 @@ enum class Persist { Off, Outbox, Day, Week }
 
 data class AppState(
     val stage: Stage = Stage.Unlock,
+    /** the app is LOCKED (not a first unlock): it still runs underneath, the screen is the password prompt */
+    val locked: Boolean = false,
     /** the core's status line, shown under the password field and in banners */
     val status: String = "",
     val statusIsError: Boolean = false,
