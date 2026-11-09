@@ -24,6 +24,8 @@ pub enum Cmd {
     OpenChat,
     /// put the open chat's draft in focus
     Insert,
+    /// leave the chat view for the contact's details
+    BackToDetails,
     /// one of the core's normal-mode commands (n new, e export, I import, l listen, c join, v verify, d delete, z acknowledge ...)
     Command(char),
     Keys(Vec<Key>),
@@ -45,6 +47,7 @@ pub fn apply(app: &mut App, c: Cmd, user_offline: &mut bool, started: &mut bool)
             for _ in 0..app.contacts_len() { if app.sel == i { break; } app.handle(if app.sel < i { Key::Down } else { Key::Up }); }
         }
         Cmd::Insert => Gui::ensure_insert(app),
+        Cmd::BackToDetails => { Gui::ensure_normal(app); app.handle(Key::Esc); }
         Cmd::OpenChat => { Gui::ensure_normal(app); app.handle(Key::Enter); Gui::ensure_insert(app); }
         Cmd::Command(ch) => { Gui::ensure_normal(app); app.handle(Key::Char(ch)); }
         Cmd::Keys(ks) => { for k in ks { app.handle(k); } }
@@ -62,9 +65,14 @@ pub fn apply(app: &mut App, c: Cmd, user_offline: &mut bool, started: &mut bool)
 // ---------------------------------------------------------------- input mapping
 /// Keys for the core. Text is forwarded ONLY where the core itself takes text (password screens, the hidden pairing-code prompt, the
 /// draft of an open chat): in every other state a typed letter would be a one-key command, which a GUI must never trigger by typing.
-pub fn collect_input(ctx: &egui::Context, app: &App) -> (Vec<Key>, Option<String>) {
-    let takes_text = matches!(app.screen, Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Prompt(Prompt::JoinCode(_)))
-        || (app.screen == Screen::Main && app.pane == Pane::Chat && app.mode == Mode::Insert);
+pub fn notice_pending(app: &App, seen: &std::collections::HashSet<[u8; 8]>) -> bool {
+    app.screen == Screen::Main && app.pane == Pane::Chat
+        && matches!((app.chat_id(), app.chat_header()), (Some(id), Some((_, Trust::Unverified, _))) if !seen.contains(&id))
+}
+
+pub fn collect_input(ctx: &egui::Context, app: &App, block_text: bool) -> (Vec<Key>, Option<String>) {
+    let takes_text = !block_text && (matches!(app.screen, Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Prompt(Prompt::JoinCode(_)))
+        || (app.screen == Screen::Main && app.pane == Pane::Chat && app.mode == Mode::Insert));
     let mut keys = vec![];
     let mut pasted = None;
     ctx.input(|i| for e in &i.events {
@@ -154,13 +162,23 @@ fn trust_dot(ui: &mut egui::Ui, t: Trust, has_peer: bool) {
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, app: &mut App, prompt_text: &mut String, prompt_for: &mut Option<Prompt>, cmds: &mut Cmds) {
+pub fn draw(ui: &mut egui::Ui, app: &mut App, prompt_text: &mut String, prompt_for: &mut Option<Prompt>, notice_seen: &mut std::collections::HashSet<[u8; 8]>, cmds: &mut Cmds) {
     match &app.screen {
         Screen::Wiped => return,
         Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Working => { secret_screen(ui, app, cmds); return; }
         _ => {}
     }
     if app.locked { lock_screen(ui, cmds); return; }
+    // D3: the full-screen "not verified" notice, once per contact per session, before the chat with an unverified contact opens
+    if app.screen == Screen::Main && app.pane == Pane::Chat {
+        if let (Some(id), Some((name, Trust::Unverified, _))) = (app.chat_id(), app.chat_header()) {
+            if !notice_seen.contains(&id) {
+                match unverified_notice(ui, name) { NoticeChoice::Check => { notice_seen.insert(id); cmds.push(Cmd::Command('v')); } NoticeChoice::ChatAnyway => { notice_seen.insert(id); } NoticeChoice::Back => { cmds.push(Cmd::BackToDetails); } NoticeChoice::None => {} }
+                popups(ui, app, prompt_text, prompt_for, cmds);
+                return;
+            }
+        }
+    }
     status_bar(ui, app, cmds);
     egui::Panel::left("contacts").default_size(230.0).min_size(180.0).show(ui, |ui| contacts(ui, app, cmds));
     egui::CentralPanel::default().show(ui, |ui| match app.pane {
@@ -395,4 +413,33 @@ fn popups(ui: &mut egui::Ui, app: &App, text: &mut String, prompt_for: &mut Opti
         }
         _ => { *prompt_for = None; }
     }
+}
+
+enum NoticeChoice { None, Check, ChatAnyway, Back }
+
+/// The full-screen notice for a contact whose identity was never checked (design D3): plain words, one clear action, an honest way to go on.
+fn unverified_notice(ui: &mut egui::Ui, name: &str) -> NoticeChoice {
+    let mut c = NoticeChoice::None;
+    egui::CentralPanel::default().show(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(70.0);
+            egui::Frame::new().stroke(Stroke::new(2.0, RED)).corner_radius(10.0).inner_margin(24.0).show(ui, |ui| {
+                ui.set_max_width(560.0);
+                ui.label(RichText::new(format!("Before you chat with {name}")).size(24.0).strong().color(RED));
+                ui.add_space(10.0);
+                ui.label(RichText::new(format!("You have not checked yet that this really is {name}.")).size(17.0).strong());
+                ui.add_space(6.0);
+                ui.label(format!("When you added {name}, nothing proved who is on the other end. Someone could have swapped the contact file on its way and be pretending to be {name}. You can still chat, but whatever you write could then be read by that someone."));
+                ui.add_space(6.0);
+                ui.label(format!("Checking takes a minute: call {name} or meet them and read your two codes to each other. If they are exactly the same, nobody is in between. You only need to do this once per person."));
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Check the code").strong().color(Color32::WHITE)).fill(Color32::from_rgb(40, 100, 170))).clicked() { c = NoticeChoice::Check; }
+                    if ui.button("Chat anyway").clicked() { c = NoticeChoice::ChatAnyway; }
+                    if ui.button("Back").clicked() { c = NoticeChoice::Back; }
+                });
+            });
+        });
+    });
+    c
 }

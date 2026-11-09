@@ -28,6 +28,10 @@ pub struct Gui {
     /// text of the single-line, NON-secret prompt currently shown (contact name, file path, address)
     pub prompt_text: String,
     pub prompt_for: Option<nerd_chat_app::app::Prompt>,
+    /// contacts whose "not verified" notice was already shown in this session (D3: once per contact per session); nothing is stored
+    pub notice_seen: std::collections::HashSet<[u8; 8]>,
+    /// developer option: never show the notice (for screenshots of the chat itself)
+    skip_notice: bool,
     /// developer options
     shot: Option<(PathBuf, u32)>,
     frames: u32,
@@ -82,7 +86,7 @@ impl Gui {
         if let Some(a) = val("--tor-socks").and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { cfg.tor.socks = Some(a); }
         cfg.tor.trust_control = has("--tor-trust-control");
         let shot = val("--screenshot").map(|p| (PathBuf::from(p), val("--shot-frame").and_then(|s| s.parse().ok()).unwrap_or(40)));
-        let mut g = Gui { shell, cfg: Some(cfg), app: None, user_offline: false, retry_at: None, retries: 0, started: false, prompt_text: String::new(), prompt_for: None, shot, frames: 0,
+        let mut g = Gui { shell, cfg: Some(cfg), app: None, user_offline: false, retry_at: None, retries: 0, started: false, prompt_text: String::new(), prompt_for: None, notice_seen: Default::default(), skip_notice: has("--skip-notice"), shot, frames: 0,
             #[cfg(feature = "demo")] demo: None };
         #[cfg(feature = "demo")]
         if has("--demo") { g.demo = Some(crate::view::demo::Demo::new()); }
@@ -166,7 +170,7 @@ impl Gui {
         let Some(app) = self.app.as_mut() else { return };
         app.poll();
         // keyboard: forwarded to the core only where the core takes text (secret screens, prompts, a chat in insert mode) + the panic keys
-        let (keys, pasted) = view::collect_input(ctx, app);
+        let (keys, pasted) = view::collect_input(ctx, app, !self.skip_notice && view::notice_pending(app, &self.notice_seen));
         let mut action = Action::None;
         for k in keys { let a = app.handle(k); if a != Action::None { action = a; break; } }
         if let Some(t) = pasted { app.paste(&t); }
@@ -177,7 +181,8 @@ impl Gui {
             Action::None => {}
         }
         let mut cmds = view::Cmds::default();
-        if let Some(app) = self.app.as_mut() { view::draw(ui, app, &mut self.prompt_text, &mut self.prompt_for, &mut cmds); }
+        if let Some(app) = self.app.as_mut() { if self.skip_notice { if let Some(id) = app.chat_id() { self.notice_seen.insert(id); } }
+            view::draw(ui, app, &mut self.prompt_text, &mut self.prompt_for, &mut self.notice_seen, &mut cmds); }
         if let Some(app) = self.app.as_mut() {
             for c in cmds.take() { view::apply(app, c, &mut self.user_offline, &mut self.started); }
         }
