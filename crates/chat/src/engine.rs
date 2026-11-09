@@ -153,7 +153,7 @@ pub(crate) enum ConnEvent {
 }
 pub(crate) enum In { Cmd(Command), Conn(ConnEvent) }
 
-pub struct Engine { tx: Sender<In>, pub events: Receiver<Event>, handle: Option<JoinHandle<()>>, live: Arc<AtomicUsize> }
+pub struct Engine { tx: Sender<In>, pub events: Receiver<Event>, handle: Option<JoinHandle<()>>, live: Arc<AtomicUsize>, pair_host: Option<crate::transport::PairHostFn>, pair_dial: Option<crate::transport::PairDialFn> }
 
 /// Counts running connection threads (they hold file buffers of up to 8 MiB): `stop` waits for them so a panic wipe really drops them.
 struct LiveGuard(Arc<AtomicUsize>);
@@ -165,6 +165,7 @@ impl Engine {
         let (tx, rx) = channel();
         let (ev_tx, ev_rx) = channel();
         let tx2 = tx.clone();
+        let (pair_host, pair_dial) = (transport.pair_host_fn(), transport.pair_dial_fn());
         let live = Arc::new(AtomicUsize::new(0));
         let live2 = live.clone();
         let handle = thread::spawn(move || {
@@ -184,8 +185,13 @@ impl Engine {
             }
             core.shutdown();
         });
-        Engine { tx, events: ev_rx, handle: Some(handle), live }
+        Engine { tx, events: ev_rx, handle: Some(handle), live, pair_host, pair_dial }
     }
+
+    /// Host a one-shot pairing service (clone of the transport's factory; works from any thread; dropping the result removes the service).
+    pub fn pair_host_fn(&self) -> Option<crate::transport::PairHostFn> { self.pair_host.clone() }
+    /// Dial a pairing service by onion id.
+    pub fn pair_dial_fn(&self) -> Option<crate::transport::PairDialFn> { self.pair_dial.clone() }
 
     pub fn add(&self, c: ContactCfg) { let _ = self.tx.send(In::Cmd(Command::Add(c))); }
     pub fn remove(&self, id: [u8; 8]) { let _ = self.tx.send(In::Cmd(Command::Remove(id))); }

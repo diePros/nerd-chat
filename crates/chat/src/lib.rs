@@ -14,4 +14,4 @@ pub mod transport;
 
 pub use conn::FileOut;
 pub use engine::{we_dial, Command, ContactCfg, Engine, Event, Timing};
-pub use transport::{MemNet, Transport};
+pub use transport::{MemNet, PairDialError, PairDialFn, PairHost, PairHostFn, Transport};
