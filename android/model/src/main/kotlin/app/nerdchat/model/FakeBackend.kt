@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.update
 class FakeBackend(seed: Boolean = true, private val hasVault: Boolean = true, keepOutbox: Boolean = false) : ChatBackend {
     private val s = MutableStateFlow(
         (if (seed) demoState() else AppState()).copy(stage = if (hasVault) Stage.Unlock else Stage.CreatePassword,
-            status = if (hasVault) "Enter your password to unlock." else "No vault found. Creating a NEW one (min 12 characters).", keepOutbox = keepOutbox))
+            status = (if (hasVault) "DEMO BUILD, no real vault. Enter any password." else "DEMO BUILD, no real vault. Creating a NEW one (min 12 characters)."), keepOutbox = keepOutbox))
     override val state: StateFlow<AppState> = s
     private var nextId = 100L
     private var firstPw: String? = null

@@ -31,6 +31,7 @@ pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: J
     let dir: String = match env.get_string(&dir) { Ok(s) => s.into(), Err(_) => return out(&mut env, &err_json("bad directory argument")) };
     let tor_path = if tor.is_null() { None } else { env.get_string(&tor).ok().map(|s| PathBuf::from(String::from(s))) };
     let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = g.as_mut() { old.wipe(); } // a second init must not leave a running core (or a half-written new vault) behind
     let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path, keep_outbox_default: keep_outbox == JNI_TRUE }) {
         Ok(b) => { let s = b.snapshot(None); *g = Some(b); s.to_string() }
         Err(e) => err_json(&e),
@@ -50,7 +51,10 @@ pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nCall<'l>(mut env: J
         let len = env.get_array_length(&arg).unwrap_or(0).max(0) as usize;
         let mut units = Zeroizing::new(vec![0u16; len]);
         if env.get_char_array_region(&arg, 0, &mut units).is_err() { return out(&mut env, &err_json("bad argument")); }
-        Zeroizing::new(char::decode_utf16(units.iter().copied()).map(|r| r.unwrap_or('\u{fffd}')).collect())
+        // pre-sized (a UTF-16 unit is at most 3 bytes of UTF-8): no reallocation, so no freed half-copy of a password stays behind
+        let mut s = Zeroizing::new(String::with_capacity(len * 3));
+        for r in char::decode_utf16(units.iter().copied()) { s.push(r.unwrap_or('\u{fffd}')); }
+        s
     };
     let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
     let json = match g.as_mut() { Some(b) => b.call(&op, &text), None => Zeroizing::new(err_json("the bridge is not initialised")) };

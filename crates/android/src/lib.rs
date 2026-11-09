@@ -9,8 +9,8 @@
 //!    `#[no_mangle]`, which the compiler counts as unsafe); `tests/hygiene.rs` pins that.
 //!
 //! Secrets cross the boundary as `char[]` that the Kotlin side wipes; here they go straight into the core's zeroizing buffers.
-//! Messages leave the core inside the snapshot string (a Rust `String` that is zeroized after the JNI copy, and a Java `String` that
-//! cannot be: known gap G1, docs/ANDROID_PORT.md).
+//! Messages leave the core inside the snapshot string: the Rust `String` is pre-sized and zeroized when dropped, BUT the `jni` crate makes its own
+//! (unwiped) copy when it builds the Java string, and the Java `String` cannot be wiped at all (known gap G1, docs/ANDROID_PORT.md; tracker BR-3).
 pub mod bridge;
 pub mod json;
 pub mod snapshot;

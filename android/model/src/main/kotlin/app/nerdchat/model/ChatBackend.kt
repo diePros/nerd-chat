@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
  * pairing waits for Tor, a message is confirmed seconds later). Never wait for a call, observe the state.
  *
  * Rules every implementation must keep:
- *  * secrets arrive as `CharArray` and the implementation wipes them; a line of chat arrives as `String` (known gap G1);
+ *  * secrets arrive as `CharArray` and the implementation wipes them (after the call has been handed to the core's thread: a call that never started, for example because the backend was closed, does not); a line of chat arrives as `String` (known gap G1);
  *  * nothing here ever returns a timestamp, a read state or a typing state, because the core has none.
  */
 interface ChatBackend {
@@ -18,7 +18,7 @@ interface ChatBackend {
 
     /**
      * One password step. Which step it is depends on [AppState.stage]: unlock (the vault exists), choose a password (first run, minimum 12
-     * characters) or repeat it. The array is wiped before this returns.
+     * characters) or repeat it. The array is wiped once the core thread has used it (not necessarily before this returns).
      */
     fun submitPassword(password: CharArray)
 

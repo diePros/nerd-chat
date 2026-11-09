@@ -183,7 +183,8 @@ impl VaultFile {
         if let Some(p) = &self.path {
             if cancel.load(Ordering::SeqCst) { return Err(StoreError::Cancelled); }
             write_atomic(p, &blob)?;
-            if let Some(c) = &self.counter_path { write_atomic(c, &self.vault.counter().to_le_bytes())?; }
+            // the vault file IS written at this point: a failure of the counter file must be told apart (the caller must not roll its memory back)
+            if let Some(c) = &self.counter_path { write_atomic(c, &self.vault.counter().to_le_bytes()).map_err(|e| StoreError::CounterWrite(e.to_string()))?; }
         }
         Ok(())
     }

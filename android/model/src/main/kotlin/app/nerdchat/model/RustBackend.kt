@@ -21,13 +21,19 @@ class RustBackend(
 
     @Volatile private var closed = false
 
+    /** the bridge's refusal text stays visible for a few seconds (the next poll answer carries none) */
+    @Volatile private var latched: String? = null
+    @Volatile private var latchedUntil = 0L
+    private fun latch(text: String) { latched = text; latchedUntil = System.nanoTime() + 6_000_000_000L }
+    private fun withLatch(a: AppState): AppState = if (a.rejected == null && latched != null && System.nanoTime() < latchedUntil) a.copy(rejected = latched) else a
+
     init {
         scope.launch {
             while (isActive && !closed) {
                 val st = s.value
                 delay(if (st.stage == Stage.Working || st.tor is TorState.Bootstrapping) pollMillisBusy else pollMillis)
                 if (st.stage == Stage.Wiped) continue
-                s.value = Snapshot.parse(native.call("snapshot", null))
+                s.value = withLatch(Snapshot.parse(native.call("snapshot", null)))
             }
         }
     }
@@ -36,9 +42,20 @@ class RustBackend(
     private fun op(name: String, arg: CharArray? = null, vararg more: Pair<String, CharArray?>) {
         scope.launch {
             try {
-                var json = native.call(name, arg)
-                for ((n, a) in more) { json = native.call(n, a) }
-                s.value = Snapshot.parse(json)
+                // A chain stops at the FIRST refused step: running the next step anyway could act on the wrong contact or type into a stale prompt.
+                var parsed = Snapshot.parse(native.call(name, arg))
+                var refused = parsed.rejected
+                for ((n, a) in more) {
+                    if (refused != null) break
+                    parsed = Snapshot.parse(native.call(n, a))
+                    refused = parsed.rejected
+                }
+                // a refused step may have left a text prompt open: close it, or every later step is refused and the user cannot even go offline
+                if (refused != null) {
+                    repeat(2) { if (parsed.promptOpen) parsed = Snapshot.parse(native.call("cancel", null)) }
+                    latch(refused)
+                }
+                s.value = withLatch(parsed.copy(rejected = refused ?: parsed.rejected))
             } finally {
                 arg?.fill('\u0000')
                 more.forEach { it.second?.fill('\u0000') }
@@ -55,7 +72,7 @@ class RustBackend(
     override fun open(contactId: Int) = op("select", text(contactId.toString()), "open_chat" to null)
     override fun closeChat() = op("back")
     override fun send(contactId: Int, text: String) = op("send", text(text))
-    override fun addContact(name: String) = op("cmd", text("n"), "submit" to text(name))
+    override fun addContact(name: String) = op("new_contact", text(name))
     override fun startOffer() = op("cmd", text("T"))
     override fun joinWithLink(link: String, code: CharArray) = op("cmd", text("J"), "submit" to text(link.trim()), "secret" to code, "enter" to null)
     override fun cancelPairing() = op("cmd", text("x"))

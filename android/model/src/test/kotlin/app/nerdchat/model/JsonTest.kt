@@ -17,6 +17,17 @@ class JsonTest {
         assertEquals("q\"b\\n\nr\rt\tc\u0001d\u007fe\u2028ü😀", (Json.parse(rust) as Map<String, Any?>)["t"])
     }
 
+    @Test fun veryDeepNestingIsRefusedInsteadOfOverflowingTheStack() {
+        assertFailsWith<IllegalArgumentException> { Json.parse("[".repeat(100) + "]".repeat(100)) }
+        assertEquals(listOf(listOf(listOf<Any?>())), Json.parse("[[[]]]"))
+        assertFailsWith<IllegalArgumentException> { Json.parse("{\"a\":".repeat(100) + "1" + "}".repeat(100)) }
+    }
+
+    @Test fun aUnicodeEscapeNeedsExactlyFourHexDigits() {
+        assertEquals("A", Json.parse("\"\\u0041\""))
+        for (bad in listOf("\"\\u+041\"", "\"\\u-041\"", "\"\\u 041\"", "\"\\u00zz\"")) assertFailsWith<IllegalArgumentException>(bad) { Json.parse(bad) }
+    }
+
     @Test fun rejectsBrokenInputInsteadOfGuessing() {
         for (bad in listOf("", "{", "{\"a\":}", "[1,]", "{\"a\":1} x", "\"unterminated", "\"bad \\q escape\"", "{\"a\" 1}", "nul", "\"raw\ncontrol\"", "\"\\u12\"")) {
             assertFailsWith<IllegalArgumentException>(bad) { Json.parse(bad) }

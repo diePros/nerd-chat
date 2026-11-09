@@ -41,6 +41,16 @@ class SnapshotTest {
         assertTrue(Snapshot.parse(snap("").replace("\"keep_outbox\":false", "\"keep_outbox\":true")).keepOutbox)
     }
 
+    @Test fun unknownScreensAndTheCoresPrivacyScreenNeverShowTheMainUi() {
+        for (screen in listOf("help", "something_new", "error")) {
+            assertEquals(Stage.Error, Snapshot.parse(snap("").replace("\"screen\":\"main\"", "\"screen\":\"$screen\"")).stage, screen)
+        }
+        val locked = Snapshot.parse(snap(",\"privacy_locked\":true"))
+        assertEquals(Stage.Error, locked.stage); assertTrue(locked.statusIsError)
+        assertTrue(Snapshot.parse(snap("").replace("\"screen\":\"main\"", "\"screen\":\"prompt\"")).promptOpen)
+        assertFalse(Snapshot.parse(snap("")).promptOpen)
+    }
+
     @Test fun anUnknownVersionOrGarbageIsAnErrorStateNotACrash() {
         for (bad in listOf(snap("").replace("\"v\":1", "\"v\":2"), "not json", "{}", "[]")) {
             val s = Snapshot.parse(bad)

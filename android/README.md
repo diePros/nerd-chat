@@ -40,7 +40,7 @@ compileSdk 37 (SDK platform `android-37.0`), minSdk 29, targetSdk 36, NDK r29 (`
 state machine as the terminal and the Linux GUI) -> a JSON snapshot back. All calls run on ONE thread; a ticker polls the core (key derivation,
 Tor start, incoming messages and confirmations arrive by polling). The bridge GUARDS what the screens may do: text reaches the core only where the
 core itself takes text, only an allowlist of one-letter commands exists (no quit, no files, no local link), and a message over the compose limit is
-refused instead of silently truncated. Passwords and the pairing code travel as `char[]` and are wiped on both sides.
+refused instead of silently truncated. Passwords and the pairing code travel as `char[]`; the Kotlin array and the Rust copy are wiped, but the snapshot text (chat lines, the pairing code on screen) is copied into Java strings that cannot be wiped, and the `jni` crate keeps one unwiped Rust-side copy per snapshot (tracker R32-B3).
 
 ## Changing the colours
 All palettes are in **`model/src/main/kotlin/app/nerdchat/model/Palettes.kt`**: one block per palette, light and dark scheme, plain hex.

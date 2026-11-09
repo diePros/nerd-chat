@@ -115,10 +115,12 @@ fun DeliveryMark(d: Delivery?) {
 
 @Composable
 private fun Composer(draft: String, onChange: (String) -> Unit, onSend: () -> Unit) {
+    // the core's draft holds 2048 bytes: refuse here instead of letting the text be cut or the send refused out of sight
+    val tooLong = draft.encodeToByteArray().size > 2048
     Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).navigationBarsPadding().imePadding().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-        SecureField(draft, onChange, "Message", singleLine = false, maxLines = 5, modifier = Modifier.weight(1f))
+        SecureField(draft, onChange, if (tooLong) "Too long: 2048 bytes at most" else "Message", singleLine = false, maxLines = 5, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(8.dp))
-        val on = draft.isNotBlank()
+        val on = draft.isNotBlank() && !tooLong
         Box(Modifier.size(50.dp).clip(CircleShape).background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline).clickable(enabled = on, onClick = onSend), contentAlignment = Alignment.Center) {
             Icon(NerdIcons.Send, "Send", if (on) MaterialTheme.colorScheme.onPrimary else NerdTheme.colors.muted)
         }

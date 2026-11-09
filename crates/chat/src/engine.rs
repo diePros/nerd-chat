@@ -87,6 +87,17 @@ pub fn we_dial(my_sign_pub: &[u8; 32], peer: &Bundle, our_can_host: bool) -> boo
 }
 
 /// Everything the engine needs to serve one contact. The secret is wiped on drop.
+/// The engine's queue after a (re-)add: what it already holds comes FIRST and stays, then the kept texts it does not hold yet (a text typed while the engine was
+/// starting is such a text), without ever exceeding `MAX_UNCONFIRMED` or holding one id twice.
+fn merge_queue(carried: VecDeque<(proto::MsgId, Zeroizing<String>)>, seed: Vec<(proto::MsgId, Zeroizing<String>)>) -> VecDeque<(proto::MsgId, Zeroizing<String>)> {
+    let mut q = carried;
+    for (mid, text) in seed {
+        if q.len() >= MAX_UNCONFIRMED { break; }
+        if !q.iter().any(|(m, _)| *m == mid) { q.push_back((mid, text)); }
+    }
+    q
+}
+
 pub struct ContactCfg {
     pub id: [u8; 8], secret: Zeroizing<Vec<u8>>, pub peer: Bundle, our_can_host: bool, host_anyway: bool,
     /// Our proposed (not yet acknowledged) transport keys as a full identity secret; hosted next to the current service.
@@ -424,7 +435,7 @@ impl Core {
             }
         }
         self.rts.insert(cfg.id, Rt {
-            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: if carried.is_empty() { cfg.outbox.into_iter().collect() } else { carried }, seen: carried_seen, peer_mode: PeerMode::Unknown, up_at: Instant::now(), dialing: false,
+            secret: cfg.secret, peer: cfg.peer, my_onion, my_keys, fallback, retry, next, we_dial, epoch, conn: None, unacked: merge_queue(carried, cfg.outbox), seen: carried_seen, peer_mode: PeerMode::Unknown, up_at: Instant::now(), dialing: false,
             backoff: self.t.min_backoff, next_dial: Instant::now(), iso, stop,
         });
     }
@@ -594,6 +605,7 @@ impl Core {
         let full = match self.rts.get(&id) { None => return unsent(self, "unknown contact"), Some(rt) => rt.unacked.len() >= MAX_UNCONFIRMED };
         if full { return unsent(self, "outbox full: this message was NOT sent, wait until the contact has confirmed the earlier ones"); }
         let Some(rt) = self.rts.get_mut(&id) else { return };
+        if rt.unacked.iter().any(|(m, _)| *m == mid) { return; } // the same id twice (the app also hands over kept texts): queued once
         match (&rt.conn, rt.peer_mode) {
             // an old peer cannot confirm: write the plain frame and consider it done (exactly the v0.1.0 behaviour)
             (Some((_, tx)), PeerMode::Legacy) => { let _ = tx.send(Out::TextPlain(text)); let _ = self.ev.send(Event::Delivered { id, mid }); }
@@ -1258,6 +1270,37 @@ mod tests {
         ed.send_with_mid(ID, mid, Zeroizing::new("with my id".into()));
         assert!(got(&el, "with my id"));
         assert!(wait(&ed, |e| matches!(e, Event::Delivered { mid: m, .. } if *m == mid)));
+    }
+
+    #[test]
+    fn a_re_add_keeps_the_queue_and_appends_the_kept_texts_the_engine_does_not_hold() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let (m1, m2) = ([0x31u8; 8], [0x32u8; 8]);
+        let ed = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &d, lb.clone())], fast());
+        ed.send_with_mid(ID, m1, Zeroizing::new("held by the engine".into()));
+        // the app re-adds the contact with its vault outbox: m1 (already held) and m2 (typed while the engine was starting)
+        ed.add(ContactCfg::new(ID, &d, lb.clone()).with_outbox(vec![(m1, Zeroizing::new("held by the engine".into())), (m2, Zeroizing::new("kept in the vault only".into()))]));
+        let el = start(&net, &l, &db, ID);
+        assert!(connected(&el) && connected(&ed));
+        assert!(got(&el, "held by the engine") && got(&el, "kept in the vault only"), "both arrive, in order");
+        let mut delivered = vec![];
+        assert!(wait(&ed, |e| if let Event::Delivered { mid, .. } = e { delivered.push(*mid); delivered.len() == 2 } else { false }));
+        assert_eq!(delivered, vec![m1, m2], "m1 once (not twice), then m2");
+    }
+
+    #[test]
+    fn the_same_id_sent_twice_is_queued_once() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let ed = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &d, lb.clone())], fast());
+        let mid = [0x41u8; 8];
+        ed.send_with_mid(ID, mid, Zeroizing::new("once".into()));
+        ed.send_with_mid(ID, mid, Zeroizing::new("once".into()));
+        let el = start(&net, &l, &db, ID);
+        assert!(connected(&el) && connected(&ed));
+        assert!(got(&el, "once"));
+        assert!(!wait_for(&el, Duration::from_millis(600), |e| matches!(e, Event::Message { text, .. } if &***text == "once")), "never shown a second time");
     }
 
     fn offer_xid(e: &Engine) -> (file::Xid, u32) {

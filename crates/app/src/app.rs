@@ -308,6 +308,8 @@ pub struct App {
     start_rx: Option<Receiver<StartMsg>>,
     /// ids the engine was started with (to reconcile with the vault when it becomes ready)
     started_ids: HashSet<[u8; 8]>,
+    /// The ids of the kept texts the engine was started with: a text kept WHILE the engine was still starting is not among them and is handed over when it is ready.
+    started_outbox: HashSet<[u8; 8]>,
     stop_rx: Option<Receiver<()>>,
     pub online: Online,
     chats: HashMap<[u8; 8], Vec<ChatLine>>,
@@ -370,7 +372,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -387,7 +389,10 @@ impl App {
     }
     /// Is the ENCRYPTED OUTBOX on? Then texts the contact has not confirmed are kept in the vault (never a timestamp) until they are confirmed, so they survive
     /// a restart or the OS killing the app. The user's choice (key `O`) is stored in the vault; until it is made the front end's default applies.
-    pub fn keep_outbox(&self) -> bool { self.vf.as_ref().and_then(|v| v.store.keep_outbox).unwrap_or(self.cfg.keep_outbox_default) }
+    pub fn keep_outbox(&self) -> bool {
+        // no stored choice, but texts ARE kept (written by a front end whose default is on): the feature is in use, whatever THIS front end's default says
+        self.vf.as_ref().is_some_and(|v| v.store.keep_outbox.unwrap_or(self.cfg.keep_outbox_default || v.store.contacts.iter().any(|c| !c.outbox.is_empty())))
+    }
 
     /// Texts that are queued on a line but NOT in the encrypted outbox: they live in RAM only and are lost if the app ends or the engine stops.
     fn queued_not_kept(&self) -> usize {
@@ -399,19 +404,28 @@ impl App {
         if self.screen != Screen::Main || self.vf.is_none() { return; }
         let before = self.vf.as_ref().and_then(|v| v.store.keep_outbox);
         if before == Some(on) { return; }
+        let was_on = self.keep_outbox(); // the EFFECTIVE state: the front end's default counts
         if on {
-            // keep what is waiting right now (the lines hold the text and the id), within the caps; what does not fit stays RAM-only and says so
-            let waiting: Vec<([u8; 8], [u8; 8], Zeroizing<String>)> = self.chats.iter().flat_map(|(id, l)| l.iter().filter(|x| x.mine && x.queued).filter_map(move |x| x.mid.map(|m| (*id, m, x.text.clone())))).collect();
+            // keep what is waiting right now (the lines hold the text and the id), within the caps; what does not fit stays RAM-only and says so.
+            // If it was already on (by default) everything waiting is in the vault already: only the choice is stored.
+            let waiting: Vec<([u8; 8], [u8; 8], Zeroizing<String>)> = if was_on { Vec::new() } else {
+                self.chats.iter().flat_map(|(id, l)| l.iter().filter(|x| x.mine && x.queued).filter_map(move |x| x.mid.map(|m| (*id, m, x.text.clone())))).collect()
+            };
             let v = self.vf.as_mut().expect("checked");
             v.store.keep_outbox = Some(true);
-            let mut refused = 0;
+            let (mut refused, mut added): (usize, Vec<([u8; 8], [u8; 8])>) = (0, Vec::new());
             for (cid, mid, text) in waiting {
-                match v.store.contacts.iter().position(|c| c.id == cid) {
-                    Some(i) if v.store.queue_outbox(i, mid, &text).is_ok() => {}
-                    _ => refused += 1,
-                }
+                let Some(i) = v.store.contacts.iter().position(|c| c.id == cid) else { refused += 1; continue };
+                if v.store.contacts[i].outbox.iter().any(|m| m.mid == mid) { continue; } // already kept: not a refusal
+                if v.store.queue_outbox(i, mid, &text).is_ok() { added.push((cid, mid)); } else { refused += 1; }
             }
-            if !self.save() { let v = self.vf.as_mut().expect("checked"); v.store.clear_outbox(); v.store.keep_outbox = before; return; }
+            if !self.save() {
+                // undo ONLY what this call added: texts kept before it must stay
+                let v = self.vf.as_mut().expect("checked");
+                for (cid, mid) in added { v.store.outbox_done(cid, mid); }
+                v.store.keep_outbox = before;
+                return;
+            }
             if refused > 0 { self.err(format!("Encrypted outbox ON, but {refused} waiting message(s) did not fit and stay in RAM only.")); }
             else { self.ok("Encrypted outbox ON: unsent messages are kept in the vault until the contact confirms them, and survive a restart."); }
         } else {
@@ -426,13 +440,28 @@ impl App {
                 return;
             }
             drop(taken); // zeroized
-            // without the engine the RAM copies are gone too: those lines may or may not have arrived (the same words as going offline)
-            if self.engine.is_none() { for x in self.chats.values_mut().flatten().filter(|x| x.queued) { x.queued = false; x.unconfirmed = true; } }
+            // What happens to the lines depends on who still holds the text: a running engine has every text (it was given them when it started or when they were
+            // sent), a STARTING engine has the ones kept before it started, no engine has none. The rest "may or may not have arrived" (the same words as going offline).
+            let starting = matches!(self.online, Online::Starting(_));
+            let seeded = self.started_outbox.clone();
+            if self.engine.is_none() {
+                for x in self.chats.values_mut().flatten().filter(|x| x.queued && !(starting && x.mid.is_some_and(|m| seeded.contains(&m)))) { x.queued = false; x.unconfirmed = true; }
+            }
             self.ok("Encrypted outbox OFF: messages are RAM-only again and the kept ones were removed from the vault.");
         }
     }
 
     fn toggle_keep_outbox(&mut self) { let on = !self.keep_outbox(); self.set_keep_outbox(on); }
+
+    /// Texts typed (and kept in the vault) while the engine was still starting are not in the snapshot it started with: give them to it now, in
+    /// order. Only for contacts the engine already serves; a contact added by `reconcile` got its whole outbox in its own `ContactCfg`.
+    fn hand_over_texts_kept_while_starting(&mut self) {
+        let (Some(e), Some(v)) = (self.engine.as_ref(), self.vf.as_ref()) else { return };
+        for c in v.store.contacts.iter().filter(|c| c.peer.is_some() && self.started_ids.contains(&c.id)) {
+            for m in c.outbox.iter().filter(|m| !self.started_outbox.contains(&m.mid)) { e.send_with_mid(c.id, m.mid, m.text.clone()); }
+        }
+        self.started_outbox.clear();
+    }
 
     /// After unlocking: show the texts the vault kept as "(queued)" lines, so the user sees what is still waiting.
     fn seed_outbox_lines(&mut self) {
@@ -573,6 +602,7 @@ impl App {
         self.start_rx = None;
         self.stop_rx = None;
         self.started_ids.clear();
+        self.started_outbox.clear();
         self.online = Online::Offline;
         self.chats.clear();
         self.linked.clear();
@@ -1326,7 +1356,12 @@ impl App {
     }
 
     fn save(&mut self) -> bool {
-        match self.vf().save() { Ok(()) => true, Err(e) => { self.err(format!("SAVE FAILED: {e}")); false } }
+        match self.vf().save() {
+            Ok(()) => true,
+            // the vault file IS on disk: memory and disk agree, so nothing may be rolled back; only the rollback protection is weaker until the next save
+            Err(StoreError::CounterWrite(m)) => { self.err(format!("WARNING: saved, but the rollback-counter file could not be written ({m}): rollback of the vault would not be noticed until the next successful save")); true }
+            Err(e) => { self.err(format!("SAVE FAILED: {e}")); false }
+        }
     }
 
     fn submit(&mut self, p: Prompt, text: String) {
@@ -1654,6 +1689,7 @@ impl App {
         let Some(vf) = self.vf.as_ref() else { return };
         let contacts: Vec<ContactCfg> = vf.store.contacts.iter().filter_map(|c| self.cfg_of(c)).collect();
         self.started_ids = contacts.iter().map(|c| c.id).collect();
+        self.started_outbox = if self.keep_outbox() { vf.store.contacts.iter().filter(|c| c.peer.is_some()).flat_map(|c| c.outbox.iter().map(|m| m.mid)).collect() } else { HashSet::new() };
         let (factory, tor, timing) = (self.cfg.transport.clone(), self.cfg.tor.clone(), self.cfg.timing);
         let (tx, rx) = channel();
         thread::spawn(move || {
@@ -1736,6 +1772,8 @@ impl App {
             if let Err(e) = queued { return self.err(format!("Cannot keep the message: {e}. Your draft is kept.")); }
             if !self.save() { if let Some(v) = self.vf.as_mut() { v.store.outbox_done(id, mid); } return; } // `save` said why; the draft is kept
         }
+        // a "saved, but the counter file failed" warning from `save` must stay visible: the status lines below would overwrite it
+        let warned = self.error && self.status.starts_with("WARNING: saved");
         let text = self.compose.take_string();
         let linked = self.linked.contains(&id);
         // keep a wiped-on-drop copy for the screen, hand the other to the engine
@@ -1744,7 +1782,8 @@ impl App {
         // "(queued)" = not yet CONFIRMED by the contact's app (connected or not): the engine resends it on every new connection
         self.push_line(id, ChatLine { mine: true, text: shown, queued: true, saved: false, unsent: false, unconfirmed: false, mid: Some(mid) });
         self.scroll = 0; // sending jumps to the newest line
-        if self.engine.is_none() { self.ok("Saved in your encrypted outbox. It is sent when you are online and the contact is reachable."); }
+        if warned { /* keep the warning */ }
+        else if self.engine.is_none() { self.ok("Saved in your encrypted outbox. It is sent when you are online and the contact is reachable."); }
         else if !linked { self.ok(if keep { "Peer is not connected: message kept in your encrypted outbox, delivered when they come online." } else { "Peer is not connected: message queued in RAM, delivered when they come online (lost if you quit)." }); }
     }
 
@@ -1806,7 +1845,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(StartMsg::Progress(p)) => self.online = Online::Starting(p),
-                    Ok(StartMsg::Ready(e)) => { self.offers.clear(); self.accepted.clear(); self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
+                    Ok(StartMsg::Ready(e)) => { self.offers.clear(); self.accepted.clear(); self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.hand_over_texts_kept_while_starting(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
                     Ok(StartMsg::Failed(m)) => { self.online = Online::Failed(m.clone()); keep = false; self.err(format!("Could not go online: {m}")); break; }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => { self.online = Online::Failed("start thread died".into()); keep = false; break; }
@@ -3885,7 +3924,8 @@ mod tests {
         let (_net, mut a, mut b) = linked_pair(d.path());
         go_online(&mut a);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].online == Online::Online));
-        a.handle(Key::Enter); say_in_chat(&mut a, "ram only line");                 // feature still off: RAM only
+        a.vf.as_mut().unwrap().store.keep_outbox = Some(false);                      // an explicit OFF: the only state in which texts can be RAM-only next to a full vault outbox
+        a.handle(Key::Enter); say_in_chat(&mut a, "ram only line");                 // feature off: RAM only
         a.handle(Key::Esc);
         for i in 0..nerd_chat_store::MAX_OUTBOX { a.vf.as_mut().unwrap().store.queue_outbox(0, [i as u8 + 1; 8], "filler").unwrap(); } // the vault outbox is full
         a.handle(Key::Char('O'));
@@ -3961,5 +4001,90 @@ mod tests {
         drop(a);
         let a = reopen_net_app(d.path(), "a.vault", &net);
         assert!(!a.keep_outbox() && a.vf.as_ref().unwrap().store.keep_outbox.is_none());
+    }
+
+    // ---- regressions found by the adversarial review of the encrypted outbox (review 30)
+
+    #[test]
+    fn a_text_typed_while_the_engine_is_starting_is_sent_when_it_is_ready() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        go_online(&mut b);
+        go_online(&mut a);
+        assert!(matches!(a.online, Online::Starting(_)), "typing happens during the start");
+        a.handle(Key::Enter); say_in_chat(&mut a, "typed while starting");
+        assert_eq!(kept(&a), ["typed while starting"]);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "typed while starting"))), "the contact receives it in THIS session");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| !x[0].chat_lines()[0].queued), "and confirms it");
+        assert!(kept(&a).is_empty());
+    }
+
+    #[test]
+    fn switching_the_outbox_on_when_it_is_already_on_by_default_only_stores_the_choice() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(Some(d.path().join("def.vault"))); c.keep_outbox_default = true;
+        let mut a = open_app(c);
+        add_peer(&mut a, "bob");
+        a.handle(Key::Enter); say_in_chat(&mut a, "kept by default"); a.handle(Key::Esc);
+        assert_eq!(kept(&a), ["kept by default"]);
+        a.handle(Key::Char('O'));                 // the user switches it OFF ...
+        assert!(!a.keep_outbox() && kept(&a).is_empty());
+        let mut c = cfg(Some(d.path().join("def2.vault"))); c.keep_outbox_default = true;
+        let mut b = open_app(c);
+        add_peer(&mut b, "bob");
+        b.handle(Key::Enter); say_in_chat(&mut b, "kept by default"); b.handle(Key::Esc);
+        b.set_keep_outbox(true);                  // ... and here "ON" is chosen explicitly while it is already on by default
+        assert!(!b.error, "no false 'did not fit' claim: {}", b.status);
+        assert_eq!(kept(&b), ["kept by default"], "nothing was re-queued, nothing lost");
+        assert_eq!(b.vf.as_ref().unwrap().store.keep_outbox, Some(true), "the choice itself is stored now");
+    }
+
+    #[test]
+    fn switching_the_outbox_off_while_the_engine_starts_labels_the_lines_by_who_holds_them() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        a.handle(Key::Enter); say_in_chat(&mut a, "before the start"); a.handle(Key::Esc);
+        go_online(&mut a);
+        assert!(matches!(a.online, Online::Starting(_)));
+        a.handle(Key::Enter); say_in_chat(&mut a, "during the start"); a.handle(Key::Esc);
+        a.handle(Key::Char('O'));
+        assert!(kept(&a).is_empty());
+        let l = a.chat_lines();
+        assert!(l[0].queued && !l[0].unconfirmed, "the starting engine was given this one: still on its way");
+        assert!(!l[1].queued && l[1].unconfirmed, "nobody holds this one any more: it may not arrive, and says so");
+        go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[1].chats.values().any(|l| l.iter().any(|m| &*m.text == "before the start"))));
+    }
+
+    #[test]
+    fn a_failed_counter_write_after_the_vault_was_written_rolls_nothing_back() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, _b) = linked_pair(d.path());
+        a.handle(Key::Char('O'));
+        // the counter file can no longer be replaced (a directory is in its place); the vault file still can: this works even as root
+        let counter = nerd_chat_store::counter_path_for(&d.path().join("a.vault"));
+        std::fs::remove_file(&counter).unwrap(); std::fs::create_dir(&counter).unwrap();
+        a.handle(Key::Enter); say_in_chat(&mut a, "saved although the counter failed");
+        assert!(a.error && a.status.contains("saved, but the rollback-counter file"), "{}", a.status);
+        assert_eq!(kept(&a), ["saved although the counter failed"], "memory still equals what is on disk: the text is NOT rolled back");
+        assert!(a.chat_lines()[0].queued, "and it is on its way");
+    }
+
+    #[test]
+    fn kept_texts_without_a_stored_choice_keep_the_feature_on_in_a_front_end_whose_default_is_off() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(Some(d.path().join("x.vault"))); c.keep_outbox_default = true;      // the phone: on by default, no choice ever stored
+        let mut a = open_app(c);
+        add_peer(&mut a, "bob");
+        a.handle(Key::Enter); say_in_chat(&mut a, "written on the phone"); a.handle(Key::Esc);
+        assert_eq!(a.vf.as_ref().unwrap().store.keep_outbox, None);
+        drop(a);
+        let mut c = cfg(Some(d.path().join("x.vault"))); c.keep_outbox_default = false;     // the same vault opened by the terminal
+        let mut a = App::new(c);
+        type_str(&mut a, "correct horse battery"); a.handle(Key::Enter);
+        assert!(a.keep_outbox(), "texts are kept, so the feature is in use whatever this front end's default says");
+        assert_eq!(a.queued_not_kept(), 0, "and the line counts as kept");
     }
 }

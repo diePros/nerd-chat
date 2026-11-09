@@ -43,7 +43,9 @@ fn screen_str(s: &Screen) -> (&'static str, Option<&'static str>) {
 }
 
 pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
-    let mut w = W::new();
+    // generous size estimate so that the buffer normally never has to grow (see `W::with_capacity`)
+    let est = 8192 + app.chat_lines().iter().map(|l| l.text.len() * 2 + 128).sum::<usize>() + app.contact_rows().len() * 256 + app.alerts.iter().map(|(t, _)| t.len() * 2 + 64).sum::<usize>();
+    let mut w = W::with_capacity(est);
     w.obj();
     w.f_num("v", VERSION);
     let (screen, prompt) = screen_str(&app.screen);

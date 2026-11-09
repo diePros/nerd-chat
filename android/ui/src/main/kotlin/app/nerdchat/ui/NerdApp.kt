@@ -46,7 +46,7 @@ fun NerdApp(
     }
 
     backHandler(st.stage == Stage.Ready && (dest is Dest.Chat || dest is Dest.Details || (dest is Dest.Main && (dest as Dest.Main).tab != 0))) {
-        dest = when (val d = dest) { is Dest.Details -> Dest.Chat(d.id); is Dest.Chat -> { backend.closeChat(); Dest.Main(0) }; else -> Dest.Main(0) }
+        dest = when (val d = dest) { is Dest.Details -> { backend.open(d.id); Dest.Chat(d.id) }; is Dest.Chat -> { backend.closeChat(); Dest.Main(0) }; else -> Dest.Main(0) }
     }
     val panic = { backend.panic() }
 
@@ -59,6 +59,8 @@ fun NerdApp(
             }
             Column(Modifier.fillMaxSize()) {
                 st.alerts.firstOrNull()?.let { AlertBanner(it, st.alerts.size - 1, backend::acknowledgeAlert) }
+                // the bridge refused a step (and the core's own reason, if it has one): shown for a few seconds, never silently dropped
+                st.rejected?.let { r -> NoticeBanner(if (st.statusIsError && st.status.isNotBlank()) "$r\n${st.status}" else r) }
                 Box(Modifier.weight(1f)) {
                     when (val d = dest) {
                         is Dest.Main -> Column(Modifier.fillMaxSize()) {
@@ -84,13 +86,20 @@ fun NerdApp(
                             ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) }, keepOutbox = st.keepOutbox)
                         } ?: run { dest = Dest.Main(0) }
                         is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                            DetailsScreen(c, st.verifyNumber, onBack = { dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify)
+                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify)
                         } ?: run { dest = Dest.Main(0) }
                     }
                 }
             }
             if (st.pairingWaiting) InPersonDialog(onAnswer = backend::answerInPerson)
         }
+    }
+}
+
+@Composable
+private fun NoticeBanner(text: String) {
+    Surface(color = NerdTheme.colors.warningContainer, contentColor = NerdTheme.colors.onWarningContainer) {
+        Text(text, fontSize = 14.sp, modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp))
     }
 }
 

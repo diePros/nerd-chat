@@ -83,4 +83,7 @@ SBS6 is a one-way upgrade (an older binary cannot open it).
 - A deleted text may still sit in an old copy of the vault (flash wear levelling, backups, a copied file) until that copy is overwritten; it stays encrypted under the vault key.
 - After a restart the receiver's list of already-seen ids is gone: a text it already showed, whose confirmation was lost, can appear twice. A duplicate was chosen over a loss.
 - An older vault copy brought back would resend texts already delivered; the rollback counter exists to catch exactly that.
+- **Old peers and slow circuits.** For a v0.1.0-style peer (and for a modern peer whose CAPS frame takes longer than 5 s to arrive) kept texts are written as plain frames and reported `Delivered` as soon as they are handed to the connection thread; the app then deletes its vault copy. A connection that dies at that moment loses a text that was "kept until confirmed" (tracker R32-A4, open).
+- **After every restart** the kept texts go out as a burst right after the capability frame, followed by one batched confirmation 1-5 s later: the same shape as texts queued while the contact was away (C6-timing).
+- **Typing while Tor starts** works: a text kept while the engine is still starting is handed to it as soon as it is ready.
 

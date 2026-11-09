@@ -79,4 +79,6 @@ data class AppState(
     val rejected: String? = null,
     /** unconfirmed messages are kept in the encrypted vault until the contact confirms them (they survive a restart or the OS killing the app) */
     val keepOutbox: Boolean = false,
+    /** the core has a text prompt open (a half-finished step): the backend closes it when a step of a chain was refused */
+    val promptOpen: Boolean = false,
 )

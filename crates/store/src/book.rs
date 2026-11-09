@@ -148,7 +148,7 @@ impl Store {
 
     /// Keep one unconfirmed text of contact `idx` in the vault. Refuses beyond the caps and for a contact without a peer instead of dropping anything silently.
     pub fn queue_outbox(&mut self, idx: usize, mid: [u8; 8], text: &str) -> Result<(), StoreError> {
-        if text.is_empty() || text.len() > MAX_OUTBOX_LEN { return Err(StoreError::Corrupt); }
+        if text.is_empty() || text.len() > MAX_OUTBOX_LEN { return Err(StoreError::BadText); }
         if self.outbox_bytes() + text.len() > MAX_OUTBOX_TOTAL { return Err(StoreError::OutboxFull); }
         let c = self.contacts.get_mut(idx).ok_or(StoreError::Corrupt)?;
         if c.peer.is_none() || c.outbox.len() >= MAX_OUTBOX || c.outbox.iter().any(|m| m.mid == mid) { return Err(StoreError::OutboxFull); }
@@ -174,6 +174,12 @@ impl Store {
     /// Serialize (wiped on drop). Format: magic | count:u16 | per contact:
     /// id[8] | name_len:u8 | name | identity[128] | flags:u8 (bit0 peer, bit1/2 trust, bit3 host_anyway, bit4 peer can_host, bit5/6 advertised can_host set/value) | [sign[32] dh[32] kem[1184]]
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        // the lengths below are written as u8/u16: a value that does not fit would be saved silently and the vault would never open again, so fail LOUDLY before anything is sealed
+        for c in &self.contacts {
+            assert!(c.name.len() <= u8::MAX as usize && c.saved.len() <= u16::MAX as usize && c.outbox.len() <= u16::MAX as usize, "contact record too large to encode");
+            assert!(c.saved.iter().all(|m| m.text.len() <= u16::MAX as usize) && c.outbox.iter().all(|m| m.text.len() <= u16::MAX as usize), "message too large to encode");
+        }
+        assert!(self.contacts.len() <= u16::MAX as usize, "too many contacts to encode");
         // reserve the final size up front: a growing Vec would leave copies of keys and saved messages in freed heap
         let mut v = Zeroizing::new(Vec::with_capacity(self.encoded_size()));
         // SBS6 only when the feature is in use: every other vault stays SBS5 and stays readable by older binaries
@@ -358,9 +364,23 @@ mod tests {
         let big = "y".repeat(32 * 1024);
         let mut n = 0u8; while s.outbox_bytes() + big.len() <= MAX_OUTBOX_TOTAL { s.queue_outbox(b, [100 + n; 8], &big).unwrap(); n += 1; }
         assert!(matches!(s.queue_outbox(b, [250; 8], &big), Err(StoreError::OutboxFull)), "in total");
-        assert!(matches!(s.queue_outbox(b, [251; 8], ""), Err(StoreError::Corrupt)) && matches!(s.queue_outbox(b, [252; 8], &"q".repeat(32 * 1024 + 1)), Err(StoreError::Corrupt)));
+        assert!(matches!(s.queue_outbox(b, [251; 8], ""), Err(StoreError::BadText)) && matches!(s.queue_outbox(b, [252; 8], &"q".repeat(32 * 1024 + 1)), Err(StoreError::BadText)));
         let mut np = Store::new(); let c = np.add_contact("nopeer").unwrap();
         assert!(matches!(np.queue_outbox(c, [1; 8], "x"), Err(StoreError::OutboxFull)), "no peer key: it could never be sent");
+    }
+
+    #[test]
+    #[should_panic(expected = "message too large to encode")]
+    fn encode_refuses_to_truncate_a_length_instead_of_writing_a_vault_that_never_opens() {
+        let mut s = Store::new(); let a = paired(&mut s, "alice");
+        s.contacts[a].outbox.push(OutMsg { mid: [1; 8], text: Zeroizing::new("x".repeat(70_000)) }); // bypasses queue_outbox on purpose
+        let _ = s.encode();
+    }
+
+    #[test]
+    fn an_over_long_text_is_a_bad_text_not_corruption() {
+        let mut s = Store::new(); let a = paired(&mut s, "alice");
+        assert!(matches!(s.queue_outbox(a, [1; 8], &"q".repeat(32 * 1024 + 1)), Err(StoreError::BadText)));
     }
 
     #[test]

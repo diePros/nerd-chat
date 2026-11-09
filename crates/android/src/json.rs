@@ -22,7 +22,9 @@ fn escape(out: &mut String, v: &str) {
 }
 
 impl W {
-    pub fn new() -> Self { W { s: String::with_capacity(1024), need_comma: vec![false] } }
+    pub fn new() -> Self { Self::with_capacity(1024) }
+    /// Pre-sized: a growing String frees every earlier, partly written copy of the snapshot (chat text included) without wiping it.
+    pub fn with_capacity(n: usize) -> Self { W { s: String::with_capacity(n), need_comma: vec![false] } }
     fn sep(&mut self) { if let Some(n) = self.need_comma.last_mut() { if *n { self.s.push(','); } *n = true; } }
     fn key(&mut self, k: &str) { self.sep(); escape(&mut self.s, k); self.s.push(':'); }
     pub fn obj(&mut self) { self.sep(); self.s.push('{'); self.need_comma.push(false); }

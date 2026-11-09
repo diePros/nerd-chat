@@ -3,7 +3,17 @@ package app.nerdchat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
+import android.text.InputType
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputInterceptor
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
 import android.os.PersistableBundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -20,6 +30,9 @@ class MainActivity : ComponentActivity() {
         // No screenshots, no screen recording, and a blank thumbnail in the recent-apps list.
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         enableEdgeToEdge()
+        // no autofill service may offer to save the vault password; accessibility services get no content of this window (Android 14+)
+        window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+        if (Build.VERSION.SDK_INT >= 34) window.decorView.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
 
         val prefs = getSharedPreferences("look", Context.MODE_PRIVATE) // only the colour choice: nothing sensitive
         val palette = Palettes.byId(prefs.getString("palette", null))
@@ -27,6 +40,7 @@ class MainActivity : ComponentActivity() {
         val backend = (application as NerdChatApp).backend
 
         setContent {
+            NoKeyboardLearning {
             NerdApp(
                 backend = backend, initialPalette = palette, initialMode = mode,
                 onThemeChanged = { p, m -> prefs.edit().putString("palette", p.id).putString("mode", m.name).apply() },
@@ -34,6 +48,7 @@ class MainActivity : ComponentActivity() {
                 onCopy = ::copySensitive,
                 onExit = { finishAndRemoveTask(); android.os.Process.killProcess(android.os.Process.myPid()) },
             )
+            }
         }
     }
 
@@ -44,3 +59,27 @@ class MainActivity : ComponentActivity() {
         (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
     }
 }
+
+/**
+ * Compose never sets IME_FLAG_NO_PERSONALIZED_LEARNING or TYPE_TEXT_FLAG_NO_SUGGESTIONS (turning auto-correct off only leaves one flag out), so a keyboard such as
+ * Gboard would add typed contact names and messages to its personal dictionary: a lasting copy OUTSIDE the app that panic and purge cannot remove. This wraps every
+ * text field of the app and adds both flags to what the keyboard is told. RUNTIME EFFECT NOT VERIFIED ON A DEVICE (it compiles; a keyboard may still ignore the flag).
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun NoKeyboardLearning(content: @Composable () -> Unit) {
+    InterceptPlatformTextInput(
+        interceptor = PlatformTextInputInterceptor { request, nextHandler ->
+            nextHandler.startInputMethod(object : PlatformTextInputMethodRequest {
+                override fun createInputConnection(outAttributes: EditorInfo): InputConnection {
+                    val connection = request.createInputConnection(outAttributes)
+                    outAttributes.imeOptions = outAttributes.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                    if (outAttributes.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_CLASS_TEXT) outAttributes.inputType = outAttributes.inputType or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    return connection
+                }
+            })
+        },
+        content = content,
+    )
+}
+

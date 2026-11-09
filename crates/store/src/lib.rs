@@ -28,6 +28,10 @@ pub enum StoreError {
     Cancelled,
     #[error("the saved messages are full ({MAX_SAVED} per contact, {} KiB in total): delete some first", MAX_SAVED_TOTAL / 1024)]
     SavedFull,
+    #[error("the vault was written, but its rollback-counter file could not be: {0}")]
+    CounterWrite(String),
+    #[error("a message must be 1 byte to 32 KiB of text")]
+    BadText,
     #[error("the encrypted outbox is full (50 texts per contact, 1 MiB in total) or the contact cannot receive: wait until earlier texts are confirmed")]
     OutboxFull,
     #[error("a rollback-counter file already exists for this path: the vault may have been deleted or the path is wrong. Refusing to create a new vault that would reset it (remove the counter file yourself if this is intentional)")]

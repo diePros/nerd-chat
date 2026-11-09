@@ -56,6 +56,14 @@ impl Bridge {
 
     pub fn app(&self) -> &App { &self.app }
 
+    /// Panic-wipe the core (used when the bridge is re-initialised: a half-finished vault creation must not outlive its replacement).
+    pub fn wipe(&mut self) { self.app.panic_wipe(); }
+
+    /// Remove whatever is in the message draft (Backspace in insert mode): a refused send must never leave text that the NEXT send is glued onto.
+    fn clear_draft(&mut self) {
+        for _ in 0..=COMPOSE_MAX_BYTES { if self.app.compose_text().is_empty() { break; } self.app.handle(Key::Backspace); }
+    }
+
     fn takes_secret(&self) -> bool {
         !self.app.locked && matches!(self.app.screen, Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Prompt(Prompt::JoinCode(_)))
     }
@@ -127,8 +135,11 @@ impl Bridge {
                 if arg.len() > COMPOSE_MAX_BYTES { return Err("message too long"); }
                 self.ensure_insert();
                 if self.app.mode != Mode::Insert { return Err(NOT_NOW); }
+                self.clear_draft(); // a stale draft from an earlier refused send must not be glued onto this one
                 for c in arg.chars().filter(|c| !c.is_control()) { self.app.handle(Key::Char(c)); }
                 self.app.handle(Key::Enter);
+                // the core KEEPS the draft when it refuses (offline with the outbox off, outbox full, vault write failed): the screen has cleared its own field already
+                if !self.app.compose_text().is_empty() { self.clear_draft(); return Err("the message was NOT sent: see the status line"); }
             }
             "cmd" => {
                 let mut cs = arg.chars();
@@ -137,10 +148,20 @@ impl Bridge {
                 if !self.in_main() { return Err(NOT_NOW); }
                 self.ensure_normal(); self.app.handle(Key::Char(ch));
             }
+            "new_contact" => {
+                // ONE operation for "create a contact": a failed creation (duplicate or invalid name) must not let the next step run against the WRONG selected contact
+                if !self.in_main() { return Err(NOT_NOW); }
+                if arg.len() > 64 { return Err("name too long"); }
+                let before = self.app.contacts_len();
+                self.ensure_normal(); self.app.handle(Key::Char('n'));
+                if self.app.screen != Screen::Prompt(Prompt::NewContact) { return Err(NOT_NOW); }
+                self.app.input = arg.to_string(); self.app.handle(Key::Enter);
+                if self.app.contacts_len() == before { return Err("the contact was NOT created: see the status line"); }
+            }
             "submit" => {
-                // a non-secret prompt (contact name, pairing link); the join code is a secret and goes through "secret" + "enter"
-                if !matches!(&self.app.screen, Screen::Prompt(p) if !matches!(p, Prompt::JoinCode(_) | Prompt::InPerson)) || self.app.locked { return Err("no text prompt is open"); }
-                if arg.len() > 256 { return Err("text too long"); }
+                // only the two prompts the phone uses (a new contact's name, a pairing link); the join code is a secret and goes through "secret" + "enter"
+                if !matches!(&self.app.screen, Screen::Prompt(Prompt::NewContact | Prompt::JoinLink)) || self.app.locked { return Err("no text prompt is open"); }
+                if arg.len() > 256 { self.app.handle(Key::Esc); return Err("text too long"); } // and close the prompt: nothing on the screen could do it
                 self.app.input = arg.to_string();
                 self.app.handle(Key::Enter);
             }
@@ -170,7 +191,11 @@ impl Bridge {
                 for _ in 0..5 { if self.app.locked { break; } self.app.handle(Key::Esc); }
             }
             "unhide" => { if !self.app.locked { return Err(NOT_NOW); } self.app.handle(Key::Enter); }
-            "ack_alert" => { self.app.handle(Key::Char('z')); }
+            "ack_alert" => {
+                // `z` is a COMMAND in normal mode but a letter in insert mode and on the password screens: only from the main screen, in normal mode
+                if !self.in_main() { return Err(NOT_NOW); }
+                self.ensure_normal(); self.app.handle(Key::Char('z'));
+            }
             "keep_outbox" => {
                 if !self.in_main() { return Err(NOT_NOW); }
                 self.app.set_keep_outbox(arg.as_str() == "1");
@@ -344,5 +369,78 @@ mod tests {
         let mut b = bridge(d.path());
         let s = call(&mut b, "keep_outbox", "1");
         assert!(s.contains("\"rejected\":\"not possible on this screen\"") && s.contains("\"keep_outbox\":false"), "{s}");
+    }
+
+    // ---- regressions found by the adversarial review of the bridge (review 30)
+
+    #[test]
+    fn acknowledging_an_alert_never_types_a_letter_anywhere() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        let s = call(&mut b, "ack_alert", "");
+        assert!(s.contains("\"rejected\":\"not possible on this screen\"") && s.contains("\"pw_chars\":0"), "on the password screen: {s}");
+        create(&mut b);
+        assert!(call(&mut b, "ack_alert", "").contains("\"rejected\":null"), "from the main screen it is the command it should be");
+    }
+
+    #[test]
+    fn a_failed_contact_creation_is_reported_and_leaves_no_prompt_behind() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        assert!(call(&mut b, "new_contact", "Bob").contains("\"rejected\":null"));
+        let s = call(&mut b, "new_contact", "Bob");
+        assert!(s.contains("\"rejected\":\"the contact was NOT created") && s.contains("\"screen\":\"main\""), "duplicate: {s}");
+        let s = call(&mut b, "new_contact", &"x".repeat(65));
+        assert!(s.contains("name too long") && s.contains("\"screen\":\"main\""), "{s}");
+        // the selection did not move to anything but the contact that exists
+        assert_eq!(b.app().contacts_len(), 1);
+    }
+
+    #[test]
+    fn a_too_long_text_closes_its_prompt_and_only_two_prompts_take_text() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        call(&mut b, "cmd", "n");
+        let s = call(&mut b, "submit", &"y".repeat(300));
+        assert!(s.contains("text too long") && s.contains("\"screen\":\"main\""), "the prompt is closed again: {s}");
+        // the delete confirmation is a prompt the phone never uses: text is refused there, cancel works
+        call(&mut b, "new_contact", "Zed");
+        let s = call(&mut b, "cmd", "d");
+        assert!(s.contains("\"prompt\":\"confirm_delete\""), "{s}");
+        assert!(call(&mut b, "submit", "y").contains("no text prompt is open"));
+        assert!(call(&mut b, "cancel", "").contains("\"screen\":\"main\""));
+        assert_eq!(b.app().contacts_len(), 1, "nothing was deleted");
+    }
+
+    #[test]
+    fn a_refused_send_leaves_no_draft_that_the_next_send_is_glued_onto() {
+        // two vaults, a bundle exchanged by file so that A has a paired contact; A is offline with the outbox off: the core refuses and keeps the draft
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (mut a, mut b) = (bridge(da.path()), bridge(db.path()));
+        create(&mut a); create(&mut b);
+        call(&mut a, "new_contact", "bob"); call(&mut b, "new_contact", "alice");
+        let fb = db.path().join("b.sbc");
+        b.app.handle(Key::Char('e')); b.app.input = fb.to_str().unwrap().into(); b.app.handle(Key::Enter);
+        a.app.handle(Key::Char('I')); a.app.input = fb.to_str().unwrap().into(); a.app.handle(Key::Enter);
+        call(&mut a, "select", "0");
+        let s = call(&mut a, "open_chat", "");
+        assert!(s.contains("\"pane\":\"chat\""), "{s}");
+        let s = call(&mut a, "send", "hello");
+        assert!(s.contains("the message was NOT sent") && s.contains("\"error\":true"), "refused offline: {s}");
+        assert!(a.app().compose_text().is_empty(), "no hidden draft is left");
+        let s = call(&mut a, "send", "world");
+        assert!(s.contains("the message was NOT sent"));
+        assert!(a.app().compose_text().is_empty(), "so the next attempt cannot become 'helloworld'");
+    }
+
+    #[test]
+    fn re_initialising_wipes_the_old_core_first() {
+        let d = tempfile::tempdir().unwrap();
+        let mut old = bridge(d.path());
+        create(&mut old);
+        old.wipe();
+        assert!(old.snapshot(None).contains("\"screen\":\"wiped\""));
     }
 }

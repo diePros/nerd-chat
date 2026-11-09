@@ -33,9 +33,11 @@ object Snapshot {
             "create_confirm" -> Stage.ConfirmPassword
             "working" -> Stage.Working
             "wiped" -> Stage.Wiped
-            "error" -> Stage.Error
-            else -> Stage.Ready // main, prompt, verify, help: the app stays on its own screens
+            "main", "prompt", "verify" -> Stage.Ready // the app draws its own screens for these
+            // anything else (an error from the bridge, a screen added later, the core's privacy screen) must NOT show the main UI
+            else -> Stage.Error
         }
+        if (m.bool("privacy_locked")) return AppState(stage = Stage.Error, status = "The core is showing its privacy screen, which this app does not use.", statusIsError = true)
         val onlineKind = m.str("online")
         val tor = when (onlineKind) {
             "starting" -> TorState.Bootstrapping(m.int("online_pct"))
@@ -75,7 +77,7 @@ object Snapshot {
             stage = stage, status = m.str("status") ?: "", statusIsError = m.bool("error"), pwChars = m.int("pw_chars"),
             tor = tor, online = online, chats = contacts, messages = messages, torOffer = offer,
             pairingWaiting = m.bool("pairing_waiting"), verifyNumber = m.str("verify_number"),
-            alerts = m.list("alerts").mapNotNull { it.str("text") }, rejected = m.str("rejected"), keepOutbox = m.bool("keep_outbox"),
+            alerts = m.list("alerts").mapNotNull { it.str("text") }, rejected = m.str("rejected"), keepOutbox = m.bool("keep_outbox"), promptOpen = m.str("screen") == "prompt",
         )
     }
 }

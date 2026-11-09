@@ -6,6 +6,9 @@ plugins {
 }
 
 // ---- the Rust core: libnerdchat_bridge.so for each ABI, built with cargo + the NDK linker and packaged as native libraries ----
+// -Pdemo=true: the in-memory demo backend. Only the literal value `true` counts (a `demo=false` or an empty value must not turn it on), and a RELEASE build refuses it.
+val demoBuild = providers.gradleProperty("demo").map { it.equals("true", ignoreCase = true) }.orElse(false).get()
+gradle.taskGraph.whenReady { if (demoBuild && allTasks.any { it.project.path == ":app" && it.name.contains("Release") && it.name.startsWith("assemble", true) }) throw GradleException("-Pdemo=true must never be used for a release build: it would ship the fake backend (any password opens it)") }
 val ndkVersion = "29.0.14206865"
 val repoRoot = rootDir.parentFile
 val sdkDir: String? = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
@@ -18,6 +21,8 @@ val hostTag = when {
 val ndkBin = File(sdkDir ?: "", "ndk/$ndkVersion/toolchains/llvm/prebuilt/$hostTag/bin")
 val rustAbis = mapOf("arm64-v8a" to "aarch64-linux-android", "x86_64" to "x86_64-linux-android")
 val rustOut = layout.buildDirectory.dir("rustJniLibs")
+val rustFlags = listOf("-C link-arg=-Wl,-z,max-page-size=16384", "-C link-arg=-Wl,--build-id=none",
+    "--remap-path-prefix=${repoRoot}=/src", "--remap-path-prefix=${System.getProperty("user.home")}/.cargo=/cargo", "--remap-path-prefix=${System.getProperty("user.home")}/.rustup=/rustup").joinToString(" ")
 val rustTasks = rustAbis.map { (abi, triple) ->
     tasks.register<Exec>("buildRust_$abi") {
         group = "build"; description = "cargo build --release -p nerd-chat-android --target $triple"
@@ -27,13 +32,14 @@ val rustTasks = rustAbis.map { (abi, triple) ->
         val under = triple.replace('-', '_'); val upper = triple.uppercase().replace('-', '_')
         environment("CARGO_TARGET_${upper}_LINKER", clang.path); environment("CC_$under", clang.path); environment("AR_$under", File(ndkBin, "llvm-ar").path)
         // 16 KB page alignment (Android 15+), no build-id and remapped paths so that the library is reproducible
-        environment("RUSTFLAGS", listOf("-C link-arg=-Wl,-z,max-page-size=16384", "-C link-arg=-Wl,--build-id=none",
-            "--remap-path-prefix=${repoRoot}=/src", "--remap-path-prefix=${System.getProperty("user.home")}/.cargo=/cargo", "--remap-path-prefix=${System.getProperty("user.home")}/.rustup=/rustup").joinToString(" "))
+        environment("RUSTFLAGS", rustFlags)
         doFirst { if (!clang.isFile) throw GradleException("NDK $ndkVersion not found at $ndkBin: sdkmanager \"ndk;$ndkVersion\" (docs/ANDROID_DEV_SETUP.md)") }
         val so = File(repoRoot, "target/$triple/release/libnerdchat_bridge.so")
         val dest = rustOut.map { it.dir(abi).file("libnerdchat_bridge.so") }
         outputs.file(dest)
-        inputs.files(fileTree(File(repoRoot, "crates")) { include("**/*.rs", "**/Cargo.toml") }, File(repoRoot, "Cargo.lock"))
+        // EVERYTHING that changes the library: all crates, the vendored crypto patch, the workspace manifest (release profile: panic=abort, strip), the lock file, the toolchain pin, the flags
+        inputs.files(fileTree(File(repoRoot, "crates")) { include("**/*.rs", "**/Cargo.toml") }, fileTree(File(repoRoot, "vendor")), File(repoRoot, "Cargo.toml"), File(repoRoot, "Cargo.lock"), File(repoRoot, "rust-toolchain.toml"))
+        inputs.property("rustflags", rustFlags)
         doLast { so.copyTo(dest.get().asFile, overwrite = true) }
     }
 }
@@ -51,7 +57,7 @@ android {
         // 64-bit ARM (every Pixel/GrapheneOS device and nearly all phones) plus x86_64 for the emulator. The Rust core will be built for the same two.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         // -Pdemo: the in-memory demo backend instead of the Rust core (previews, screenshots, UI work without a vault)
-        resValue("bool", "nerdchat_demo", providers.gradleProperty("demo").isPresent.toString())
+        resValue("bool", "nerdchat_demo", demoBuild.toString())
     }
     buildTypes {
         release {
