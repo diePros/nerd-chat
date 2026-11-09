@@ -29,6 +29,8 @@ import app.sineloco.ui.DarkMode
 import app.sineloco.ui.SineApp
 
 class MainActivity : ComponentActivity() {
+    private companion object { const val PICKER_GRACE_MS = 120_000L }
+
     /** a pairing link that arrived as a `sineloco:` link (QR code, another app); in memory only, it pre-fills the pairing form and is dropped */
     private var incoming by mutableStateOf<app.sineloco.model.PairLink?>(null)
     private var pendingSave: String? = null
@@ -56,37 +58,75 @@ class MainActivity : ComponentActivity() {
 
     // ---- photos: the picked picture is only READ here (bytes, never decoded in this process); the isolated media process re-encodes it, then the core offers it
     private var photoBitmap: android.graphics.Bitmap? = null
-    private var pendingPhotoExt = "jpg"
-    private val photoPicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) Thread { sendPhoto(uri) }.start()
+    private var photoGen = 0
+    /** the contact a picked photo is FOR: fixed when the picker opens, so that opening another chat meanwhile cannot redirect it */
+    private var photoContact = -1
+    /** the re-encoded copy of a received photo, waiting for the user's save location (made BEFORE the picker opens: the picker covers the app and the app may lock) */
+    private var pendingSaveBytes: ByteArray? = null
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var lockAfterPicker: Runnable? = null
+    private var pickerUntil = 0L
+
+    /** A system picker covers this activity and stops it, which normally locks the app. For ONE picker request the lock waits (at most [PICKER_GRACE_MS]): a lock that wipes the pane before the answer arrives makes Send and Save impossible. The screen turning off still locks at once. */
+    private fun pickerOpens() { pickerUntil = android.os.SystemClock.elapsedRealtime() + PICKER_GRACE_MS }
+
+    private fun lockNow() {
+        photoBitmap = null; photoGen++
+        pendingSaveBytes?.fill(0); pendingSaveBytes = null
+        (application as SineLocoApp).backend.lock()
     }
-    private val photoSaver = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("image/*")) { uri ->
-        if (uri != null) Thread { writePhoto(uri) }.start()
+
+    private val photoPicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
+        val contact = photoContact; photoContact = -1
+        if (uri != null && contact >= 0) Thread { sendPhoto(contact, uri) }.start()
+    }
+    private val photoSaver = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
+        val bytes = pendingSaveBytes; pendingSaveBytes = null
+        if (bytes == null) return@registerForActivityResult
+        if (uri == null) { bytes.fill(0); return@registerForActivityResult }
+        Thread {
+            try { contentResolver.openOutputStream(uri)?.use { it.write(bytes) } } catch (_: Exception) { note("The photo could not be saved.") } finally { bytes.fill(0) }
+        }.start()
     }
 
     private fun note(text: String) = runOnUiThread { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
 
-    /** At most 32 MiB (a camera original), read by hand: any failure (also an Error) means "no photo", never a crash. */
-    private fun readPhoto(uri: android.net.Uri): ByteArray? = try {
-        contentResolver.openInputStream(uri)?.use { s ->
-            val out = java.io.ByteArrayOutputStream(1 shl 20); val buf = ByteArray(1 shl 16); var total = 0
-            while (true) { val n = s.read(buf); if (n < 0) break; total += n; if (total > app.sineloco.clean.CleanerService.MAX_IN) return@use null; out.write(buf, 0, n) }
-            out.toByteArray()
-        }
-    } catch (_: Throwable) { null }
+    /** At most 32 MiB (a camera original), read by hand into a buffer that is wiped afterwards: any failure (also an Error) means "no photo", never a crash. */
+    private fun readPhoto(uri: android.net.Uri): ByteArray? {
+        val out = WipingBuffer(1 shl 20)
+        return try {
+            contentResolver.openInputStream(uri)?.use { s ->
+                val buf = ByteArray(1 shl 16); var total = 0
+                try { while (true) { val n = s.read(buf); if (n < 0) break; total += n; if (total > app.sineloco.clean.CleanerService.MAX_IN) return@use null; out.write(buf, 0, n) } } finally { buf.fill(0) }
+                out.toByteArray()
+            }
+        } catch (_: Throwable) { null } finally { out.wipe() }
+    }
 
-    private fun sendPhoto(uri: android.net.Uri) {
+    private fun sendPhoto(contact: Int, uri: android.net.Uri) {
         val app = application as SineLocoApp
         val media = app.media ?: return note("Photos are not available in this build.")
         val raw = readPhoto(uri) ?: return note("That picture could not be read (or is larger than 32 MB).")
         val jpeg = try { media.reencode(raw) } finally { raw.fill(0) }
         if (jpeg == null) return note("That picture could not be prepared. Only ordinary photos work.")
-        app.backend.sendPhoto(jpeg) // the backend wipes the array
+        app.backend.sendPhoto(contact, jpeg) // the backend wipes the array; the core refuses it when another chat is open by now
     }
 
-    private fun writePhoto(uri: android.net.Uri) {
-        val bytes = (application as SineLocoApp).backend.receivedPhoto() ?: return note("The photo is no longer in memory.")
-        try { contentResolver.openOutputStream(uri)?.use { it.write(bytes) } } catch (_: Exception) { note("The photo could not be saved.") } finally { bytes.fill(0) }
+    /** Fetch the received photo, make a CLEAN COPY of it in the isolated process (what the sender's bytes would do to the gallery's own parsers is not our business to find out), then ask where to save it. */
+    private fun startSavePhoto() {
+        val app = application as SineLocoApp
+        val media = app.media ?: return
+        Thread {
+            val bytes = app.backend.receivedPhoto() ?: return@Thread note("The photo is no longer in memory.")
+            val copy = try { media.reencode(bytes) } finally { bytes.fill(0) }
+            if (copy == null) return@Thread note("The photo could not be prepared for saving.")
+            runOnUiThread {
+                pendingSaveBytes?.fill(0); pendingSaveBytes = copy
+                val rnd = java.security.SecureRandom(); val name = "img-" + (1..6).joinToString("") { "0123456789abcdef"[rnd.nextInt(16)].toString() } + ".jpg"
+                pickerOpens()
+                try { photoSaver.launch(name) } catch (_: Exception) { pendingSaveBytes?.fill(0); pendingSaveBytes = null }
+            }
+        }.start()
     }
 
     private fun handleIntent(i: android.content.Intent?) {
@@ -109,21 +149,22 @@ class MainActivity : ComponentActivity() {
             pendingSave = text; try { savePicker.launch(name) } catch (_: Exception) { pendingSave = null }
         }
         override val photos: Boolean get() = (application as SineLocoApp).media != null
-        override fun pickPhoto() { try { photoPicker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) } catch (_: Exception) { } }
+        override fun pickPhoto(contactId: Int) {
+            photoContact = contactId; pickerOpens()
+            try { photoPicker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) } catch (_: Exception) { photoContact = -1 }
+        }
         override fun loadPhoto(onLoaded: (androidx.compose.ui.graphics.ImageBitmap?) -> Unit) {
             val app = application as SineLocoApp
+            val gen = ++photoGen
             Thread {
                 val bytes = app.backend.receivedPhoto()
                 val bmp = try { bytes?.let { app.media?.decode(it) } } finally { bytes?.fill(0) }
-                runOnUiThread { photoBitmap = bmp; onLoaded(bmp?.asImageBitmap()) }
+                // a result that arrives after the viewer was closed, the chat left or the app locked is dropped
+                runOnUiThread { if (gen == photoGen) { photoBitmap = bmp; onLoaded(bmp?.asImageBitmap()) } else bmp?.eraseColor(0) }
             }.start()
         }
-        override fun savePhoto(ext: String) {
-            pendingPhotoExt = if (ext == "png") "png" else "jpg"
-            val rnd = java.security.SecureRandom(); val name = "img-" + (1..6).joinToString("") { "0123456789abcdef"[rnd.nextInt(16)].toString() } + "." + pendingPhotoExt
-            try { photoSaver.launch(name) } catch (_: Exception) { }
-        }
-        override fun forgetPhoto() { photoBitmap = null }
+        override fun savePhoto() = startSavePhoto()
+        override fun forgetPhoto() { photoBitmap?.eraseColor(0); photoBitmap = null; photoGen++ }
         override fun pickText(onText: (String) -> Unit) { pickCallback = onText; try { openPicker.launch(arrayOf("text/*", "application/octet-stream")) } catch (_: Exception) { pickCallback = null } }
         /** Wi-Fi or Ethernet networks that are NOT a VPN: a "private" address on a VPN or on mobile data belongs to somebody else's network (the provider's, the carrier's). */
         private fun localLinks(): List<android.net.LinkAddress> {
@@ -190,13 +231,16 @@ class MainActivity : ComponentActivity() {
     /** Coming back: ask the core for its state, which runs the lock's deadline check first (a timed-out lock has erased itself and the screen shows the first-unlock prompt). */
     override fun onStart() {
         super.onStart()
+        lockAfterPicker?.let { handler.removeCallbacks(it) }; lockAfterPicker = null; pickerUntil = 0
         (application as SineLocoApp).backend.refresh()
     }
 
     /** Leaving the screen (home, recents, another app) locks the app: it keeps running, but whoever opens it next needs the password. A rotation is not leaving. */
     override fun onStop() {
         super.onStop()
-        if (!isChangingConfigurations) { photoBitmap = null; (application as SineLocoApp).backend.lock() }
+        if (isChangingConfigurations) return
+        val left = pickerUntil - android.os.SystemClock.elapsedRealtime()
+        if (left > 0) { val r = Runnable { lockNow() }; lockAfterPicker = r; handler.postDelayed(r, left) } else lockNow()
     }
 
     /**

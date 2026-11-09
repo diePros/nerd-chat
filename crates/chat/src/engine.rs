@@ -149,6 +149,8 @@ pub enum Event {
     /// A received, re-cleaned file (RAM only). `resanitised`: our own cleaning found/removed more than the sender's.
     File { id: [u8; 8], data: Zeroizing<Vec<u8>>, format: sine_loco_strip::Format, report: Vec<String>, resanitised: bool },
     FileSent { id: [u8; 8] },
+    /// OUR offer ended without a transfer: the contact declined it, it timed out unanswered, or it could not be sent (the UI must stop showing "sending")
+    FileDeclined { id: [u8; 8] },
     /// The contact's app confirmed the text with this id ("their client has it", not "they read it": no read receipts, by design), or,
     /// for a v0.1.0-style peer that cannot confirm anything, the text was written to the connection (the old meaning of "sent").
     Delivered { id: [u8; 8], mid: proto::MsgId },

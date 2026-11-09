@@ -72,20 +72,20 @@ fun ChatScreen(
                 if (file != FileState.None) item("file") {
                     FileCard(file, contact.name, onAnswerFile,
                         onView = { viewing = true; viewer = null; platform.loadPhoto { viewer = it; if (it == null) viewing = false } },
-                        onSave = { ext -> platform.savePhoto(ext) })
+                        onSave = { platform.savePhoto() })
                 }
                 item("end") { Spacer(Modifier.height(2.dp)) }
             }
         }
         val canAttach = platform.photos && contact.link == Link.Connected && online && (file == FileState.None || file == FileState.Sent)
-        Composer(draft, { draft = it }, onSend = { onSend(draft); draft = "" }, onAttach = if (canAttach) platform::pickPhoto else null)
+        Composer(draft, { draft = it }, onSend = { onSend(draft); draft = "" }, onAttach = if (canAttach) ({ platform.pickPhoto(contact.id) }) else null)
     }
     if (viewing) PhotoViewer(viewer, onClose = { viewing = false; viewer = null; platform.forgetPhoto() })
 }
 
 /** The card of the one photo a chat can have at a time. Photos are NEVER queued, stored or backed up: they exist in memory while the app is unlocked, and "Save" is the user's own act. */
 @Composable
-private fun FileCard(f: FileState, name: String, onAnswer: (Boolean) -> Unit, onView: () -> Unit, onSave: (String) -> Unit) {
+private fun FileCard(f: FileState, name: String, onAnswer: (Boolean) -> Unit, onView: () -> Unit, onSave: () -> Unit) {
     val col = SineTheme.colors
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -93,7 +93,7 @@ private fun FileCard(f: FileState, name: String, onAnswer: (Boolean) -> Unit, on
             Text(when (f) {
                 FileState.Preparing -> "Preparing your photo…"
                 FileState.Sending -> "Sending your photo…"
-                FileState.Sent -> "Photo delivered: $name's app has it"
+                FileState.Sent -> "Photo sent to $name (their app received all of it; there are no read receipts)"
                 is FileState.Offered -> "$name wants to send a photo"
                 FileState.Arriving -> "Receiving the photo…"
                 is FileState.Received -> if (f.isImage) "Photo received" else "File received (not a picture)"
@@ -102,14 +102,13 @@ private fun FileCard(f: FileState, name: String, onAnswer: (Boolean) -> Unit, on
         }
         when (f) {
             is FileState.Offered -> {
-                Text("Up to about ${f.kib} KiB. It is checked and cleaned here before you can see it, and it only exists in memory until you save it or lock the app.", color = col.muted, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                Text("Up to about ${f.kib} KiB. It is checked and cleaned here before you can see it, and it only exists in memory until you discard it or lock the app. Saving makes a clean copy.", color = col.muted, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
                 Row { TextButton(onClick = { onAnswer(true) }) { Text("Accept") }; TextButton(onClick = { onAnswer(false) }) { Text("Decline") } }
             }
             is FileState.Received -> {
                 Text("${f.kib} KiB, kept in memory only.", color = col.muted, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
                 Row {
-                    if (f.isImage) TextButton(onClick = onView) { Text("View") }
-                    TextButton(onClick = { onSave(if (f.isImage) "jpg" else "bin") }) { Text("Save…") }
+                    if (f.isImage) { TextButton(onClick = onView) { Text("View") }; TextButton(onClick = onSave) { Text("Save…") } }
                     TextButton(onClick = { onAnswer(false) }) { Text("Discard") }
                 }
             }

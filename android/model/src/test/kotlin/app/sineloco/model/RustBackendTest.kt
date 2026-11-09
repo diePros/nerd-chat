@@ -14,7 +14,7 @@ class RustBackendTest {
         override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?, media: MediaCleaner?): String = answer.replace("\"main\"", "\"unlock\"")
         var respond: (String) -> String = { answer }
         val sent = CopyOnWriteArrayList<ByteArray>()
-        override fun sendFile(data: ByteArray): String { sent += data.copyOf(); return respond("send_file") }
+        override fun sendFile(contact: Int, data: ByteArray): String { sent += data.copyOf(); return respond("send_file") }
         override fun call(op: String, arg: CharArray?): String { if (op != "snapshot") { calls += op to arg?.concatToString(); arg?.let { lastArrays += it } }; return respond(op) }
     }
 
@@ -92,7 +92,7 @@ class RustBackendTest {
         val s = Script()
         val b = backend(s)
         val photo = byteArrayOf(1, 2, 3, 4)
-        b.sendPhoto(photo)
+        b.sendPhoto(0, photo)
         runBlocking { repeat(400) { if (s.sent.isEmpty()) delay(5) } }
         assertEquals(listOf(listOf<Byte>(1, 2, 3, 4)), s.sent.map { it.toList() })
         runBlocking { repeat(400) { if (photo.any { it != 0.toByte() }) delay(5) } }

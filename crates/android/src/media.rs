@@ -33,8 +33,12 @@ impl JniMedia {
         let mut env = self.vm.attach_current_thread().ok()?;
         let arr = env.byte_array_from_slice(request).ok()?;
         let r = env.call_method(&self.obj, "clean", "([B)[B", &[JValue::Object(&arr)]);
+        // a pending Java exception must be cleared BEFORE any other JNI call (CheckJNI aborts the process otherwise)
+        let failed = r.is_err() || env.exception_check().unwrap_or(true);
+        if failed { let _ = env.exception_clear(); }
         let _ = env.set_byte_array_region(&arr, 0, &vec![0i8; request.len()]);
-        let obj = match r.and_then(|v| v.l()) { Ok(o) => o, Err(_) => { if env.exception_check().unwrap_or(false) { let _ = env.exception_clear(); } return None } };
+        if failed { return None; }
+        let obj = match r.and_then(|v| v.l()) { Ok(o) => o, Err(_) => return None };
         if obj.is_null() { return None; }
         let out = JByteArray::from(obj);
         // the answer is at most the cleaned file plus a small frame: refuse more before copying it

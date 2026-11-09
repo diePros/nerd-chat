@@ -102,9 +102,9 @@ class RustBackend(
     override fun open(contactId: Int) = op("select", text(contactId.toString()), "open_chat" to null)
     override fun closeChat() = op("back")
     override fun send(contactId: Int, text: String) = op("send", text(text))
-    override fun sendPhoto(jpeg: ByteArray) {
+    override fun sendPhoto(contactId: Int, jpeg: ByteArray) {
         scope.launch {
-            try { s.value = track(withLatch(Snapshot.parse(native.sendFile(jpeg)).also { it.rejected?.let(::latch) })) } finally { jpeg.fill(0) }
+            try { s.value = track(withLatch(Snapshot.parse(native.sendFile(contactId, jpeg)).also { it.rejected?.let(::latch) })) } finally { jpeg.fill(0) }
         }
     }
     override fun answerFile(accept: Boolean) { op(if (accept) "file_accept" else "file_decline") }

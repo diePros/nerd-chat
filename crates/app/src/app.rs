@@ -1079,6 +1079,7 @@ impl App {
         self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
         // the open chat is closed: messages that arrive meanwhile must COUNT as unread (the front end shows the list again after unlocking), and a half-typed draft must not wait behind the lock
         self.pane = Pane::Details; self.compose.clear(); self.scroll = 0;
+        self.drop_files(); // a received file is decrypted data: the lock removes it from memory (the desktop's quit/panic does too); pending offers are declined
         self.close_lan_offer(); // a locked phone does not keep a port open on the network (a pairing over Tor may continue: it needs the lock's password to be finished)
         self.pw.clear(); self.input.clear(); self.code_buf.clear();
         self.lock_msg = self.locked_text(); self.lock_err = false;
@@ -1388,6 +1389,7 @@ impl App {
 
     /// Offer raw bytes (a photo the phone already re-encoded) to the selected, CONNECTED contact: cleaned and padded on a worker thread, like the file prompt does.
     pub fn send_file_bytes(&mut self, raw: Zeroizing<Vec<u8>>) {
+        if self.lock_auth { return; }
         if !self.sel_linked() { return; }
         let Some(id) = self.sel_id() else { return };
         if self.prep_rx.is_some() { return self.err("Still preparing the previous file."); }
@@ -1397,6 +1399,12 @@ impl App {
         self.outgoing.remove(&id);
         self.ok("Preparing the photo ...");
         thread::spawn(move || { let _ = tx.send(sine_loco_chat::Engine::prepare_file(&raw, sine_loco_strip::Mode::Auto)); });
+    }
+
+    /// Forget every file state: decline offers that wait for an answer, and wipe received files (Zeroizing). A transfer still arriving is refused when it ends (`Event::File` while locked).
+    fn drop_files(&mut self) {
+        if let Some(e) = &self.engine { for (id, (xid, _)) in self.offers.iter() { e.reply_file(*id, *xid, false); } }
+        self.offers.clear(); self.accepted.clear(); self.inbox.clear(); self.outgoing.clear();
     }
 
     /// RAM we are willing to hold for received files in total.
@@ -2327,7 +2335,7 @@ impl App {
         let evs: Vec<Event> = self.engine.as_ref().map_or(vec![], |e| e.events.try_iter().collect());
         for ev in evs {
             // events for contacts that no longer exist must not create hidden chat state (R6-L1)
-            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::Delivered { id, .. } | Event::Unsent { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
+            let stale = match &ev { Event::Connected { id } | Event::Disconnected { id } | Event::Message { id, .. } | Event::FileOffer { id, .. } | Event::FileCancelled { id } | Event::File { id, .. } | Event::FileSent { id } | Event::FileDeclined { id } | Event::Delivered { id, .. } | Event::Unsent { id, .. } | Event::Rotate { id, .. } => !self.known(id), Event::Notice { .. } => false };
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
@@ -2368,13 +2376,17 @@ impl App {
                     self.status = "A contact offers a file: select them, then a = accept / r = decline.".into();
                 }
                 Event::File { id, data, format, report, resanitised } => {
+                    // the files of a LOCKED app are not kept; and what the cleaner calls a JPEG or PNG must really start like one (a lying cleaner is not trusted with what we later save or show)
+                    let starts_ok = match format { sine_loco_strip::Format::Jpeg => data.starts_with(&[0xFF, 0xD8, 0xFF]), sine_loco_strip::Format::Png => data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]), sine_loco_strip::Format::Text => true };
+                    if self.lock_auth || !starts_ok { self.accepted.remove(&id); if !starts_ok { self.status = "A received file was refused: it did not look like what the cleaner said.".into(); } continue; }
                     let ext = match format { sine_loco_strip::Format::Jpeg => "jpg", sine_loco_strip::Format::Png => "png", sine_loco_strip::Format::Text => "txt" };
                     self.accepted.remove(&id);
                     self.inbox.insert(id, Received { data, ext });
                     self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ").chars().take(200).collect::<String>()) }
                         else { "File received (RAM only). Select the contact, s = save under a neutral name.".into() };
                 }
-                Event::FileSent { id } => { if self.outgoing.contains_key(&id) { self.outgoing.insert(id, true); } self.status = "File delivered.".into(); }
+                Event::FileDeclined { id } => { self.outgoing.remove(&id); }
+                Event::FileSent { id } => { if self.outgoing.contains_key(&id) { self.outgoing.insert(id, true); } self.status = "File sent (the contact's app has all of it).".into(); }
             }
         }
     }
@@ -3150,6 +3162,36 @@ mod tests {
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].file_view() == FileView::Sending));
         a.send_file_bytes(Zeroizing::new(jpg));
         assert!(a.error && a.status.contains("still being sent"), "{}", a.status);
+    }
+
+    /// Review 40: a declined offer ends the sender's "sending"; the lock wipes a received photo and declines a waiting offer; a file that is not what the cleaner claims is refused.
+    #[test]
+    fn declined_offers_end_sending_and_the_lock_wipes_received_photos() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        let seg = |m: u8, body: &[u8]| { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v };
+        let mut jpg = vec![0xFF, 0xD8];
+        jpg.extend(seg(0xDB, &[0; 65])); jpg.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); jpg.extend(seg(0xC4, &[0; 17])); jpg.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0]));
+        jpg.extend(vec![0x11u8; 2000]); jpg.extend_from_slice(&[0xFF, 0xD9]);
+        // declined: the sender is not stuck in "sending"
+        a.send_file_bytes(Zeroizing::new(jpg.clone()));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| matches!(x[1].file_view(), FileView::Offered { .. })));
+        b.answer_file(false);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].file_view() == FileView::None), "the sender still shows {:?}", a.file_view());
+        // received, then locked: gone from memory
+        a.send_file_bytes(Zeroizing::new(jpg.clone()));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| matches!(x[1].file_view(), FileView::Offered { .. })));
+        b.answer_file(true);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| matches!(x[1].file_view(), FileView::Received { .. })));
+        assert!(b.received_file().is_some());
+        b.lock();
+        assert!(b.inbox.is_empty() && b.offers.is_empty() && b.accepted.is_empty(), "the lock keeps no received file in memory");
+        // an offer that waits when the lock comes is declined for the sender
+        a.send_file_bytes(Zeroizing::new(jpg));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].file_view() == FileView::Sending || x[1].file_view() != FileView::None));
+        assert!(b.lock_auth() || b.locked);
     }
 
     #[test]

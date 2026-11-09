@@ -8,8 +8,8 @@ interface Native {
     /** One operation (see `crates/android/src/bridge.rs`); returns the new snapshot. [arg] is NOT wiped here, the caller does it. */
     fun call(op: String, arg: CharArray?): String
 
-    /** Offer a photo (JPEG bytes the isolated media process already re-encoded) to the open chat's contact; returns the new snapshot. The caller wipes [data]. */
-    fun sendFile(data: ByteArray): String = ""
+    /** Offer a photo (JPEG bytes the isolated media process already re-encoded) to contact [contact], which must be the open chat (else it is refused); returns the new snapshot. The caller wipes [data]. */
+    fun sendFile(contact: Int, data: ByteArray): String = ""
 
     /** The re-cleaned file received in the open chat, or null. The caller wipes the array after use. */
     fun fileBytes(): ByteArray? = null
@@ -31,11 +31,11 @@ object NativeBridge : Native {
 
     private external fun nInit(dir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?, media: MediaCleaner?): String
     private external fun nCall(op: String, arg: CharArray?): String
-    private external fun nSendFile(data: ByteArray): String
+    private external fun nSendFile(contact: Int, data: ByteArray): String
     private external fun nFileBytes(): ByteArray?
 
     override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?, media: MediaCleaner?): String = nInit(vaultDir, lowMem, torPath, historyDefault, keys, media)
     override fun call(op: String, arg: CharArray?): String = nCall(op, arg)
-    override fun sendFile(data: ByteArray): String = nSendFile(data)
+    override fun sendFile(contact: Int, data: ByteArray): String = nSendFile(contact, data)
     override fun fileBytes(): ByteArray? = nFileBytes()
 }

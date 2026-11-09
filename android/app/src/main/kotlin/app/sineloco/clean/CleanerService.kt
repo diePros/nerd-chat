@@ -36,7 +36,7 @@ class CleanerService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = messenger.binder
 
-    /** A fresh process for every job: when the caller unbinds, this process ends (nothing of the last image stays in memory). */
+    /** A fresh process for every job: the caller binds a distinct INSTANCE of this service each time (`bindIsolatedService`), so no job shares a process with an earlier one; when it unbinds, the process ends. This kill is only a second line (a compromised process could skip it). */
     override fun onDestroy() { super.onDestroy(); android.os.Process.killProcess(android.os.Process.myPid()) }
 
     private fun job(op: Int, input: ParcelFileDescriptor, output: ParcelFileDescriptor) {
@@ -69,6 +69,7 @@ class CleanerService : Service() {
             val k = minOf(1.0, edge.toDouble() / maxOf(w, h))
             d.setTargetSize(maxOf(1, (w * k).toInt()), maxOf(1, (h * k).toInt()))
             d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            d.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)) // the core strips ICC profiles: the pixels must already be sRGB
             d.isMutableRequired = false
         }
     } catch (_: Throwable) { null }

@@ -191,9 +191,11 @@ impl Bridge {
     }
 
     /// Offer a photo (bytes the phone already re-encoded) to the open chat's contact. Binary data cannot travel through `call`'s text argument.
-    pub fn send_file(&mut self, data: Zeroizing<Vec<u8>>) -> Zeroizing<String> {
+    pub fn send_file(&mut self, contact: usize, data: Zeroizing<Vec<u8>>) -> Zeroizing<String> {
         self.app.lock_deadline_check();
         let rejected = if !self.in_main() || self.app.pane != Pane::Chat { Some("open a chat first") }
+            // the photo was picked for ONE contact: it is offered to that one or to nobody (the user may have opened another chat while it was prepared)
+            else if self.app.sel != contact { Some("the chat changed while the photo was prepared: it was not sent") }
             else if self.app.lock_auth() { Some("the app is locked") }
             else if data.is_empty() || data.len() > PHOTO_MAX_BYTES { Some("the photo is too large or empty") }
             else { self.app.send_file_bytes(data); None };
@@ -668,21 +670,23 @@ mod tests {
         assert!(call(&mut a, "import_bundle", &text_b).contains("\"paired\":true"));
         let jpg = Zeroizing::new(vec![0xFF, 0xD8, 1, 2, 3]);
         // no chat open: refused, nothing readable
-        assert!(a.send_file(jpg.clone()).contains("open a chat first"));
+        assert!(a.send_file(0, jpg.clone()).contains("open a chat first"));
         assert!(a.file_bytes().is_none());
         call(&mut a, "select", "0");
         let s = call(&mut a, "open_chat", "");
         assert!(s.contains("\"file\":{\"state\":\"none\"}"), "{s}");
+        // a photo picked in another chat is never offered here
+        assert!(a.send_file(1, jpg.clone()).contains("chat changed"));
         // empty and oversized input are refused before the core sees them
-        assert!(a.send_file(Zeroizing::new(vec![])).contains("too large or empty"));
-        assert!(a.send_file(Zeroizing::new(vec![0; PHOTO_MAX_BYTES + 1])).contains("too large or empty"));
+        assert!(a.send_file(0, Zeroizing::new(vec![])).contains("too large or empty"));
+        assert!(a.send_file(0, Zeroizing::new(vec![0; PHOTO_MAX_BYTES + 1])).contains("too large or empty"));
         // the contact is not connected: the core refuses, no state appears
-        let s = a.send_file(jpg).to_string();
+        let s = a.send_file(0, jpg).to_string();
         assert!(s.contains("\"state\":\"none\"") && s.contains("CONNECTED"), "{s}");
         assert!(call(&mut a, "file_accept", "").contains("No file offer"));
         // locked: refused and unreadable
         call(&mut a, "lock", "");
-        assert!(a.send_file(Zeroizing::new(vec![1])).contains("open a chat first") || a.file_bytes().is_none());
+        assert!(a.send_file(0, Zeroizing::new(vec![1])).contains("open a chat first"), "a locked app sends nothing");
         assert!(a.file_bytes().is_none());
     }
 

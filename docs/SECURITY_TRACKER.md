@@ -755,3 +755,28 @@ Built, not yet reviewed. Points a reviewer should attack first:
 | PH-7 | No `CAP_FILE` bit: an old contact silently drops the offer; the sender sees "Sending" until the contact disconnects | OPEN |
 | PH-8 | Accepting reveals presence (declining or timing out differs); the sender learns the bucket size only | documented in FILE_SHARING.md |
 | PH-9 | JNI surface grew from 2 to 4 symbols (`nSendFile`, `nFileBytes`); hygiene tests pin both crates (no `unsafe` block, one/four exports, `android-clean` links only `strip`) | tested |
+
+## Review 40: photos on Android (Opus, 2026-11-09)
+
+Claims 1-2 held (no parser in the key process, no in-process fallback, the isolated Application guard). Findings:
+
+| Id | Finding | Status | Notes |
+|---|---|---|---|
+| R40-1 | **HIGH:** a photo went to whichever chat was open when re-encoding finished, not the one it was picked in | FIXED (test) | the contact is fixed when the picker opens and travels as `nSendFile(contact, data)`; the bridge refuses unless it is the open chat |
+| R40-2 | **MED-HIGH:** "a fresh process per job" was not enforced (`bindService` may reuse a process; the kill is asked from inside the untrusted process) | FIXED (device) | `bindIsolatedService` with a random instance name per job; verified on the emulator: a distinct process and UID for every job |
+| R40-3 | **MED:** Save wrote the sender's image data verbatim into the gallery's parsers; the cleaner's format claim was not checked | FIXED | Save writes a RE-ENCODED copy made in the isolated process; the core refuses a "JPEG/PNG" without the right signature |
+| R40-4 | **MED:** the system picker stops the activity, the app locked, Save/Send were refused | FIXED (not run on a phone) | one picker request delays the lock up to 120 s (screen-off still locks at once); the save copy is made before the picker opens |
+| R40-5 | **MED:** the sender stayed in "Sending" after a decline/timeout | FIXED (test) | new `Event::FileDeclined` |
+| R40-6 | **MED:** a received photo survived the lock though the card said otherwise | FIXED (test) | `lock()` declines waiting offers and wipes `inbox`; a file that ends while locked is dropped |
+| R40-7 | **MED (release):** no R8 keep rule for `MediaCleaner` | FIXED (release build not run) | proguard rules added |
+| R40-8 | JNI call with a pending Java exception | FIXED | exception cleared first; `run()` catches everything |
+| R40-9 | leftover copies in the key process | PARTIAL | read/answer buffers are wiped (`WipingBuffer`); a decoded Bitmap is erased on close but its pixels may persist until GC; a late `receivedPhoto` result is not wiped (documented, G1) |
+| R40-10 | strip answer cap 4x the core's | FIXED | 8 MiB + frame |
+| R40-11 | `MediaProcess` leaks (unbind on a failed bind, unbounded lock wait) | FIXED | always unbind; `tryLock` 90 s |
+| R40-12 | wrong extension / wording; text files offered as photos | FIXED | saved copy is always JPEG; non-images offer only Discard |
+| R40-13 | late `loadPhoto` result kept a picture | FIXED | generation token |
+| R40-14 | "delivered" overstated | FIXED | "sent; their app received all of it; there are no read receipts" |
+| R40-15 | colour: no sRGB conversion before the ICC profile is stripped | FIXED (not seen on a device) | target colour space sRGB |
+| R40-16 | info: strip's in-process fallback exists on other platforms; weak lock assertion | PARTIAL | assertion fixed; contact delete clears `outgoing`; the strip fallback stays (Android installs its cleaner before any file can arrive) |
+
+Still open: PH-7 (no `CAP_FILE` bit: an old contact ignores the offer; the sender waits for the offer timeout), real phone, real Tor transfer.

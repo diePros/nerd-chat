@@ -117,6 +117,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     // security-relevant notices (integrity failure, refused content) are never rate-limited away
     let alert = |ev: &Sender<In>, text: &str| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::Notice { id: Some(id), text: text.into(), alert: true } })).is_ok();
     let cancelled = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileCancelled { id } })).is_ok();
+    let declined = |ev: &Sender<In>| ev.send(In::Conn(ConnEvent::Ev { id, gen, ev: Event::FileDeclined { id } })).is_ok();
     let mut bad_frames = 0u32;
     let mut rot_frames = 0u32;
     let mut caps_frames = 0u32;
@@ -176,7 +177,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
         // outgoing file: a few chunks per turn so receiving, replies and keepalives are never starved
         if let Some(x) = outx.as_mut() {
             match &mut x.st {
-                OutState::WaitAccept(dl) => if Instant::now() > *dl { outx = None; if !notice(&ev, "file offer timed out (not accepted)") { break; } },
+                OutState::WaitAccept(dl) => if Instant::now() > *dl { outx = None; if !notice(&ev, "file offer timed out (not accepted)") || !declined(&ev) { break; } },
                 OutState::Sending(pos) => {
                     for _ in 0..CHUNKS_PER_TURN {
                         if *pos >= x.f.padded.len() { break; }
@@ -246,7 +247,7 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                     }
                     Some(file::KIND_FILE_REJECT) => {
                         if let Some(xid) = file::parse_ctl(&m.body) {
-                            if outx.as_ref().is_some_and(|x| x.f.xid == xid) { outx = None; if !notice(&ev, "the contact declined the file") { break; } }
+                            if outx.as_ref().is_some_and(|x| x.f.xid == xid) { outx = None; if !notice(&ev, "the contact declined the file") || !declined(&ev) { break; } }
                         }
                     }
                     Some(file::KIND_FILE_CHUNK) => {
