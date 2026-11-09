@@ -80,5 +80,5 @@ GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phas
 - Still open: lintian (not installed here), installing the .deb and launching from a real menu, Tails/Whonix tests (owner).
 
 ## lintian and a trial of the GUI .deb (2026-11-09)
-- Added man pages (`packaging/nerd-chat.1`, `nerd-chat-gui.1`), a Debian-format `changelog.gz` next to `CHANGELOG.md.gz`, and a lintian override for the static terminal binary. lintian 2.129 now reports only `bogus-mail-host` (the placeholder maintainer `noreply@invalid`): it needs the owner's real contact address in `scripts/release.sh` (Maintainer line and `deb_changelog`).
+- Added man pages (`packaging/nerd-chat.1`, `nerd-chat-gui.1`), a Debian-format `changelog.gz` next to `CHANGELOG.md.gz`, and a lintian override for the static terminal binary. lintian 2.129 now reports only `bogus-mail-host` (the placeholder maintainer `noreply@invalid`, replaced by admin@sebis.net): it needs the owner's real contact address in `scripts/release.sh` (Maintainer line and `deb_changelog`).
 - Trial without root: the .deb was unpacked, `desktop-file-validate` passes, `ldd` finds every library, and the binary built in Debian 12 starts here (first screen shown). A real `apt install` and a launch from the menu are still for the owner (needs sudo).

@@ -28,7 +28,7 @@ printf 'nerd-chat %s\ncommit %s\nbuilt with: scripts/release.sh (see docs/BUILD_
 # deterministic tarball: sorted names, fixed owner and mtime, no gzip timestamp
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 -C "$out" -cf - "$name" | gzip -9n > "$out/$asset.tar.gz"
 cp "$bin" "$out/$asset"
-deb_changelog() { printf 'nerd-chat (%s) unstable; urgency=medium\n\n  * Release %s. The full history is in CHANGELOG.md.gz in this directory.\n\n -- nerd-chat maintainers <noreply@invalid>  Tue, 14 Nov 2023 22:13:20 +0000\n' "$ver" "$ver" | gzip -9n; }
+deb_changelog() { printf 'nerd-chat (%s) unstable; urgency=medium\n\n  * Release %s. The full history is in CHANGELOG.md.gz in this directory.\n\n -- nerd-chat maintainers <admin@sebis.net>  Tue, 14 Nov 2023 22:13:20 +0000\n' "$ver" "$ver" | gzip -9n; }
 # .deb (amd64): the same static binary, no maintainer scripts, deterministic (fixed mtimes, root owner, gzip -n)
 debroot="$work/deb"; docdir="$debroot/usr/share/doc/nerd-chat"
 mkdir -p "$debroot/DEBIAN" "$debroot/usr/bin" "$docdir"
@@ -48,7 +48,7 @@ Section: net
 Priority: optional
 Architecture: amd64
 Installed-Size: $size
-Maintainer: nerd-chat maintainers <noreply@invalid>
+Maintainer: nerd-chat maintainers <admin@sebis.net>
 Recommends: tor
 Description: serverless chat over Tor onion services (terminal UI)
  Static binary, messages in RAM only, encrypted vault. Unaudited software:
@@ -97,7 +97,7 @@ Section: net
 Priority: optional
 Architecture: amd64
 Installed-Size: $gsize
-Maintainer: nerd-chat maintainers <noreply@invalid>
+Maintainer: nerd-chat maintainers <admin@sebis.net>
 Depends: libc6 (>= $glibc)
 Recommends: tor, libgl1, libxkbcommon0, libwayland-client0, libx11-6
 Description: serverless chat over Tor onion services (graphical app)
