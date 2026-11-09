@@ -79,6 +79,7 @@ impl Gui {
                 vault_path::Choice::Unusable(why) => shell = Shell::Refused(why),
                 vault_path::Choice::New { dir, path: p } => {
                     let tails = std::fs::read_to_string("/etc/os-release").is_ok_and(|s| vault_path::is_tails(&s));
+                    path = Some(p.clone()); // the dialog only confirms WHERE: the vault itself must be created there (not RAM-only)
                     shell = Shell::FirstRun { dir, path: p, tails };
                 }
             }
@@ -213,5 +214,25 @@ impl Gui {
         }
         if self.frames == at + 8 { std::process::exit(0); }
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: after the first-run dialog the app was started RAM-only (no path), so a vault and its contacts were never saved.
+    #[test]
+    fn first_run_gives_the_app_the_default_vault_path_not_ram_only() {
+        let home = tempfile::tempdir().unwrap();
+        let (old_home, old_xdg) = (std::env::var_os("HOME"), std::env::var_os("XDG_DATA_HOME"));
+        std::env::set_var("HOME", home.path());
+        std::env::remove_var("XDG_DATA_HOME");
+        let g = Gui::from_args(&["nerd-chat-gui".into(), "--allow-swap".into()], None);
+        let (shell_path, cfg_path) = (match &g.shell { Shell::FirstRun { path, .. } => Some(path.clone()), _ => None }, g.cfg.as_ref().and_then(|c| c.path.clone()));
+        match old_home { Some(v) => std::env::set_var("HOME", v), None => std::env::remove_var("HOME") }
+        if let Some(v) = old_xdg { std::env::set_var("XDG_DATA_HOME", v); }
+        assert!(shell_path.is_some(), "a fresh home must show the first-run dialog");
+        assert_eq!(cfg_path, shell_path, "the vault must be created where the dialog said, not RAM-only");
     }
 }
