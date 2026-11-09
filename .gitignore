@@ -9,3 +9,6 @@ fuzz/artifacts
 
 # brainstorming mockups (local only)
 .superpowers/
+
+# tor built by scripts/build-tor-android.sh (a build artifact)
+android/app/src/main/jniLibs/

@@ -51,6 +51,14 @@ impl Bridge {
         if std::fs::symlink_metadata(&path).is_ok() { vault_path::check_existing(&path)?; }
         let mut cfg = Config::new(Some(path), None, None, profile);
         cfg.tor.tor_path = tor_path.clone();
+        if tor_path.is_some() {
+            // there is no tmpfs for an app: tor's runtime directory (sockets, its state) lives in the app's private storage, next to the vault directory, and is removed when tor ends
+            // (a stale one left by a kill is swept at the next start)
+            let base = dir.parent().unwrap_or(dir).join("tor");
+            vault_path::prepare_dir(&base)?;
+            cfg.tor.runtime_base = Some(base);
+            cfg.tor.allow_disk = true;
+        }
         cfg.can_host = true;
         cfg.persist_default = persist_default;
         cfg.platform_keys = platform_keys;

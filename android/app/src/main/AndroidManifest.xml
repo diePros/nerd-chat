@@ -2,10 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      The only permission: RECEIVE_BOOT_COMPLETED, so that the key-erase job (EraseJobService) is rescheduled after a reboot. This build cannot reach the network at all (no INTERNET).
-      INTERNET, FOREGROUND_SERVICE and POST_NOTIFICATIONS arrive together with the Tor integration (docs/ANDROID_PORT.md phase P1/P4).
+      RECEIVE_BOOT_COMPLETED: the key-erase job (EraseJobService) is rescheduled after a reboot.
+      INTERNET: needed by the embedded tor (libtor.so, a child process of this app) and by nothing else: the app opens no socket itself except tor's unix sockets in its private
+      directory, no WebView, no HTTP client, no DNS. Android cannot restrict a uid to "tor only", so this is a design rule, not a permission: see docs/ANDROID_PORT.md 3.1.
+      FOREGROUND_SERVICE and POST_NOTIFICATIONS arrive with the foreground service (docs/ANDROID_PORT.md phase P4).
     -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".NerdChatApp"

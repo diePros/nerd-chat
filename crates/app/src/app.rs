@@ -33,6 +33,9 @@ pub struct TorCfg {
     pub socks: Option<Addr>,
     /// The user vouches for whoever owns the control port (see docs/TRANSPORT.md).
     pub trust_control: bool,
+    /// Where a spawned tor keeps its runtime directory (sockets, state) and whether that may be a disk (Android: the app's private storage, where there is no tmpfs). Default: RAM only.
+    pub runtime_base: Option<PathBuf>,
+    pub allow_disk: bool,
 }
 
 /// Builds the transport when the user goes online (reports progress 0..=100). Tests inject an in-memory network.
@@ -113,7 +116,10 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
         None => {
             let path = c.tor_path.clone().or_else(find_tor)
                 .ok_or("no tor binary found: install tor, pass --tor-path, or use --tor-control to use a running tor (Tails/Whonix)")?;
-            TorSetup::Spawn(SpawnConfig::new(path))
+            let mut sc = SpawnConfig::new(path);
+            sc.runtime_base = c.runtime_base.clone();
+            sc.allow_disk = c.allow_disk;
+            TorSetup::Spawn(sc)
         }
     };
     TorTransport::start(setup, progress).map(|t| Box::new(t) as Box<dyn Transport>)

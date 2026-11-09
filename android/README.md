@@ -4,10 +4,10 @@ The third native front end next to the terminal UI and the Linux GUI. Kotlin + J
 bubbles, delivery marks, a coloured top bar) with the project's privacy rules kept: **no timestamps, no read receipts, no typing
 indicators, no presence beyond "connected over Tor"** (docs/DELIVERY.md). Focus: anonymity on the network first.
 
-> **Status: the app runs on the real Rust core; Tor is not embedded yet.** The screens talk to `nerd-chat-app` through a JNI bridge
+> **Status: the app runs on the real Rust core; tor is embedded (built, packaged, wired) but NEVER RUN on a phone yet.** The screens talk to `nerd-chat-app` through a JNI bridge
 > (`crates/android`): vault creation and unlock (the real Argon2 key derivation), contacts, the chat engine, pairing over Tor, verification,
-> panic and purge are the core's own code. What is missing is a `tor` executable: until `libtor.so` is bundled, going online fails with a
-> visible message, so nothing can be sent or received yet. The build declares **no permissions**, so it cannot reach the network at all.
+> panic and purge are the core's own code. `libtor.so` (C tor 0.4.9.16 with OpenSSL 3.5.9 and libevent, built by `scripts/build-tor-android.sh` before Gradle, not committed) is started as a child
+> process by the core. The build declares `INTERNET` for tor only. NOT done: foreground service (Android may freeze tor when the app is in the background), network-change handling, bridges, a run on a device.
 > `-Pdemo` builds an in-memory demo backend instead (no Rust, any 12+ character password) for UI work.
 
 Setting this up on a new machine (SDK, wrapper, signing, phone install, where to continue): **docs/ANDROID_DEV_SETUP.md**.
@@ -50,7 +50,7 @@ Settings (stored as an id in a plain preference: it is only a colour). Palettes:
 Look at `design/*.png` (rendered from the real screens).
 
 ## What is deliberately in place already
-No `INTERNET` permission (yet) · `allowBackup=false` and empty backup/transfer rules · `FLAG_SECURE` (no screenshots, blank recents
+`INTERNET` only for the embedded tor · `allowBackup=false` and empty backup/transfer rules · `FLAG_SECURE` (no screenshots, blank recents
 thumbnail) · clipboard copies marked sensitive · no analytics, no push, no Google services · launcher icon independent of the palette ·
 arm64-v8a + x86_64 only.
 
@@ -62,7 +62,7 @@ arm64-v8a + x86_64 only.
 - The APK contains one tiny native library (`libandroidx.graphics.path.so`, from Compose). On GrapheneOS apps with native code get
   hardened_malloc and memory tagging; not tested on a device.
 - Not run on a device or emulator (none available where this was built). What IS run: the Rust core's tests, the same Kotlin code against the real core over JNI on a Linux JVM, and the APK build with its packaging checks.
-- **No Tor yet:** no `libtor.so`, no `INTERNET` permission, and the core refuses a Tor data directory that is not RAM-backed (Android has no tmpfs for apps): `--allow-disk` semantics must reach the transport first (docs/ANDROID_PORT.md 3.2).
+- **Tor is untested on a device:** build it first (`ANDROID_HOME=~/android-sdk scripts/build-tor-android.sh arm64-v8a` and `x86_64`, needs network once, sources are sha256-pinned), then `assembleDebug`. Tor's runtime directory lives in the app's private storage (`files/../tor`, removed when tor ends). Open: guard persistence, foreground service, the phantom-process limit (a child process may be killed), signature check of the tor tarball.
 - **Files are off:** the core's file cleaner re-executes `/proc/self/exe`, which on Android is `app_process`; the bridge starts the core with `--no-sandbox` and exposes no file feature until the isolated-process cleaner exists.
 - No auto-lock on leaving the app, no foreground service, no notifications: they come with the Tor integration.
 - Contact ids are positions in the list (the core addresses contacts that way): they shift when a contact is deleted (deleting is not in the UI yet).

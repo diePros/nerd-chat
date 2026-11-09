@@ -81,7 +81,8 @@ android {
     sourceSets.getByName("main").kotlin.directories.add("../ui/src/main/kotlin")
     sourceSets.getByName("main").jniLibs.directories.add(rustOut.get().asFile.path)
     lint { abortOnError = true; warningsAsErrors = false }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    // libtor.so is an EXECUTABLE (see scripts/build-tor-android.sh): it must be extracted to the native library directory, the only place Android 10+ allows exec from
+    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"; jniLibs { useLegacyPackaging = true } }
 }
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
