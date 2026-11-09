@@ -11,13 +11,19 @@ import javax.crypto.spec.SecretKeySpec
  * this object to protect that key under a key of its 24-hour EPOCH. Destroying the epoch key (`erase`) is what makes old messages unreadable even if the file is copied.
  *
  *  * `wrap` returns a blob that only this key store can open again, or null if it could not (the history then writes nothing and retries);
- *  * `unwrap` returns the 32 bytes, or null if the epoch key is gone or the blob is not ours;
+ *  * `unwrap` returns the 32 bytes; null if the epoch key is gone (erased) or the blob is not ours (the bucket is then lost for good); an EMPTY array if the key store
+ *    could not answer right now (error, busy): the core then refuses to open the history and leaves the file untouched, instead of concluding anything;
  *  * `erase` destroys the epoch key for good.
  */
 interface PlatformKeys {
     fun wrap(epoch: Int, key: ByteArray): ByteArray?
     fun unwrap(epoch: Int, blob: ByteArray): ByteArray?
     fun erase(epoch: Int)
+}
+
+/** Optional: a key store that wants to know the history setting the user chose (called whenever the unlocked app reports it). Separate from [PlatformKeys], whose method set is the fixed JNI contract. */
+interface HistoryModeListener {
+    fun modeChanged(persist: Persist)
 }
 
 /**

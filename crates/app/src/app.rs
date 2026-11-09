@@ -83,7 +83,14 @@ impl Config {
 /// File systems on which overwriting a file does NOT overwrite its data (copy-on-write, or somebody else's storage): the history cannot be deleted there, so it is refused.
 #[cfg(any(not(target_os = "android"), test))]
 fn unsafe_fs_name(magic: i64) -> Option<&'static str> {
-    match magic { 0x9123_683E => Some("btrfs"), 0x2FC1_2FC1 => Some("ZFS"), 0x6969 => Some("a network file system (NFS)"), 0x517B => Some("a network file system (SMB)"), 0xFF53_4D42 => Some("a network file system (CIFS)"), _ => None }
+    match magic {
+        0x9123_683E => Some("btrfs"), 0x2FC1_2FC1 => Some("ZFS"), 0x6969 => Some("a network file system (NFS)"), 0x517B => Some("a network file system (SMB)"),
+        0xFF53_4D42 => Some("a network file system (CIFS)"), 0xFE53_4D42 => Some("a network file system (SMB2)"), 0xF2F5_2010 => Some("f2fs"),
+        0xCA45_1A4E => Some("bcachefs"), 0x3434 => Some("nilfs2"), 0x794C_7630 => Some("an overlay file system"), 0x6573_5546 => Some("a FUSE file system"),
+        // an allowlist of what overwrites in place: ext2/3/4, XFS, tmpfs, ramfs, FAT, exFAT, NTFS; anything else is unknown, and unknown must not be trusted with a promise of deletion
+        0xEF53 | 0x5846_5342 | 0x0102_1994 | 0x8584_58F6 | 0x4D44 | 0x2011_BAB0 | 0x5346_544E | 0x7366_746E => None,
+        _ => Some("a file system that is not known to overwrite in place"),
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -306,6 +313,8 @@ pub struct App {
     pub input: String,
     pub status: String,
     pub error: bool,
+    /// The last vault save wrote the vault but not its rollback-counter file: every later status line carries that warning until a save succeeds.
+    counter_warn: bool,
     pub sel: usize,
     vf: Option<VaultFile>,
     view: Option<SafetyView>,
@@ -411,7 +420,7 @@ impl App {
             engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
-            alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
+            counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
@@ -456,7 +465,7 @@ impl App {
         let clock: Arc<dyn Clock> = self.cfg.clock.clone().unwrap_or_else(|| Arc::new(SystemClock::new()));
         match History::open(&path, self.cfg.history_slot, fk, platform, clock, p) {
             Ok(mut h) => {
-                for (cid, mid, text) in &moved { if !h.has_queued(*cid, *mid) { h.push(*cid, MsgState::Queued, Some(*mid), text); } }
+                for (cid, mid, text) in &moved { if !h.knows(*cid, *mid) { h.push(*cid, MsgState::Queued, Some(*mid), text); } }
                 let swept = h.sweep();
                 self.history = Some(h);
                 if !moved.is_empty() {
@@ -473,11 +482,11 @@ impl App {
     fn finish_migration(&mut self) {
         if !self.migrate_pending { return; }
         if self.history.as_ref().is_some_and(|h| h.is_dirty()) { return; }
-        self.migrate_pending = false;
         // the choice was only INFERRED from the old outbox ("texts are kept, so the feature is in use"): store it now, or the next start would forget it once the old copies are gone
         let chosen = self.persist();
         if let Some(v) = self.vf.as_mut() { if v.store.persist.is_none() { v.store.persist = Some(chosen); } v.store.clear_outbox(); }
-        let _ = self.save();
+        // only a SUCCESSFUL save ends the migration: a failed one leaves the old copies in the vault, and the next tick tries again
+        if self.save() { self.migrate_pending = false; }
     }
 
     /// What a sweep removed: texts that expired unsent are marked on screen and forgotten by the engine (they must never be sent later, looking fresh).
@@ -663,7 +672,10 @@ impl App {
     pub fn view_number(&self) -> Option<&str> { self.view.as_ref().map(|v| v.number.as_str()) }
     pub fn is_ram_only(&self) -> bool { self.cfg.path.is_none() }
 
-    fn ok(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = false; }
+    fn ok(&mut self, m: impl Into<String>) {
+        if self.counter_warn { self.status = format!("{} WARNING: the rollback-counter file could not be written, a rollback of the vault would not be noticed until the next successful save.", m.into()); self.error = true; }
+        else { self.status = m.into(); self.error = false; }
+    }
     fn err(&mut self, m: impl Into<String>) { self.status = m.into(); self.error = true; }
 
     /// Leftover temp files of an atomic write next to `p`: exactly `<name>.<16 lowercase hex>.tmp` (never somebody else's `v.my-notes.tmp`).
@@ -709,6 +721,7 @@ impl App {
     /// PURGE, step 1 (Ctrl+] / Shift+F12): everything `panic_wipe` does (RAM and screen first: it must be instant). The files are
     /// destroyed by `purge_finish` once the screen is blank.
     pub fn purge_prepare(&mut self) {
+        if let Some(h) = &self.history { h.erase_all_keys(); } // the platform keys go first: even a stale copy of the history file is unreadable after this
         self.purge_pending = Some(std::mem::take(&mut self.created));
         self.panic_wipe();
     }
@@ -910,7 +923,7 @@ impl App {
                 self.screen = Screen::Main;
                 self.failures = 0;
                 if info.rollback_unchecked {
-                    self.err("WARNING: no counter file - rollback of the vault cannot be detected (see docs).");
+                    self.err("WARNING: no (or an unauthenticated old-format) counter file - rollback of the vault cannot be detected (see docs).");
                 } else if info.counter_same_device {
                     self.err(format!("Unlocked. Vault save #{}. WARNING: the counter file is on the SAME device as the vault: weak rollback protection (use --counter-file on another device).", info.counter));
                 } else { self.ok(format!("Unlocked. Vault save #{}.", info.counter)); }
@@ -1497,9 +1510,9 @@ impl App {
 
     fn save(&mut self) -> bool {
         match self.vf().save() {
-            Ok(()) => true,
+            Ok(()) => { self.counter_warn = false; true }
             // the vault file IS on disk: memory and disk agree, so nothing may be rolled back; only the rollback protection is weaker until the next save
-            Err(StoreError::CounterWrite(m)) => { self.err(format!("WARNING: saved, but the rollback-counter file could not be written ({m}): rollback of the vault would not be noticed until the next successful save")); true }
+            Err(StoreError::CounterWrite(m)) => { self.counter_warn = true; self.err(format!("WARNING: saved, but the rollback-counter file could not be written ({m}): rollback of the vault would not be noticed until the next successful save")); true }
             Err(e) => { self.err(format!("SAVE FAILED: {e}")); false }
         }
     }
@@ -3605,6 +3618,17 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_counter_warning_rides_on_every_success_message() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = Config::new(Some(d.path().join("v")), None, None, Profile::InsecureTest);
+        c.timing = fast_timing();
+        let mut a = open_app(c);
+        a.ok("fine"); assert!(!a.error && a.status == "fine");
+        a.counter_warn = true;
+        a.ok("Contact deleted."); assert!(a.error && a.status.contains("Contact deleted.") && a.status.contains("WARNING"), "{}", a.status);
+    }
+
+    #[test]
     fn a_failed_save_does_not_hide_that_the_vault_file_may_already_hold_the_message() {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
@@ -4262,6 +4286,7 @@ mod tests {
         assert_eq!(unsafe_fs_name(0x9123_683E), Some("btrfs"));
         assert!(unsafe_fs_name(0x2FC1_2FC1).is_some() && unsafe_fs_name(0x6969).is_some() && unsafe_fs_name(0x517B).is_some() && unsafe_fs_name(0xFF53_4D42).is_some());
         assert_eq!(unsafe_fs_name(0xEF53), None, "ext4 is fine");
+        assert!(unsafe_fs_name(0xF2F5_2010).is_some() && unsafe_fs_name(0x6573_5546).is_some() && unsafe_fs_name(0x1234_5678).is_some(), "f2fs, FUSE and unknown are refused");
         assert_eq!(unsafe_fs_name(0x0102_1994), None, "tmpfs is fine");
     }
 }

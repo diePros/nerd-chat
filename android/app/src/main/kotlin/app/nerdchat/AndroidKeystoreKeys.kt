@@ -3,6 +3,9 @@ package app.nerdchat
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.content.SharedPreferences
+import app.nerdchat.model.HistoryModeListener
+import app.nerdchat.model.Persist
 import app.nerdchat.model.PlatformKeys
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -17,7 +20,7 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * NOT VERIFIED ON A DEVICE (written without a phone). What to check: that `wrap`/`unwrap` round-trip, that `erase` makes `unwrap` return null, and which [level] a given phone gives.
  */
-class AndroidKeystoreKeys : PlatformKeys {
+class AndroidKeystoreKeys(private val prefs: SharedPreferences? = null) : PlatformKeys, HistoryModeListener {
     /** Where the last key was created: "StrongBox", "TEE" (or "software" on an emulator). Informational. */
     @Volatile var level: String = "unknown"; private set
 
@@ -56,23 +59,46 @@ class AndroidKeystoreKeys : PlatformKeys {
                 c.doFinal(blob, 13, blob.size - 13)
             }
         }
-    } catch (_: Exception) { null }
+    } catch (_: javax.crypto.AEADBadTagException) { null }                                  // not our blob / corrupt: lost for good
+    catch (_: android.security.keystore.KeyPermanentlyInvalidatedException) { null }         // the key can never work again
+    catch (_: Exception) { ByteArray(0) }                                                    // the key store did not answer: NOT "gone" (the core leaves the file alone)
 
     @Synchronized override fun erase(epoch: Int) { try { ks.deleteEntry(alias(epoch)) } catch (_: Exception) { } }
 
+    @Synchronized override fun modeChanged(persist: Persist) { try { prefs?.edit()?.putString(MODE_KEY, persist.name.lowercase())?.apply() } catch (_: Exception) { } }
+
     /**
-     * What the erase job does, knowing nothing about the history: destroy every epoch key more than [KEEP_EPOCHS] epochs old. A message lives at most the rest of its epoch plus
-     * seven days (Rust: `ERASE_AFTER_EPOCHS`, pinned by a test), so a key this old protects nothing that may still be shown. Returns how many keys were destroyed.
+     * How many epochs after its own a key must be kept, from the user's history setting (written by [modeChanged]; the erase job has no vault): a day -> 2, a week -> 9, nothing -> -1 (every key
+     * is stale), unsent texts only -> null (those must stay readable until they arrive, so nothing is erased). Before the first unlock with this version the setting is unknown: the longest bound.
+     * Mirrors `ERASE_AFTER_EPOCHS_DAY` / `ERASE_AFTER_EPOCHS` in `crates/store/src/history.rs` (pinned by a Rust test).
+     */
+    private fun keepEpochs(): Long? = when (prefs?.getString(MODE_KEY, "week")) { "off" -> -1L; "outbox" -> null; "day" -> KEEP_EPOCHS_DAY; else -> KEEP_EPOCHS }
+
+    /**
+     * Keys exist for today and tomorrow whether or not anything is written, so that the key store's own records (alias, creation time) say nothing about WHEN a message was kept.
+     * Only when the history is on. Called by the erase job and at every start.
+     */
+    @Synchronized fun ensureKeys(nowEpochSeconds: Long) {
+        val mode = prefs?.getString(MODE_KEY, "week") ?: return
+        if (mode == "off") return
+        val today = (nowEpochSeconds / EPOCH_SECS).toInt()
+        try { for (e in today..today + 1) if (!ks.containsAlias(alias(e))) create(e) } catch (_: Exception) { }
+    }
+
+    /**
+     * What the erase job does, knowing nothing about the history: destroy every epoch key more than [keepEpochs] epochs old (see there for the bound per setting). A message lives at most
+     * the rest of its epoch plus its retention, so a key this old protects nothing that may still be shown. Returns how many keys were destroyed.
      * A device clock moved far into the future destroys younger keys too: that loses history, it never exposes any.
      */
     @Synchronized fun eraseOlderThan(nowEpochSeconds: Long): Int {
+        val keep = keepEpochs() ?: return 0
         val nowEpoch = nowEpochSeconds / EPOCH_SECS
         var n = 0
         try {
             for (a in ks.aliases().toList()) {
                 if (!a.startsWith(PREFIX)) continue
                 val e = a.removePrefix(PREFIX).toLongOrNull()
-                if (e == null || e + KEEP_EPOCHS < nowEpoch) { ks.deleteEntry(a); n++ }
+                if (e == null || e + keep < nowEpoch) { ks.deleteEntry(a); n++ }
             }
         } catch (_: Exception) { }
         return n
@@ -84,5 +110,8 @@ class AndroidKeystoreKeys : PlatformKeys {
         const val EPOCH_SECS = 86_400L
         /** mirrors `ERASE_AFTER_EPOCHS` in `crates/store/src/history.rs` */
         const val KEEP_EPOCHS = 9L
+        /** mirrors `ERASE_AFTER_EPOCHS_DAY` */
+        const val KEEP_EPOCHS_DAY = 2L
+        private const val MODE_KEY = "history_mode"
     }
 }

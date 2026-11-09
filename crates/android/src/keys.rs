@@ -6,8 +6,11 @@ use jni::{
     objects::{GlobalRef, JByteArray, JValue},
     JNIEnv, JavaVM,
 };
-use nerd_chat_store::history::PlatformKeys;
+use nerd_chat_store::history::{PlatformKeys, Unwrapped};
 use zeroize::Zeroizing;
+
+/// Result of a call into Kotlin: bytes, `null` ("no such key") or a failure (exception, binder error, empty array = Kotlin caught an error).
+enum Call { Bytes(Zeroizing<Vec<u8>>), Null, Failed }
 
 pub struct JniKeys { vm: JavaVM, obj: GlobalRef }
 
@@ -17,27 +20,31 @@ impl JniKeys {
         Some(Self { vm: env.get_java_vm().ok()?, obj: env.new_global_ref(obj).ok()? })
     }
 
-    fn call_bytes(&self, name: &str, epoch: u32, input: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-        let mut env = self.vm.attach_current_thread().ok()?;
-        let arr = env.byte_array_from_slice(input).ok()?;
+    fn call_bytes(&self, name: &str, epoch: u32, input: &[u8]) -> Call {
+        let Ok(mut env) = self.vm.attach_current_thread() else { return Call::Failed };
+        let Ok(arr) = env.byte_array_from_slice(input) else { return Call::Failed };
         let r = env.call_method(&self.obj, name, "(I[B)[B", &[JValue::Int(epoch as i32), JValue::Object(&arr)]);
         let _ = env.set_byte_array_region(&arr, 0, &vec![0i8; input.len()]);
-        let obj = match r { Ok(v) => v.l().ok(), Err(_) => { if env.exception_check().unwrap_or(false) { let _ = env.exception_clear(); } None } }?;
-        if obj.is_null() { return None; }
+        let obj = match r.and_then(|v| v.l()) { Ok(o) => o, Err(_) => { if env.exception_check().unwrap_or(false) { let _ = env.exception_clear(); } return Call::Failed } };
+        if obj.is_null() { return Call::Null; }
         let out = JByteArray::from(obj);
-        let bytes = Zeroizing::new(env.convert_byte_array(&out).ok()?);
+        let Ok(bytes) = env.convert_byte_array(&out) else { return Call::Failed };
+        let bytes = Zeroizing::new(bytes);
         let n = bytes.len();
         let _ = env.set_byte_array_region(&out, 0, &vec![0i8; n]);
-        Some(bytes)
+        if n == 0 { return Call::Failed; }
+        Call::Bytes(bytes)
     }
 }
 
 impl PlatformKeys for JniKeys {
-    fn wrap(&self, epoch: u32, key: &[u8; 32]) -> Option<Vec<u8>> { self.call_bytes("wrap", epoch, key).map(|z| z.to_vec()) }
-    fn unwrap(&self, epoch: u32, blob: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
-        let b = self.call_bytes("unwrap", epoch, blob)?;
-        let a: [u8; 32] = b.as_slice().try_into().ok()?;
-        Some(Zeroizing::new(a))
+    fn wrap(&self, epoch: u32, key: &[u8; 32]) -> Option<Vec<u8>> { match self.call_bytes("wrap", epoch, key) { Call::Bytes(z) => Some(z.to_vec()), _ => None } }
+    fn unwrap(&self, epoch: u32, blob: &[u8]) -> Unwrapped {
+        match self.call_bytes("unwrap", epoch, blob) {
+            Call::Bytes(b) => match <[u8; 32]>::try_from(b.as_slice()) { Ok(a) => Unwrapped::Key(Zeroizing::new(a)), Err(_) => Unwrapped::Failed },
+            Call::Null => Unwrapped::Gone,
+            Call::Failed => Unwrapped::Failed,
+        }
     }
     fn erase(&self, epoch: u32) {
         let Ok(mut env) = self.vm.attach_current_thread() else { return };

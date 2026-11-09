@@ -3,7 +3,7 @@
 Decisions by the owner (2026-11-09): on **Android** messages are kept by default (default lifetime **1 day**, a message saved by hand is kept until the user deletes it); on **Linux**
 the same feature exists as a **setting, off by default** (the terminal and the GUI stay RAM-only until the user switches it on). This plan says how to do it without making the phone
 a better evidence box than it has to be. Inputs: an adversarial design review (Opus) of the idea, our own measurements (below), `docs/DELIVERY.md`, `docs/SECURITY_TRACKER.md` (OB-1..OB-10).
-**Status: unreviewed plan. Nothing here is implemented; every claim marked (verify) needs a real device.**
+**Status: implemented (Rust core, bridge, Android UI, Keystore binding, erase job) and reviewed once (tracker review 33). Every claim marked (verify) still needs a real device.**
 
 ## 0. What an attacker with the phone sees, and what we try to hide
 Attacker A: has the encrypted files (a copy of the app's private folder, or the whole flash image) but NOT the vault password. Attacker B: also has the password (coerced, or guessed).

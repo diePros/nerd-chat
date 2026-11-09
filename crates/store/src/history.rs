@@ -49,22 +49,27 @@ impl Persist {
 /// The platform's deletable key store (Android Keystore). `wrap`/`unwrap` protect one bucket key under the key of its EPOCH; `erase` destroys that key for good.
 pub trait PlatformKeys: Send + Sync {
     fn wrap(&self, epoch: u32, key: &[u8; 32]) -> Option<Vec<u8>>;
-    /// `None`: the epoch key is gone (erased) or the blob is not ours: the bucket is unreadable.
-    fn unwrap(&self, epoch: u32, blob: &[u8]) -> Option<Zeroizing<[u8; 32]>>;
+    /// `Gone`: the epoch key was erased (or the blob is not ours): the bucket is unreadable for good. `Failed`: the key store could not answer NOW (busy, binder error, just after boot):
+    /// nothing may be concluded from that, the file must stay exactly as it is.
+    fn unwrap(&self, epoch: u32, blob: &[u8]) -> Unwrapped;
     fn erase(&self, epoch: u32);
 }
+
+pub enum Unwrapped { Key(Zeroizing<[u8; 32]>), Gone, Failed }
 
 /// No platform key store (Linux): the bucket key is stored as is inside the slot, which is encrypted under the vault's subkey.
 pub struct NoPlatformKeys;
 impl PlatformKeys for NoPlatformKeys {
     fn wrap(&self, _: u32, key: &[u8; 32]) -> Option<Vec<u8>> { Some(key.to_vec()) }
-    fn unwrap(&self, _: u32, blob: &[u8]) -> Option<Zeroizing<[u8; 32]>> { let a: [u8; 32] = blob.try_into().ok()?; Some(Zeroizing::new(a)) }
+    fn unwrap(&self, _: u32, blob: &[u8]) -> Unwrapped { match <[u8; 32]>::try_from(blob) { Ok(a) => Unwrapped::Key(Zeroizing::new(a)), Err(_) => Unwrapped::Gone } }
     fn erase(&self, _: u32) {}
 }
 
 /// A job that knows nothing about the history (the Android erase job, which runs while the app is locked) may destroy the key of epoch `E` once
 /// `E + ERASE_AFTER_EPOCHS < the current epoch`. A bucket never outlives `the end of its epoch + the longest retention`: see the test `the_erase_job_bound_covers_the_longest_life`.
 pub const ERASE_AFTER_EPOCHS: u32 = 9;
+/// The same bound when the setting is a day (the erase job reads the setting from a plain preference the app keeps up to date): the Kotlin `KEEP_EPOCHS_DAY`.
+pub const ERASE_AFTER_EPOCHS_DAY: u32 = 2;
 
 /// Time. `wall` = seconds since 1970 (the device clock, never a network clock); `mono` = monotonic seconds (a clock moved by hand does not move it).
 pub trait Clock: Send + Sync { fn wall(&self) -> u64; fn mono(&self) -> u64; }
@@ -193,7 +198,12 @@ impl History {
             let cl = r.u32().ok_or(StoreError::Corrupt)?;
             let ct = r.take(cl).ok_or(StoreError::Corrupt)?;
             // a bucket whose epoch key was erased (or that does not decrypt) is simply gone
-            let Some(hk) = self.platform.unwrap(epoch, wrapped) else { lost = true; continue };
+            let hk = match self.platform.unwrap(epoch, wrapped) {
+                Unwrapped::Key(k) => k,
+                Unwrapped::Gone => { lost = true; continue }
+                // a key store that cannot answer proves nothing: refuse to open, so nothing is rewritten or scrubbed (the caller keeps the file untouched and says so)
+                Unwrapped::Failed => return Err(StoreError::KeysUnavailable),
+            };
             let Some(pt) = unaead(&hk, &[BUCKET_AAD, &id.to_be_bytes()].concat(), ct) else { lost = true; continue };
             let Some(msgs) = parse_msgs(&pt) else { lost = true; continue };
             self.buckets.push(Bucket { id, epoch, hk, wrapped: Some(wrapped.to_vec()), msgs });
@@ -208,7 +218,7 @@ impl History {
     pub fn set_persist(&mut self, p: Persist) {
         if p == self.persist { return; }
         self.persist = p;
-        if p == Persist::Outbox { for b in &mut self.buckets { b.msgs.retain(|m| m.state == State::Queued); } self.drop_empty_buckets(); }
+        if p == Persist::Outbox { for b in &mut self.buckets { b.msgs.retain(|m| m.state == State::Queued); } self.scrub_other = true; self.drop_empty_buckets(); }
         self.dirty = true;
     }
     pub fn path(&self) -> &Path { &self.path }
@@ -262,7 +272,7 @@ impl History {
         let drop_it = self.persist == Persist::Outbox && state != State::Queued;
         for b in &mut self.buckets {
             if let Some(i) = b.msgs.iter().position(|m| m.contact == contact && m.mid == Some(mid)) {
-                if drop_it { b.msgs.remove(i); } else { b.msgs[i].state = state; }
+                if drop_it { b.msgs.remove(i); self.scrub_other = true; } else { b.msgs[i].state = state; }
                 self.dirty = true;
                 return true;
             }
@@ -277,6 +287,8 @@ impl History {
     pub fn all_queued_mids(&self) -> Vec<([u8; 8], [u8; 8])> {
         self.buckets.iter().flat_map(|b| b.msgs.iter()).filter(|m| m.state == State::Queued).filter_map(|m| m.mid.map(|id| (m.contact, id))).collect()
     }
+    /// Any line with this message id, in any state (delivered and refused ones too): a text that is known must never be pushed again as unsent.
+    pub fn knows(&self, contact: [u8; 8], mid: [u8; 8]) -> bool { self.buckets.iter().flat_map(|b| b.msgs.iter()).any(|m| m.contact == contact && m.mid == Some(mid)) }
     pub fn has_queued(&self, contact: [u8; 8], mid: [u8; 8]) -> bool { self.buckets.iter().flat_map(|b| b.msgs.iter()).any(|m| m.contact == contact && m.mid == Some(mid) && m.state == State::Queued) }
 
     /// The remembered conversation with a contact, oldest first.
@@ -286,7 +298,7 @@ impl History {
 
     /// Forget everything of one contact (the contact was deleted).
     pub fn remove_contact(&mut self, contact: [u8; 8]) {
-        for b in &mut self.buckets { let n = b.msgs.len(); b.msgs.retain(|m| m.contact != contact); if b.msgs.len() != n { self.dirty = true; } }
+        for b in &mut self.buckets { let n = b.msgs.len(); b.msgs.retain(|m| m.contact != contact); if b.msgs.len() != n { self.dirty = true; self.scrub_other = true; } }
         self.drop_empty_buckets();
     }
 
@@ -383,16 +395,33 @@ impl History {
 
     /// Over the slot capacity: drop the oldest lines (an unconfirmed text is the last to go) until it fits.
     fn evict_to_fit(&mut self, cap: usize) {
+        let before: Vec<u32> = self.buckets.iter().map(|b| b.epoch).collect();
+        let mut evicted = false;
         while self.estimate() > cap {
-            let victim = self.buckets.iter().enumerate().flat_map(|(bi, b)| b.msgs.iter().enumerate().map(move |(mi, m)| (bi, mi, m.state == State::Queued))).min_by_key(|&(bi, mi, q)| (q, bi, mi));
-            let Some((bi, mi, _)) = victim else { return };
+            // the contact holding the most bytes pays first: one chatty (or hostile) contact cannot wipe everybody else's history
+            let mut per: std::collections::HashMap<[u8; 8], usize> = std::collections::HashMap::new();
+            for m in self.buckets.iter().flat_map(|b| b.msgs.iter()) { *per.entry(m.contact).or_default() += m.text.len() + 20; }
+            let Some((&heavy, _)) = per.iter().max_by_key(|(c, n)| (**n, **c)) else { break };
+            let victim = self.buckets.iter().enumerate().flat_map(|(bi, b)| b.msgs.iter().enumerate().filter(move |(_, m)| m.contact == heavy).map(move |(mi, m)| (bi, mi, m.state == State::Queued))).min_by_key(|&(bi, mi, q)| (q, bi, mi));
+            let Some((bi, mi, _)) = victim else { break };
             self.buckets[bi].msgs.remove(mi);
+            evicted = true;
             if self.buckets[bi].msgs.is_empty() { self.buckets.remove(bi); }
         }
+        if evicted { self.dirty = true; self.scrub_other = true; self.erase_unused_epochs(&before); }
+    }
+
+    /// Destroy the platform key of every epoch this history still holds (purge, history switched off): on a copy-on-write or flash file system an overwrite does not
+    /// reach the old blocks, but without these keys what they hold cannot be read.
+    pub fn erase_all_keys(&self) {
+        let mut e: Vec<u32> = self.buckets.iter().map(|b| b.epoch).collect();
+        e.sort_unstable(); e.dedup();
+        for x in e { self.platform.erase(x); }
     }
 
     /// Purge: overwrite the file with random bytes and delete it.
     pub fn shred(self) -> Result<(), StoreError> {
+        self.erase_all_keys();
         let len = 2 * self.slot_len;
         for _ in 0..2 { self.file.write_all_at(&random(len), 0).map_err(io)?; self.file.sync_all().map_err(io)?; }
         fs::remove_file(&self.path).map_err(io)
@@ -442,10 +471,10 @@ mod tests {
             let k = *m.entry(epoch).or_insert_with(|| { let mut k = [0u8; 32]; getrandom::fill(&mut k).unwrap(); k });
             Some(aead(&k, b"wrap", key))
         }
-        fn unwrap(&self, epoch: u32, blob: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
-            let k = *self.keys.lock().unwrap().get(&epoch)?;
-            let pt = unaead(&k, b"wrap", blob)?;
-            Some(Zeroizing::new(<[u8; 32]>::try_from(&pt[..]).ok()?))
+        fn unwrap(&self, epoch: u32, blob: &[u8]) -> Unwrapped {
+            let Some(k) = self.keys.lock().unwrap().get(&epoch).copied() else { return Unwrapped::Gone };
+            let Some(pt) = unaead(&k, b"wrap", blob) else { return Unwrapped::Gone };
+            match <[u8; 32]>::try_from(&pt[..]) { Ok(a) => Unwrapped::Key(Zeroizing::new(a)), Err(_) => Unwrapped::Gone }
         }
         fn erase(&self, epoch: u32) { self.keys.lock().unwrap().remove(&epoch); self.erased.lock().unwrap().push(epoch); }
     }
@@ -454,7 +483,7 @@ mod tests {
     struct DeadKeys;
     impl PlatformKeys for DeadKeys {
         fn wrap(&self, _: u32, _: &[u8; 32]) -> Option<Vec<u8>> { None }
-        fn unwrap(&self, _: u32, _: &[u8]) -> Option<Zeroizing<[u8; 32]>> { None }
+        fn unwrap(&self, _: u32, _: &[u8]) -> Unwrapped { Unwrapped::Gone }
         fn erase(&self, _: u32) {}
     }
 
@@ -464,6 +493,20 @@ mod tests {
         let last_use = EPOCH_SECS + Persist::Week.retention_secs().unwrap();
         let job_acts = (ERASE_AFTER_EPOCHS as u64 + 1) * EPOCH_SECS;
         assert!(job_acts >= last_use + EPOCH_SECS, "at least a day of margin: {job_acts} vs {last_use}");
+        let last_use_day = EPOCH_SECS + Persist::Day.retention_secs().unwrap();
+        assert!((ERASE_AFTER_EPOCHS_DAY as u64 + 1) * EPOCH_SECS >= last_use_day + EPOCH_SECS, "the same margin for the one-day setting");
+    }
+
+    #[test]
+    fn shred_and_erase_all_keys_destroy_every_epoch_key() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("hist.bin");
+        let clock = TestClock::new(T0);
+        let keys = Arc::new(MemKeys::default());
+        let mut h = History::open(&p, SLOT, fk(), keys.clone(), clock.clone(), Persist::Week).unwrap();
+        h.push([1; 8], State::Received, None, "x"); h.tick().unwrap();
+        clock.advance(2 * EPOCH_SECS); h.push([1; 8], State::Received, None, "y"); h.tick().unwrap();
+        h.shred().unwrap();
+        assert!(keys.erased.lock().unwrap().len() >= 2, "both epochs were destroyed: {:?}", keys.erased.lock().unwrap());
     }
 
     #[test]
@@ -678,5 +721,63 @@ mod tests {
         let mut bad = good.clone(); bad.push(0); assert!(parse_msgs(&bad).is_none(), "trailing data");
         let mut bad = good.clone(); *bad.last_mut().unwrap() = 0xff; assert!(parse_msgs(&bad).is_none(), "invalid UTF-8");
         assert!(parse_msgs(&good[..good.len() - 1]).is_none(), "truncated");
+    }
+}
+
+#[cfg(test)]
+mod review33_regressions {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct C; impl Clock for C { fn wall(&self) -> u64 { 1_800_000_000 } fn mono(&self) -> u64 { 0 } }
+    fn fk() -> Zeroizing<[u8; 32]> { Zeroizing::new([7u8; 32]) }
+
+    #[test]
+    fn deleted_contact_survives_in_other_slot() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("h");
+        let mut h = History::open(&p, 8192, fk(), Arc::new(NoPlatformKeys), Arc::new(C), Persist::Day).unwrap();
+        h.push([1; 8], State::Received, None, "SECRET-OF-DELETED-CONTACT");
+        h.push([2; 8], State::Received, None, "other contact");
+        h.tick().unwrap();
+        h.remove_contact([1; 8]);
+        assert_eq!(h.tick().unwrap(), Tick::Wrote);
+        drop(h);
+        // read both slots with the vault subkey (what anyone with the password derives)
+        let raw = std::fs::read(&p).unwrap();
+        let mut found = false;
+        for s in 0..2 {
+            if let Some(pt) = unaead(&[7u8; 32], SLOT_AAD, &raw[s * 8192..(s + 1) * 8192]) {
+                let body = &pt[20..];
+                // NoPlatformKeys: bucket key stored in clear inside the slot; parse it
+                let mut r = R(body); let n = r.u16().unwrap();
+                for _ in 0..n {
+                    let id = r.u32().unwrap() as u32; let _e = r.u32().unwrap(); let wl = r.u16().unwrap(); let w = r.take(wl).unwrap(); let cl = r.u32().unwrap(); let ct = r.take(cl).unwrap();
+                    let hk: [u8; 32] = w.try_into().unwrap();
+                    let m = unaead(&hk, &[BUCKET_AAD, &id.to_be_bytes()].concat(), ct).unwrap();
+                    if m.windows(25).any(|w| w == b"SECRET-OF-DELETED-CONTACT") { found = true; eprintln!("found in slot {s}"); }
+                }
+            }
+        }
+        assert!(!found, "deleted contact's text still on disk");
+    }
+
+    struct Flaky { fail: AtomicBool }
+    impl PlatformKeys for Flaky {
+        fn wrap(&self, _: u32, k: &[u8; 32]) -> Option<Vec<u8>> { Some(k.to_vec()) }
+        fn unwrap(&self, _: u32, b: &[u8]) -> Unwrapped { if self.fail.load(Ordering::SeqCst) { return Unwrapped::Failed; } Unwrapped::Key(Zeroizing::new(b.try_into().unwrap())) }
+        fn erase(&self, _: u32) {}
+    }
+
+    #[test]
+    fn transient_keystore_failure_loses_queued_text_for_good() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("h");
+        let k = Arc::new(Flaky { fail: AtomicBool::new(false) });
+        let mut h = History::open(&p, 8192, fk(), k.clone(), Arc::new(C), Persist::Day).unwrap();
+        h.push([1; 8], State::Queued, Some([9; 8]), "unsent text");
+        h.tick().unwrap(); drop(h);
+        k.fail.store(true, Ordering::SeqCst);          // keystore busy once
+        assert!(matches!(History::open(&p, 8192, fk(), k.clone(), Arc::new(C), Persist::Day), Err(StoreError::KeysUnavailable)), "refuses to open, so nothing is rewritten");
+        k.fail.store(false, Ordering::SeqCst);         // keystore fine again
+        let h = History::open(&p, 8192, fk(), k.clone(), Arc::new(C), Persist::Day).unwrap();
+        assert_eq!(h.queued([1; 8]).len(), 1, "a transient failure destroyed the unsent text");
     }
 }

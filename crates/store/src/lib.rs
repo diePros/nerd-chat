@@ -6,7 +6,7 @@ mod book;
 pub mod history;
 mod file;
 
-pub use history::{Clock, History, Line, NoPlatformKeys, Persist, PlatformKeys, State, Swept, SystemClock, Tick};
+pub use history::{Clock, History, Line, NoPlatformKeys, Persist, PlatformKeys, State, Swept, SystemClock, Tick, Unwrapped};
 pub use book::{Contact, OutMsg, SavedMsg, Store, MAX_CONTACTS, MAX_NAME, MAX_OUTBOX, MAX_OUTBOX_TOTAL, MAX_SAVED, MAX_SAVED_TOTAL};
 pub use file::{counter_path_for, read_regular_file, shred_file, OpenInfo, VaultFile};
 
@@ -26,6 +26,8 @@ pub enum StoreError {
     Io(String),
     #[error("a vault already exists at that path (refusing to overwrite)")]
     Exists,
+    #[error("the platform key store did not answer; the history file was left untouched")]
+    KeysUnavailable,
     #[error("cancelled")]
     Cancelled,
     #[error("the saved messages are full ({MAX_SAVED} per contact, {} KiB in total): delete some first", MAX_SAVED_TOTAL / 1024)]

@@ -14,7 +14,10 @@ import android.content.Context
  */
 class EraseJobService : JobService() {
     override fun onStartJob(params: JobParameters?): Boolean {
-        AndroidKeystoreKeys().eraseOlderThan(System.currentTimeMillis() / 1000)
+        val keys = AndroidKeystoreKeys(applicationContext.getSharedPreferences("history", Context.MODE_PRIVATE))
+        val now = System.currentTimeMillis() / 1000
+        keys.eraseOlderThan(now)
+        keys.ensureKeys(now)
         return false // done, nothing in the background
     }
     override fun onStopJob(params: JobParameters?): Boolean = true // run again at the next period

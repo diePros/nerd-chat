@@ -10,7 +10,7 @@ import java.util.concurrent.Executors
  * (the key derivation, Tor start, incoming messages and confirmations all arrive by polling) and every answer replaces [state].
  */
 class RustBackend(
-    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Persist, keys: PlatformKeys? = null,
+    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Persist, private val keys: PlatformKeys? = null,
     private val pollMillis: Long = 250, private val pollMillisBusy: Long = 80,
 ) : ChatBackend {
     private val thread = Executors.newSingleThreadExecutor { Thread(it, "nerdchat-core").apply { isDaemon = true } }
@@ -20,6 +20,9 @@ class RustBackend(
     override val state: StateFlow<AppState> = s
 
     @Volatile private var closed = false
+    private var lastMode: Persist? = null
+    /** Tell the key store which history setting is in force (only a state of an UNLOCKED app tells the truth about it). */
+    private fun track(a: AppState): AppState { if (a.stage == Stage.Ready && a.persist != lastMode) { lastMode = a.persist; (keys as? HistoryModeListener)?.modeChanged(a.persist) }; return a }
 
     /** the bridge's refusal text stays visible for a few seconds (the next poll answer carries none) */
     @Volatile private var latched: String? = null
@@ -33,7 +36,7 @@ class RustBackend(
                 val st = s.value
                 delay(if (st.stage == Stage.Working || st.tor is TorState.Bootstrapping) pollMillisBusy else pollMillis)
                 if (st.stage == Stage.Wiped) continue
-                s.value = withLatch(Snapshot.parse(native.call("snapshot", null)))
+                s.value = track(withLatch(Snapshot.parse(native.call("snapshot", null))))
             }
         }
     }
@@ -55,7 +58,7 @@ class RustBackend(
                     repeat(2) { if (parsed.promptOpen) parsed = Snapshot.parse(native.call("cancel", null)) }
                     latch(refused)
                 }
-                s.value = withLatch(parsed.copy(rejected = refused ?: parsed.rejected))
+                s.value = track(withLatch(parsed.copy(rejected = refused ?: parsed.rejected)))
             } finally {
                 arg?.fill('\u0000')
                 more.forEach { it.second?.fill('\u0000') }

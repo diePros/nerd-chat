@@ -110,14 +110,15 @@ fn counter_file(vault: &Vault) -> Vec<u8> {
 }
 
 /// Read the counter file (new 48-byte form, or the old 8 plain bytes: it is rewritten in the new form on the next save).
-fn read_counter(path: &Path, vault: &Vault) -> Result<u64, StoreError> {
+/// The flag says "legacy plain form": it carries no authentication (anybody who can write the file can put any number there), so the caller must not claim rollback protection.
+fn read_counter(path: &Path, vault: &Vault) -> Result<(u64, bool), StoreError> {
     use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
     let b = read_regular_file(path, COUNTER_FILE_LEN as u64)?;
-    if b.len() == 8 { return Ok(u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?)); }
+    if b.len() == 8 { return Ok((u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?), true)); }
     if b.len() != COUNTER_FILE_LEN { return Err(StoreError::Corrupt); }
     let key = vault.subkey(b"counter-file");
     let pt = XChaCha20Poly1305::new((&*key).into()).decrypt(XNonce::from_slice(&b[..24]), Payload { msg: &b[24..], aad: COUNTER_AAD }).map_err(|_| StoreError::Corrupt)?;
-    Ok(u64::from_le_bytes(pt.try_into().map_err(|_| StoreError::Corrupt)?))
+    Ok((u64::from_le_bytes(pt.try_into().map_err(|_| StoreError::Corrupt)?), false))
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StoreError> {
@@ -190,10 +191,10 @@ impl VaultFile {
         let cpath = counter_path.map(Path::to_path_buf).unwrap_or_else(|| default_counter_path(path));
         // open first, THEN read the counter: its file is encrypted under a key that only the unlocked vault has
         let (vault, data) = Vault::open_checked(&blob, pw, keyfile, 0)?;
-        let min = if cpath.exists() { Some(read_counter(&cpath, &vault)?) } else { None };
+        let (min, legacy) = if cpath.exists() { let (m, l) = read_counter(&cpath, &vault)?; (Some(m), l) } else { (None, false) };
         if let Some(m) = min { if vault.counter() < m { return Err(StoreError::Vault(VaultError::Rollback { found: vault.counter(), expected: m })); } }
         let store = Store::decode(&data).map_err(|_| StoreError::Vault(VaultError::Malformed))?;
-        let info = OpenInfo { rollback_unchecked: min.is_none(), counter: vault.counter(), counter_same_device: same_device(path, &cpath) };
+        let info = OpenInfo { rollback_unchecked: min.is_none() || legacy, counter: vault.counter(), counter_same_device: same_device(path, &cpath) };
         Ok((Self { path: Some(path.to_path_buf()), counter_path: Some(cpath), vault, store }, info))
     }
 
@@ -201,7 +202,9 @@ impl VaultFile {
     /// files only ever say "the app was running until about T" (a SAVE, a rare management event such as adding a contact, is the one thing that still shows its own moment).
     pub fn touch(&self) -> Result<(), StoreError> {
         for p in self.path.iter().chain(self.counter_path.iter()) {
-            let f = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(p).map_err(io)?;
+            // O_NONBLOCK + a regular-file check: a FIFO planted at this path must not block the thread that also reads the panic key
+            let f = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(p).map_err(io)?;
+            if !f.metadata().map_err(io)?.is_file() { return Err(StoreError::Corrupt); }
             f.set_modified(std::time::SystemTime::now()).map_err(io)?;
         }
         Ok(())
@@ -441,7 +444,7 @@ mod tests {
         let cp = default_counter_path(&p);
         fs::write(&cp, vf.vault.counter().to_le_bytes()).unwrap();                 // what the previous version wrote
         let (mut vf2, info) = VaultFile::open(&p, None, b"pw", None).unwrap();
-        assert!(!info.rollback_unchecked);
+        assert!(info.rollback_unchecked, "the plain form has no authentication: no claim of protection");
         vf2.save().unwrap();
         assert_eq!(fs::read(&cp).unwrap().len(), COUNTER_FILE_LEN, "rewritten in the new form");
         // and the old form still catches a rollback: a plain counter FAR ahead of the vault
@@ -466,5 +469,24 @@ mod tests {
         let mut other = VaultFile::create(Some(&p2), None, b"pw", None, Profile::InsecureTest).unwrap(); other.save().unwrap();
         fs::copy(default_counter_path(&p2), &cp).unwrap();
         assert!(matches!(VaultFile::open(&p, None, b"pw", None), Err(StoreError::Corrupt)));
+    }
+}
+#[cfg(test)]
+mod review33_regressions {
+    use super::*;
+    use nerd_chat_vault::Profile;
+    #[test]
+    fn rollback_via_plain_counter_downgrade() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("v");
+        let mut vf = VaultFile::create(Some(&p), None, b"pw", None, Profile::InsecureTest).unwrap();
+        vf.save().unwrap();
+        let old = fs::read(&p).unwrap();
+        vf.save().unwrap(); vf.save().unwrap();
+        drop(vf);
+        fs::write(&p, &old).unwrap();                                   // roll the vault back
+        fs::write(default_counter_path(&p), 0u64.to_le_bytes()).unwrap(); // and "downgrade" the counter file
+        let r = VaultFile::open(&p, None, b"pw", None);
+        let (_, info) = r.expect("opened");
+        assert!(info.rollback_unchecked, "rollback went unnoticed and no warning either");
     }
 }

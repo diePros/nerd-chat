@@ -63,7 +63,7 @@ Tests: `engine.rs` (resend with the same id, repeat handling with and without UI
 dead-connection resend, stale connection, full outbox, re-add, old-style peer, malformed frames), `proto.rs` (frames, one cell per
 short text, id consistency), `app.rs` (confirmation by id, offline warning and marks, full outbox keeps the draft).
 
-## Encrypted outbox (opt-in, key `O`; on by default in the Android app)
+## Encrypted outbox (now part of the message history file `<vault>.hist`, see `docs/HISTORY_AND_TIMING_PLAN.md`; the text below describes the first version, which kept the outbox in the vault)
 **Problem.** Unconfirmed texts live in the sender's RAM, so the OS killing the app (every phone does it) or closing the terminal loses them, and you cannot write
 while offline. Session solves this with storage nodes run by strangers (`docs/COMPARISON_SESSION.md`, S1); we keep a stranger out of the loop and use the vault.
 
@@ -83,7 +83,7 @@ SBS6 is a one-way upgrade (an older binary cannot open it).
 - The vault file now changes whenever you send or a message is confirmed: anyone who can look at your disk sees WHEN you wrote, not what.
 - A deleted text may still sit in an old copy of the vault (flash wear levelling, backups, a copied file) until that copy is overwritten; it stays encrypted under the vault key.
 - After a restart the receiver's list of already-seen ids is gone: a text it already showed, whose confirmation was lost, can appear twice. A duplicate was chosen over a loss.
-- An older vault copy brought back would resend texts already delivered; the rollback counter exists to catch exactly that.
+- An older VAULT copy brought back is caught by the rollback counter. An older `<vault>.hist` copy is NOT (the history file has no rollback binding, tracker R33-8): delivered texts would come back as unsent and be sent again.
 - **Old peers and slow circuits.** For a v0.1.0-style peer (and for a modern peer whose CAPS frame takes longer than 5 s to arrive) kept texts are written as plain frames and reported `Delivered` as soon as they are handed to the connection thread; the app then deletes its vault copy. A connection that dies at that moment loses a text that was "kept until confirmed" (tracker R32-A4, open).
 - **After every restart** the kept texts go out as a burst right after the capability frame, followed by one batched confirmation 1-5 s later: the same shape as texts queued while the contact was away (C6-timing).
 - **Typing while Tor starts** works: a text kept while the engine is still starting is handed to it as soon as it is ready.
