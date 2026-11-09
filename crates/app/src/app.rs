@@ -115,6 +115,23 @@ const NO_CONTACT: &str = "No contact selected. Press n to add one.";
 /// Upper bound of the history scroll offset (the UI clamps to what really exists).
 const SCROLL_CAP: usize = 100_000;
 
+/// States for the inspector panel (see `App::inspect`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inspect {
+    pub connected: bool,
+    pub contact_can_host: bool,
+    pub we_told_can_host: Option<bool>,
+    pub we_host_now: bool,
+    pub host_anyway: bool,
+    /// "host anyway" may be switched ON (our Tor can host) or is ON (and may be switched off)
+    pub host_anyway_possible: bool,
+    pub rotation: Option<&'static str>,
+    /// a rotation can be started now (online, none waiting)
+    pub rotation_possible: bool,
+    pub saved: usize,
+    pub cap_mismatch: Option<bool>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key { Char(char), Enter, Esc, Backspace, Up, Down, Tab, BackTab, PageUp, PageDown, Home, End, F12, CtrlBackslash, /// Ctrl+] / Shift+F12: PURGE
     Purge }
@@ -1072,6 +1089,27 @@ impl App {
         let can = self.our_cap(c);
         let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
         Some((p.can_host, c.host_anyway, !dials || (c.host_anyway && can)))
+    }
+
+    /// Everything the GUI's inspector panel shows about the selected contact. No keys, no addresses, no names of other contacts:
+    /// only states and yes/no answers (the panel is drawn on a screen somebody may be looking at).
+    pub fn inspect(&self) -> Option<Inspect> {
+        let c = self.vf.as_ref()?.store.contacts.get(self.sel)?;
+        let p = c.peer.as_ref()?;
+        let can = self.our_cap(c);
+        let dials = nerd_chat_chat::we_dial(&c.identity.verifying_key().to_bytes(), p, can);
+        Some(Inspect {
+            connected: self.linked.contains(&c.id),
+            contact_can_host: p.can_host,
+            we_told_can_host: c.adv_can_host,
+            we_host_now: !dials || (c.host_anyway && can),
+            host_anyway: c.host_anyway,
+            host_anyway_possible: can || c.host_anyway,
+            rotation: self.rotation_state(),
+            rotation_possible: c.next_transport.is_none() && matches!(self.online, Online::Online),
+            saved: c.saved.len(),
+            cap_mismatch: self.cap_mismatch(),
+        })
     }
 
     /// `K`: rotate OUR onion service and client-auth key for the selected contact (docs/KEY_ROTATION.md). Old copies of our
@@ -2930,6 +2968,22 @@ mod tests {
             let s = screen_text(&a, w, h);
             assert!(s.contains("File offered") || s.contains("File offered (up to"), "{w}x{h}: the offer must be visible in the chat: {s}");
         }
+    }
+
+    #[test]
+    fn the_inspector_reports_states_only_and_matches_the_roles() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v");
+        assert!(a.inspect().is_none(), "no contact");
+        add_peer(&mut a, "bob");
+        let i = a.inspect().expect("a paired contact");
+        assert!(!i.connected && !i.host_anyway && i.rotation.is_none() && i.saved == 0);
+        assert!(!i.rotation_possible, "offline: a rotation cannot start");
+        assert_eq!(Some((i.contact_can_host, i.host_anyway, i.we_host_now)), a.contact_roles());
+        let dump = format!("{i:?}");
+        assert!(!dump.contains("bob"), "no names in the inspector data: {dump}");
+        a.handle(Key::Char('h'));
+        assert_eq!(a.inspect().unwrap().host_anyway, a.vf.as_ref().unwrap().store.contacts[0].host_anyway);
     }
 
     #[test]

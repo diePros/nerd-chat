@@ -88,6 +88,7 @@ impl Demo {
                 me.handle(Key::Char('T'));
                 self.stage = 9;
             }
+            8 if std::env::args().any(|a| a == "--demo-advanced") => { me.handle(Key::Esc); me.handle(Key::Esc); select(me, 1); self.stage = 9; }
             _ => {}
         }
     }

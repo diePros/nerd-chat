@@ -34,6 +34,8 @@ pub enum Cmd {
     Submit(String),
     CancelPrompt,
     SetOnline(bool),
+    /// hide the screen (the terminal version's privacy screen): back out of any chat first, then lock
+    Hide,
 }
 #[derive(Default)]
 pub struct Cmds { v: Vec<Cmd>, pub panic: bool, pub settings: bool }
@@ -54,6 +56,11 @@ pub fn apply(app: &mut App, c: Cmd, user_offline: &mut bool, started: &mut bool)
         Cmd::Keys(ks) => { for k in ks { app.handle(k); } }
         Cmd::Submit(t) => { app.input = t; app.handle(Key::Enter); }
         Cmd::CancelPrompt => { app.handle(Key::Esc); }
+        Cmd::Hide => {
+            if app.screen != Screen::Main { return; } // a prompt or a pairing question is open: nothing is hidden behind it
+            Gui::ensure_normal(app);
+            for _ in 0..5 { if app.locked { break; } app.handle(Key::Esc); } // chat / saved view -> details -> privacy screen
+        }
         Cmd::SetOnline(want) => {
             *user_offline = !want;
             *started = true;
@@ -171,6 +178,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, prompt_text: &mut String, prompt_f
         _ => {}
     }
     if app.locked { lock_screen(ui, cmds); return; }
+    if app.screen == Screen::Main && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) { cmds.push(Cmd::Hide); }
     // D3: the full-screen "not verified" notice, once per contact per session, before the chat with an unverified contact opens
     if app.screen == Screen::Main && app.pane == Pane::Chat {
         if let (Some(id), Some((name, Trust::Unverified, _))) = (app.chat_id(), app.chat_header()) {
@@ -185,7 +193,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, prompt_text: &mut String, prompt_f
     egui::Panel::left("contacts").default_size(230.0).min_size(180.0).show(ui, |ui| contacts(ui, app, cmds));
     egui::CentralPanel::default().show(ui, |ui| match app.pane {
         Pane::Chat => chat(ui, app, cmds),
-        _ => details(ui, app, cmds),
+        _ => { egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| details(ui, app, cmds)); }
     });
     popups(ui, app, prompt_text, prompt_for, cmds);
 }
@@ -195,7 +203,7 @@ fn lock_screen(ui: &mut egui::Ui, cmds: &mut Cmds) {
         ui.add_space(120.0);
         ui.heading("Hidden");
         ui.label(RichText::new("The screen is hidden. The vault stays open in memory.").color(MUTED));
-        if ui.button("Show again").clicked() { cmds.push(Cmd::Keys(vec![Key::Enter])); }
+        if ui.button("Show again").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) { cmds.push(Cmd::Keys(vec![Key::Enter])); }
     }));
 }
 
@@ -246,6 +254,7 @@ fn status_bar(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
             if ui.checkbox(&mut on, "Connected").changed() { cmds.push(Cmd::SetOnline(on)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("Panic: wipe and exit").color(Color32::WHITE)).fill(Color32::from_rgb(140, 40, 40))).clicked() { cmds.panic = true; }
+                if ui.button("Hide screen (Ctrl+L)").on_hover_text("Blanks the window so nobody next to you can read it. The app keeps running. This is NOT a lock: anyone can click Show again.").clicked() { cmds.push(Cmd::Hide); }
             });
         });
     });
@@ -322,9 +331,39 @@ fn details(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
             if ui.button("Open chat").clicked() { cmds.push(Cmd::OpenChat); }
             if ui.button("Check the code").clicked() { cmds.push(Cmd::Command('v')); }
         });
+        advanced(ui, app, cmds);
     }
     ui.add_space(20.0);
     if ui.button(RichText::new("Delete this contact").color(RED)).clicked() { cmds.push(Cmd::Command('d')); }
+}
+
+/// The inspector: what the terminal version's details view shows and the expert switches (key rotation, host anyway). Collapsed by default.
+fn advanced(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
+    let Some(i) = app.inspect() else { return };
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    ui.add_space(8.0);
+    egui::CollapsingHeader::new("Advanced").default_open(cfg!(feature = "demo") && std::env::args().any(|a| a == "--demo-advanced")).show(ui, |ui| {
+        egui::Grid::new("inspect").num_columns(2).show(ui, |ui| {
+            ui.label("Connected now"); ui.label(yes(i.connected)); ui.end_row();
+            ui.label("Their Tor can host"); ui.label(yes(i.contact_can_host)); ui.end_row();
+            ui.label("Told them ours can"); ui.label(match i.we_told_can_host { Some(b) => yes(b), None => "not yet" }); ui.end_row();
+            ui.label("We host for them now"); ui.label(yes(i.we_host_now)); ui.end_row();
+            ui.label("Messages you saved"); ui.label(i.saved.to_string()); ui.end_row();
+        });
+        if let Some(b) = i.cap_mismatch {
+            ui.label(RichText::new(format!("You now run as \"{}\", but this contact was told the opposite when you paired. Its roles follow what it was told.", if b { "can host" } else { "cannot host" })).color(AMBER));
+        }
+        ui.separator();
+        ui.label(RichText::new("New keys").strong());
+        ui.label("Creates a new hidden address for this contact. Old copies of your contact file then stop showing when you are online. The contact has to be reachable.");
+        if let Some(r) = i.rotation { ui.label(RichText::new(r).color(AMBER)); }
+        if ui.add_enabled(i.rotation_possible, egui::Button::new("Switch to new keys")).on_disabled_hover_text("Go online first, and wait for an earlier switch to finish.").clicked() { cmds.push(Cmd::Command('K')); }
+        ui.separator();
+        ui.label(RichText::new("Host for this contact anyway").strong());
+        ui.label("Only if their Tor cannot host but says it can. While on, anyone with their copy of your contact file can see when you are online.");
+        let mut on = i.host_anyway;
+        if ui.add_enabled(i.host_anyway_possible, egui::Checkbox::new(&mut on, "Host anyway")).on_disabled_hover_text("Your own Tor cannot host, so this is impossible.").changed() { cmds.push(Cmd::Command('h')); }
+    });
 }
 
 fn chat(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {

@@ -67,3 +67,8 @@ GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phas
 
 ## Release check (2026-11-09, commit d38683f)
 `scripts/release.sh` builds the static terminal binary, tarball, terminal .deb AND `nerd-chat-gui_0.1.0_amd64.deb` (binary, `/usr/share/applications/nerd-chat.desktop`, scalable icon, docs). The GUI .deb as built on this machine says `Depends: libc6 (>= 2.43)`: it will NOT install on Tails (Debian 12, glibc 2.36). For a portable GUI package build the release on the OLDEST system to support (the script computes the needed glibc itself). Not yet checked: installing the .deb and launching from a real menu, the reproducibility of the GUI build (dynamic glibc), `lintian`.
+
+## GUI parity steps 1-3 (2026-11-09)
+- Contact details: collapsible "Advanced" panel (`App::inspect`, states only, no keys/addresses/names): connection, roles, capability told, saved count, rotation state; buttons "Switch to new keys" (K) and "Host anyway" (h, disabled when impossible).
+- "Hide screen (Ctrl+L)" in the status bar (privacy screen; not a lock); Enter or "Show again" brings it back. Only from the main screen (never over a prompt).
+- Details pane scrolls. Screenshot: docs/superpowers/specs/gui-advanced.png. Still open: purge button with confirmation, alert history in the inspector.
