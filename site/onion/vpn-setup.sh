@@ -86,6 +86,16 @@ fi
 [ "$mode" = "--install" ] || { echo "unknown mode $mode"; exit 1; }
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 
+diagnose() { # prints what is needed to tell DNS, routing and firewall problems apart
+  echo "--- diagnostics (safe to paste: no private key is shown)"
+  echo "[wg]";        wg show "$IF" 2>&1 | grep -v -i 'preshared' | head -12
+  echo "[rules]";     ip rule 2>&1 | head -8
+  echo "[routes]";    ip route show table all 2>&1 | grep -v -E '^(broadcast|local|fe80|ff00)' | head -12
+  echo "[resolv.conf]"; cat /etc/resolv.conf 2>&1 | head -6
+  if getent hosts check.torproject.org >/dev/null 2>&1; then echo "[DNS] name lookup works"; else echo "[DNS] name lookup FAILS"; fi
+  if curl -fsS --max-time 8 -o /dev/null https://1.1.1.1/cdn-cgi/trace 2>/dev/null; then echo "[by IP] reaching 1.1.1.1 works"; else echo "[by IP] reaching 1.1.1.1 FAILS"; fi
+  echo "--- end diagnostics"
+}
 egress_ip() { curl -fsS --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | jq -r '.IP // empty'; }
 
 # Does this host let the container make WireGuard interfaces? (needs the kernel module on the Proxmox host)
@@ -139,12 +149,12 @@ hs=$(wg show $IF latest-handshakes 2>/dev/null | awk '{print $2}' | sort -rn | h
 if [ -z "${hs:-}" ] || [ "$hs" = 0 ]; then
   echo "No handshake with the VPN. The kill switch is on, so nothing leaks; fix the config and rerun."
   echo "Check: journalctl -u wg-quick@$IF   and   wg show"
-  exit 1
+  diagnose; exit 1
 fi
 after=$(egress_ip || true)
 echo "   public IP before: ${before:-unknown}"
 echo "   public IP now:    ${after:-unknown}"
-if [ -z "$after" ]; then echo "Cannot reach the internet through the tunnel."; exit 1; fi
+if [ -z "$after" ]; then echo "Cannot reach the internet through the tunnel."; diagnose; exit 1; fi
 if [ -n "$before" ] && [ "$before" = "$after" ]; then
   echo "The public IP did not change, so traffic is NOT going through the VPN. Stopping."
   exit 1
