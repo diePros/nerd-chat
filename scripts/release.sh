@@ -28,13 +28,15 @@ printf 'nerd-chat %s\ncommit %s\nbuilt with: scripts/release.sh (see docs/BUILD_
 # deterministic tarball: sorted names, fixed owner and mtime, no gzip timestamp
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 -C "$out" -cf - "$name" | gzip -9n > "$out/$asset.tar.gz"
 cp "$bin" "$out/$asset"
+deb_changelog() { printf 'nerd-chat (%s) unstable; urgency=medium\n\n  * Release %s. The full history is in CHANGELOG.md.gz in this directory.\n\n -- nerd-chat maintainers <noreply@invalid>  Tue, 14 Nov 2023 22:13:20 +0000\n' "$ver" "$ver" | gzip -9n; }
 # .deb (amd64): the same static binary, no maintainer scripts, deterministic (fixed mtimes, root owner, gzip -n)
 debroot="$work/deb"; docdir="$debroot/usr/share/doc/nerd-chat"
 mkdir -p "$debroot/DEBIAN" "$debroot/usr/bin" "$docdir"
 install -m 0755 "$bin" "$debroot/usr/bin/nerd-chat"
 install -m 0644 LICENSE "$docdir/copyright"
 install -m 0644 README.md SECURITY.md docs/GETTING_STARTED.md docs/BUILD_AND_RUN.md "$docdir/"
-gzip -9n < CHANGELOG.md > "$docdir/CHANGELOG.md.gz"; chmod 0644 "$docdir/CHANGELOG.md.gz"   # not Debian changelog syntax: do not call it changelog.gz
+gzip -9n < CHANGELOG.md > "$docdir/CHANGELOG.md.gz"; chmod 0644 "$docdir/CHANGELOG.md.gz"
+deb_changelog > "$docdir/changelog.gz"; chmod 0644 "$docdir/changelog.gz"
 mkdir -p "$debroot/usr/share/man/man1" "$debroot/usr/share/lintian/overrides"
 gzip -9n < packaging/nerd-chat.1 > "$debroot/usr/share/man/man1/nerd-chat.1.gz"; chmod 0644 "$debroot/usr/share/man/man1/nerd-chat.1.gz"
 printf '%s\n' '# the binary is statically linked on purpose (musl): nothing to link against' 'nerd-chat: shared-library-lacks-prerequisites [usr/bin/nerd-chat]' > "$debroot/usr/share/lintian/overrides/nerd-chat"; chmod 0644 "$debroot/usr/share/lintian/overrides/nerd-chat"
@@ -84,6 +86,7 @@ install -m 0644 packaging/nerd-chat.svg "$gdeb/usr/share/icons/hicolor/scalable/
 install -m 0644 LICENSE "$gdoc/copyright"
 install -m 0644 README.md SECURITY.md docs/GETTING_STARTED.md docs/EXCHANGING_CONTACTS.md "$gdoc/"
 gzip -9n < CHANGELOG.md > "$gdoc/CHANGELOG.md.gz"; chmod 0644 "$gdoc/CHANGELOG.md.gz"
+deb_changelog > "$gdoc/changelog.gz"; chmod 0644 "$gdoc/changelog.gz"
 mkdir -p "$gdeb/usr/share/man/man1"
 gzip -9n < packaging/nerd-chat-gui.1 > "$gdeb/usr/share/man/man1/nerd-chat-gui.1.gz"; chmod 0644 "$gdeb/usr/share/man/man1/nerd-chat-gui.1.gz"
 gsize=$(du -sk "$gdeb/usr" | cut -f1)
