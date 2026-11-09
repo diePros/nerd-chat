@@ -47,6 +47,16 @@ pub struct Bridge {
     exported: Option<Zeroizing<String>>,
 }
 
+/// A local-network address as the phone accepts it: `ip:port` with a PRIVATE IPv4 address. Loopback is refused on the phone (it would let a link make the app talk to a port another app
+/// on the same phone opened); the tests use loopback, so it is allowed under `cfg(test)`. The core checks again (private ranges only).
+fn lan_addr_ok(arg: &str) -> Result<(), &'static str> {
+    let a: std::net::SocketAddr = arg.trim().parse().map_err(|_| "not an address like 192.168.1.5:4000")?;
+    match a.ip() {
+        std::net::IpAddr::V4(v) if v.is_private() || v.is_link_local() || (cfg!(test) && v.is_loopback()) => Ok(()),
+        _ => Err("only an address on your own network (192.168.x.x, 10.x.x.x, 172.16-31.x.x) works here"),
+    }
+}
+
 /// Sets tor's network on/off on a worker thread. It remembers, per tor (pid), what that tor has CONFIRMED and keeps trying until the desired state is confirmed: an "up" that never
 /// arrived would leave tor silent while the screen says "Tor connected". A tor it has not told anything is assumed to be enabled (that is how tor starts), so a tor that appears
 /// during an outage is told once, and nothing is re-sent while nothing changed. The thread ends when the bridge is dropped.
@@ -256,6 +266,7 @@ impl Bridge {
             "delete_contact" => {
                 if !self.in_main() { return Err(NOT_NOW); }
                 let before = self.app.contacts_len();
+                self.exported = None;
                 self.run("select", arg)?;
                 self.ensure_normal(); self.app.handle(Key::Char('d'));
                 if self.app.screen != Screen::Prompt(Prompt::ConfirmDelete) { return Err(NOT_NOW); }
@@ -266,6 +277,7 @@ impl Bridge {
             "repair_contact" => {
                 if !self.in_main() { return Err(NOT_NOW); }
                 self.run("select", arg)?;
+                self.exported = None;
                 if !self.app.repair_selected() { return Err("nothing was changed: see the status line"); }
             }
             // ---- contact TEXT exchange (the phone's "file" pairing: share or paste the contact file as text) ----
@@ -280,12 +292,12 @@ impl Bridge {
                 if !self.in_main() { return Err(NOT_NOW); }
                 if arg.len() > 8 * 1024 { return Err("text too long"); }
                 self.ensure_normal();
-                self.app.import_text(arg);
-                if self.app.cur_peer_missing() { return Err("nothing was imported: see the status line"); }
+                if !self.app.import_text(arg) { return Err("nothing was imported: see the status line"); }
             }
             // ---- pairing on the LOCAL network (direct connection, no Tor; private addresses only) ----
             "lan_offer" => {
                 if !self.in_main() { return Err(NOT_NOW); }
+                lan_addr_ok(arg)?;
                 self.ensure_normal(); self.app.handle(Key::Char('l'));
                 if self.app.screen != Screen::Prompt(Prompt::Listen) { return Err("not possible now: see the status line"); }
                 self.app.input = arg.to_string(); self.app.handle(Key::Enter);
@@ -293,6 +305,7 @@ impl Bridge {
             // opens the code prompt for the address; the 10-digit code then goes through "secret" and "enter" like every secret
             "lan_join" => {
                 if !self.in_main() { return Err(NOT_NOW); }
+                lan_addr_ok(arg)?;
                 self.ensure_normal(); self.app.handle(Key::Char('c'));
                 if self.app.screen != Screen::Prompt(Prompt::JoinAddr) { return Err("not possible now: see the status line"); }
                 self.app.input = arg.to_string(); self.app.handle(Key::Enter);
@@ -308,7 +321,7 @@ impl Bridge {
                 self.ensure_normal(); self.app.handle(Key::Char('P'));
                 if self.app.screen == Screen::Prompt(Prompt::InPerson) {
                     // "1" yes, "0" no, "x" discard (the other side did not finish: save nothing)
-                    self.app.input = match arg.as_str() { "1" => "y", "x" => "x", _ => "n" }.to_string();
+                    self.app.input = match arg.as_str() { "1" => "y", "x" => "x", "v" => "v", _ => "n" }.to_string();
                     self.app.handle(Key::Enter);
                 }
             }
@@ -363,9 +376,10 @@ impl Bridge {
                 }
             }
             // from EVERY screen: the core closes an open prompt or the safety-number view first, and remembers the request while a derivation runs
-            "lock" => { self.ensure_normal(); self.app.lock(); }
-            "panic" => { let _ = self.app.handle(Key::F12); }
+            "lock" => { self.ensure_normal(); self.exported = None; self.app.lock(); }
+            "panic" => { self.exported = None; let _ = self.app.handle(Key::F12); }
             "purge" => {
+                self.exported = None;
                 if self.app.handle(Key::Purge) == Action::Purge {
                     self.app.panic_wipe();
                     self.app.purge_finish();
@@ -640,7 +654,8 @@ mod tests {
         assert!(call(&mut b, "import_bundle", &text_a).contains("\"paired\":true"));
         assert_eq!(field(&call(&mut a, "snapshot", ""), "safety"), field(&call(&mut b, "snapshot", ""), "safety"), "both sides show the same safety number");
         // junk, your own text, and a second import are refused
-        assert!(call(&mut a, "import_bundle", "hello").contains("rejected\":\"nothing was imported") || call(&mut a, "import_bundle", "hello").contains("already has a peer key"));
+        let s = call(&mut a, "import_bundle", &text_b);
+        assert!(s.contains("nothing was imported") && s.contains("already has a peer key"), "a second import is REFUSED and said so, the keys stay: {s}");
     }
 
     #[test]
@@ -660,9 +675,13 @@ mod tests {
         call(&mut b, "enter", "");
         wait_for(&mut a, "\"pairing_waiting\":true"); wait_for(&mut b, "\"pairing_waiting\":true");
         assert!(call(&mut a, "snapshot", "").contains("\"lan_offer\":null"), "the offer is over once it was used");
-        call(&mut a, "in_person", "1"); call(&mut b, "in_person", "1");
+        let (pa, pb) = (call(&mut a, "snapshot", ""), call(&mut b, "snapshot", ""));
+        assert_eq!(field(&pa, "pairing_sn"), field(&pb, "pairing_sn"), "both phones show the SAME number to compare side by side");
+        // the user compared them and they were identical: that is safety verification
+        call(&mut a, "in_person", "v"); call(&mut b, "in_person", "v");
         let (sa, sb) = (call(&mut a, "snapshot", ""), call(&mut b, "snapshot", ""));
         assert!(sa.contains("\"paired\":true") && sb.contains("\"paired\":true"), "{sa} / {sb}");
+        assert!(sa.contains("\"trust\":\"verified\"") && sb.contains("\"trust\":\"verified\""), "a side-by-side comparison verifies: {sa}");
         assert_eq!(field(&sa, "safety"), field(&sb, "safety"));
     }
 
@@ -673,11 +692,63 @@ mod tests {
         create(&mut b);
         call(&mut b, "new_contact", "Abe"); call(&mut b, "select", "0");
         let s = call(&mut b, "lan_join", "8.8.8.8:4000");
-        assert!(s.contains("\"rejected\":null"), "the prompt opens: {s}");
-        call(&mut b, "secret", "1234567890");
-        let s = call(&mut b, "enter", "");
-        assert!(s.contains("same network") && s.contains("\"pw_chars\":0"), "a public address is refused with a reason and no secret is kept: {s}");
-        assert!(call(&mut b, "lan_offer", "0.0.0.0:0").contains("Refusing to listen"));
+        assert!(s.contains("only an address on your own network") && s.contains("\"pw_chars\":0"), "a public address is refused up front, with a reason and no prompt left open: {s}");
+        assert!(call(&mut b, "lan_join", "[::1]:4000").contains("only an address on your own network"));
+        assert!(call(&mut b, "lan_offer", "0.0.0.0:0").contains("only an address on your own network"));
+        assert!(call(&mut b, "lan_offer", "192.168.1.5:99999").contains("not an address like"));
+        // nothing was opened: a normal command still works and no prompt is waiting
+        assert!(call(&mut b, "snapshot", "").contains("\"prompt\":null"));
+    }
+
+    #[test]
+    fn a_scan_or_a_connect_and_close_on_the_lan_port_neither_uses_up_the_offer_nor_locks_the_user_out() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = bridge(d.path());
+        create(&mut a);
+        call(&mut a, "new_contact", "Bea"); call(&mut a, "select", "0");
+        let s = call(&mut a, "lan_offer", "127.0.0.1:0");
+        let addr = field(&s, "addr");
+        for _ in 0..4 { drop(std::net::TcpStream::connect(&addr).unwrap()); } // four scans: connect and close at once
+        std::thread::sleep(Duration::from_millis(500));
+        let s = call(&mut a, "snapshot", "");
+        assert!(s.contains("\"lan_offer\":{"), "the offer is still open and waiting: {s}");
+        // and no failed-pairing lockout was built up: a new offer is possible at once after cancelling this one
+        call(&mut a, "cmd", "x");
+        let s = call(&mut a, "lan_offer", "127.0.0.1:0");
+        assert!(s.contains("\"lan_offer\":{"), "no lockout: {s}");
+    }
+
+    #[test]
+    fn going_offline_now_and_locking_close_the_lan_port() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = bridge(d.path());
+        create(&mut a);
+        call(&mut a, "new_contact", "Bea"); call(&mut a, "select", "0");
+        for how in ["offline_now", "lock"] {
+            let s = call(&mut a, "lan_offer", "127.0.0.1:0");
+            let addr = field(&s, "addr");
+            assert!(std::net::TcpStream::connect(&addr).is_ok(), "open before {how}");
+            call(&mut a, how, "");
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(std::net::TcpStream::connect(&addr).is_err(), "the port is closed after {how}");
+            if how == "lock" { call(&mut a, "secret", PW); call(&mut a, "enter", ""); wait_for(&mut a, "\"locked\":false"); call(&mut a, "select", "0"); }
+        }
+    }
+
+    #[test]
+    fn the_exported_contact_text_does_not_outlive_its_context() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = bridge(d.path());
+        create(&mut a);
+        call(&mut a, "new_contact", "Bea");
+        assert!(call(&mut a, "export_bundle", "0").contains("\"export\":\""));
+        let s = call(&mut a, "lock", "");
+        assert!(s.contains("\"export\":null"), "{s}");
+        call(&mut a, "secret", PW); call(&mut a, "enter", ""); wait_for(&mut a, "\"locked\":false");
+        assert!(call(&mut a, "snapshot", "").contains("\"export\":null"), "gone after the lock, not back after the unlock");
+        call(&mut a, "export_bundle", "0");
+        let s = call(&mut a, "panic", "");
+        assert!(s.contains("\"export\":null"), "the wiped snapshot carries no contact text: {s}");
     }
 
     #[test]

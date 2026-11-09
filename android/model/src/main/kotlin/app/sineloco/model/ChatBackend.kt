@@ -32,16 +32,21 @@ interface ChatBackend {
     fun networkChanged(up: Boolean) {}
 
     /**
-     * Pairing by contact TEXT (the contact file, shared or pasted instead of saved as a file). [exportMine]: show my text, for a NEW contact called [newName], or (null) for the contact
-     * that is selected now; the result arrives as [AppState.exportText]. [importTheirs]: add the other person's text, to a new contact or (null) the selected one.
+     * Pairing. Every action names its contact ([PairTarget]): a NEW one is created by the same operation (a refused name stops everything), an existing one is selected by id. Nothing
+     * here ever acts on "the contact that happens to be selected". Results arrive as state: [AppState.torOffer], [AppState.exportText], [AppState.lanOffer], [AppState.pairingWaiting].
      */
-    fun exportMine(newName: String?) {}
+    fun offerTor(t: PairTarget) {}
+    fun joinTor(t: PairTarget, link: String, code: CharArray) {}
+    /** Pairing by contact TEXT (the contact file as text instead of a file): show mine / add theirs. */
+    fun exportMine(t: PairTarget) {}
     fun clearExport() {}
-    fun importTheirs(newName: String?, theirs: String) {}
-
-    /** Pairing on the LOCAL network (a direct connection, private addresses only): offer (result in [AppState.lanOffer]) or join with the other device's address and code. */
-    fun lanOffer(newName: String?, addr: String) {}
-    fun lanJoin(newName: String?, addr: String, code: CharArray) {}
+    fun importTheirs(t: PairTarget, theirs: String) {}
+    /** Pairing on the LOCAL network (a direct connection, private addresses only): offer or join with the other device's address and code. */
+    fun lanOffer(t: PairTarget, addr: String) {}
+    fun lanJoin(t: PairTarget, addr: String, code: CharArray) {}
+    /** The answer to a finished pairing: both phones show the SAME safety number (verified), the user cannot compare now (unverified), or the numbers differ / the other side failed (nothing is saved). */
+    fun confirmPairingNumber() {}
+    fun skipPairingCheck() {}
 
     /** Forget the keys of a contact (and give it fresh keys of our own) so that it can be paired AGAIN; name and conversation stay. For a pairing that only finished on one side. The caller has asked the user to confirm. */
     fun repairContact(contactId: Int) {}

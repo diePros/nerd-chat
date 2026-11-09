@@ -55,6 +55,12 @@ sealed interface TorState {
 enum class Stage { Unlock, CreatePassword, ConfirmPassword, Working, Ready, Wiped, Error }
 
 /** The link and code of an open pairing offer over Tor: the link goes to the partner by any channel, the code by a DIFFERENT one. */
+/** Which contact a pairing action is for: a NEW one (created with the action, in ONE step that stops if the name is taken) or an existing one, addressed by its id. Never "whatever is selected". */
+sealed interface PairTarget {
+    data class New(val name: String) : PairTarget
+    data class Existing(val id: Int) : PairTarget
+}
+
 /** An open pairing offer on the LOCAL network: where the other device connects (a private address) and the code. */
 data class LanOffer(val addr: String, val code: String, val expiresInSeconds: Int)
 
@@ -82,6 +88,8 @@ data class AppState(
     val userOffline: Boolean = false,
     /** our own contact text, after "show my contact text": to copy, share or save until the user is done (not secret, but not public either) */
     val exportText: String? = null,
+    /** the safety number of a finished pairing that waits for the user's answer: to compare SIDE BY SIDE with the other device */
+    val pairingSn: String? = null,
     val lanOffer: LanOffer? = null,
     /** tor is being shut down (an orderly teardown takes a few seconds): the process must stay alive and awake until it is over */
     val stopping: Boolean = false,

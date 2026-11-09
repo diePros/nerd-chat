@@ -3,6 +3,8 @@ package app.sineloco.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,7 +43,7 @@ fun SineApp(
     var palette by remember { mutableStateOf(initialPalette) }
     var mode by remember { mutableStateOf(initialMode) }
     var dest by remember { mutableStateOf<Dest>(Dest.Main(startAt ?: 0)) }
-    var pairAgain by remember { mutableStateOf<String?>(null) } // in memory only: the contact whose keys were just forgotten, to pair with again
+    var pairAgain by remember { mutableStateOf<Pair<Int, String>?>(null) } // in memory only: the contact whose keys were just forgotten, to pair with again
     LaunchedEffect(dest) { if (dest != Dest.Main(1)) pairAgain = null }
     val st by backend.state.collectAsState()
     // a pairing link arrived (QR code, another app): show the pairing screen as soon as the app is usable (a locked app keeps it in memory until the password is typed)
@@ -75,7 +77,7 @@ fun SineApp(
                             Box(Modifier.weight(1f)) {
                                 when (d.tab) {
                                     0 -> ChatListScreen(st.chats, st.tor, st.online, onOpen = { backend.open(it); dest = Dest.Chat(it) }, onPair = { dest = Dest.Main(1) }, onLock = panic)
-                                    1 -> PairScreen(st, backend, platform, existingName = pairAgain, prefill = incomingLink, onPrefillUsed = onIncomingLinkUsed)
+                                    1 -> PairScreen(st, backend, platform, existingId = pairAgain?.first, existingName = pairAgain?.second, prefill = incomingLink, onPrefillUsed = onIncomingLinkUsed)
                                     else -> SettingsScreen(palette, mode, st.online, st.tor, st.persist,
                                         onPalette = { palette = it; onThemeChanged(it, mode) }, onMode = { mode = it; onThemeChanged(palette, it) },
                                         onOnline = backend::setOnline, onPersist = backend::setPersist, onLock = panic, onPurge = { backend.purge() })
@@ -91,12 +93,12 @@ fun SineApp(
                             ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) }, persist = st.persist)
                         } ?: run { dest = Dest.Main(0) }
                         is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify, onDelete = { backend.deleteContact(c.id); dest = Dest.Main(0) }, onPairAgain = { backend.repairContact(c.id); pairAgain = c.name; dest = Dest.Main(1) })
+                            DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify, onDelete = { backend.deleteContact(c.id); dest = Dest.Main(0) }, onPairAgain = { backend.repairContact(c.id); pairAgain = c.id to c.name; dest = Dest.Main(1) })
                         } ?: run { dest = Dest.Main(0) }
                     }
                 }
             }
-            if (st.pairingWaiting) InPersonDialog(onAnswer = backend::answerInPerson, onDiscard = backend::discardPairing)
+            if (st.pairingWaiting) PairingCheckDialog(st.pairingSn, onIdentical = backend::confirmPairingNumber, onLater = backend::skipPairingCheck, onDifferent = backend::discardPairing)
         }
     }
 }
@@ -121,16 +123,20 @@ private fun AlertBanner(text: String, more: Int, onAck: () -> Unit) {
     }
 }
 
-/** The question the core asks after a pairing: the answer decides the trust level (a "yes" for a code that travelled over a weak channel would be a lie). */
+/**
+ * After a pairing, ALWAYS the same check, whatever way it came (a QR code or a link can come from anybody, a contact text from any channel): the two phones must show the SAME safety
+ * number, side by side. Only then is the contact marked verified. "Different" saves nothing: either somebody is in between or the other side did not finish (the last message of a pairing
+ * can get lost, then only one side has finished).
+ */
 @Composable
-private fun InPersonDialog(onAnswer: (Boolean) -> Unit, onDiscard: () -> Unit) {
+private fun PairingCheckDialog(number: String?, onIdentical: () -> Unit, onLater: () -> Unit, onDifferent: () -> Unit) {
     AlertDialog(
-        onDismissRequest = { onAnswer(false) },
-        title = { Text("Pairing finished") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Did you exchange the code in person or by a voice call you trust? If it travelled in a message, answer No: you can verify the safety number later.")
-            Text("First look at the OTHER device: it must also say that pairing finished. If it shows an error, choose Discard here and pair again (the last message of a pairing can get lost, then only one side has finished).", color = SineTheme.colors.muted, fontSize = 13.sp)
+        onDismissRequest = onLater,
+        title = { Text("Pairing finished: compare the number") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(number?.replace(" ", "  ") ?: "", fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+            Text("Hold the two phones side by side (or read it out by voice). It must be exactly the same on both. If the other phone shows an error, or a different number, choose \"Different\": nothing is saved and you can pair again.", color = SineTheme.colors.muted, fontSize = 14.sp)
         } },
-        confirmButton = { Row { TextButton(onClick = onDiscard) { Text("Discard") }; TextButton(onClick = { onAnswer(false) }) { Text("No") }; TextButton(onClick = { onAnswer(true) }) { Text("Yes, in person") } } },
+        confirmButton = { Row { TextButton(onClick = onDifferent) { Text("Different") }; TextButton(onClick = onLater) { Text("Compare later") }; TextButton(onClick = onIdentical) { Text("Identical") } } },
     )
 }

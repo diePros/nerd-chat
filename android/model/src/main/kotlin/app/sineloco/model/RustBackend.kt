@@ -75,13 +75,19 @@ class RustBackend(
     override fun lock() { op("lock") }
     override fun goOfflineNow() { op("offline_now") }
     override fun refresh() { op("snapshot") }
-    override fun exportMine(newName: String?) { if (newName != null) op("new_contact", text(newName), "export_bundle" to text("")) else op("export_bundle", text("")) }
-    override fun clearExport() { op("export_clear") }
-    override fun importTheirs(newName: String?, theirs: String) { if (newName != null) op("new_contact", text(newName), "import_bundle" to text(theirs)) else op("import_bundle", text(theirs)) }
-    override fun lanOffer(newName: String?, addr: String) { if (newName != null) op("new_contact", text(newName), "lan_offer" to text(addr)) else op("lan_offer", text(addr)) }
-    override fun lanJoin(newName: String?, addr: String, code: CharArray) {
-        if (newName != null) op("new_contact", text(newName), "lan_join" to text(addr), "secret" to code, "enter" to null) else op("lan_join", text(addr), "secret" to code, "enter" to null)
+    private fun onTarget(t: PairTarget, vararg then: Pair<String, CharArray?>) = when (t) {
+        is PairTarget.New -> op("new_contact", text(t.name), *then)
+        is PairTarget.Existing -> op("select", text(t.id.toString()), *then)
     }
+    override fun offerTor(t: PairTarget) = onTarget(t, "cmd" to text("T"))
+    override fun joinTor(t: PairTarget, link: String, code: CharArray) = onTarget(t, "cmd" to text("J"), "submit" to text(link.trim()), "secret" to code, "enter" to null)
+    override fun exportMine(t: PairTarget) = onTarget(t, "export_bundle" to text(""))
+    override fun clearExport() { op("export_clear") }
+    override fun importTheirs(t: PairTarget, theirs: String) = onTarget(t, "import_bundle" to text(theirs))
+    override fun lanOffer(t: PairTarget, addr: String) = onTarget(t, "lan_offer" to text(addr))
+    override fun lanJoin(t: PairTarget, addr: String, code: CharArray) = onTarget(t, "lan_join" to text(addr), "secret" to code, "enter" to null)
+    override fun confirmPairingNumber() { op("in_person", text("v")) }
+    override fun skipPairingCheck() { op("in_person", text("0")) }
     override fun repairContact(contactId: Int) { op("repair_contact", text(contactId.toString())) }
     override fun discardPairing() { op("in_person", text("x")) }
     override fun deleteContact(contactId: Int) { op("delete_contact", text(contactId.toString())) }

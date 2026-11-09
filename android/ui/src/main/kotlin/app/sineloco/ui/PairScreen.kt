@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import app.sineloco.model.AppState
 import app.sineloco.model.ChatBackend
 import app.sineloco.model.PairLink
+import app.sineloco.model.PairTarget
 
 /**
  * Four ways to pair, every one ending in the same two checks (the in-person question and the safety number):
@@ -32,11 +33,22 @@ import app.sineloco.model.PairLink
 @Composable
 fun PairScreen(
     state: AppState, backend: ChatBackend, platform: PlatformActions = NoPlatform,
-    initialTab: Int = 0, existingName: String? = null, prefill: PairLink? = null, onPrefillUsed: () -> Unit = {},
+    initialTab: Int = 0, existingId: Int? = null, existingName: String? = null, prefill: PairLink? = null, onPrefillUsed: () -> Unit = {},
 ) {
     var tab by remember { mutableIntStateOf(initialTab) }
     var name by remember(existingName) { mutableStateOf(existingName ?: "") } // pairing AGAIN: the contact exists, its name is fixed
-    var created by remember(existingName) { mutableStateOf(existingName != null) } // the contact exists in the core (and is selected there)
+    // The contact this screen works on: given (pairing again), or CREATED by the first action. The id is taken from the core's own list once the contact shows up there, never assumed:
+    // a refused name (taken) leaves createdId empty, and the next tap tries to create again instead of acting on some other contact.
+    var createdId by remember(existingId) { mutableStateOf(existingId) }
+    var pending by remember { mutableStateOf<Pair<String, Int>?>(null) } // (name, how many contacts there were)
+    LaunchedEffect(state.chats.size, state.rejected) {
+        val p = pending ?: return@LaunchedEffect
+        val last = state.chats.lastOrNull()
+        if (state.chats.size == p.second + 1 && last != null && last.contact.name == p.first) { createdId = last.contact.id; pending = null }
+        else if (state.rejected != null) pending = null
+    }
+    val hasContact = createdId != null
+    val target: () -> PairTarget = { createdId?.let { PairTarget.Existing(it) } ?: PairTarget.New(name).also { pending = name to state.chats.size } }
     var link by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
     var started by remember { mutableStateOf(false) }
@@ -45,7 +57,6 @@ fun PairScreen(
     var ip by remember { mutableStateOf("") }
     var joinAddr by remember { mutableStateOf("") }
     var joinCode by remember { mutableStateOf("") }
-    val newName = { if (created) null else name }
     val offer = state.torOffer
     LaunchedEffect(prefill) {
         when (prefill) {
@@ -67,8 +78,8 @@ fun PairScreen(
                 }
             }
             val nameField: @Composable () -> Unit = {
-                if (existingName == null) SecureField(name, { name = it }, "Contact name (only you see it)", modifier = Modifier.fillMaxWidth())
-                else Text("Pairing again with $existingName", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                if (!hasContact) SecureField(name, { name = it }, "Contact name (only you see it)", modifier = Modifier.fillMaxWidth())
+                else Text(if (existingName != null) "Pairing again with $existingName" else "Pairing with $name", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
             }
             val statusLine: @Composable () -> Unit = {
                 if (state.status.isNotEmpty()) Text(state.status, color = if (state.statusIsError) SineTheme.colors.danger else SineTheme.colors.muted, fontSize = 14.sp)
@@ -79,7 +90,7 @@ fun PairScreen(
                     if (offer == null) {
                         if (!started) {
                             nameField()
-                            Button(onClick = { started = true; if (!created) { backend.addContact(name); created = true }; backend.startOffer() }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Create link and code") }
+                            Button(onClick = { started = true; backend.offerTor(target()) }, enabled = name.isNotBlank() || hasContact, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Create link and code") }
                         } else {
                             Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp); Spacer(Modifier.width(12.dp)); Text("Waiting for Tor to publish the pairing service…", color = SineTheme.colors.muted) }
                             statusLine()
@@ -104,16 +115,17 @@ fun PairScreen(
                     SecureField(link, { link = it }, "Link (sineloco:pair/…)", singleLine = false, maxLines = 3, modifier = Modifier.fillMaxWidth())
                     SecureField(code, { code = it }, "Code (10 digits)", numeric = true, secret = true, modifier = Modifier.fillMaxWidth())
                     if (state.status.isNotEmpty() && state.statusIsError) Text(state.status, color = SineTheme.colors.danger)
-                    Button(onClick = { val c = code.toCharArray(); code = ""; if (!created) { backend.addContact(name); created = true }; backend.joinWithLink(link, c) },
-                        enabled = name.isNotBlank() && link.isNotBlank() && code.isNotBlank(), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Pair") }
+                    Button(onClick = { val c = code.toCharArray(); code = ""; backend.joinTor(target(), link, c) },
+                        enabled = (name.isNotBlank() || hasContact) && link.isNotBlank() && code.isNotBlank(), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Pair") }
                 }
                 2 -> {
                     Text("No network needed. You each show your contact text and send it to the other by a channel you trust (it is not secret, but it shows when you are online), then you each add the text you got. Afterwards compare the safety number by voice.", color = SineTheme.colors.muted)
                     nameField()
-                    Button(onClick = { backend.exportMine(newName()); created = true }, enabled = name.isNotBlank() || created, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Show my contact text") }
+                    Button(onClick = { backend.exportMine(target()) }, enabled = name.isNotBlank() || hasContact, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Show my contact text") }
                     state.exportText?.let { mine ->
                         Card("My contact text") {
                             Text(mine, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 8)
+                            Text("Copies in the clipboard history, a share target or a saved file are outside this app: Wipe now cannot remove them.", color = SineTheme.colors.muted, fontSize = 12.sp)
                             Row(Modifier.horizontalScroll(rememberScrollState())) {
                                 TextButton(onClick = { platform.copy(mine) }) { Text("Copy") }
                                 TextButton(onClick = { platform.share(mine) }) { Text("Share…") }
@@ -125,7 +137,7 @@ fun PairScreen(
                     SecureField(theirs, { theirs = it }, "Their contact text (paste it here)", singleLine = false, maxLines = 6, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { platform.pickText { theirs = it } }) { Text("Open file…") }
-                        Button(onClick = { backend.importTheirs(newName(), theirs); created = true; theirs = "" }, enabled = theirs.isNotBlank() && (name.isNotBlank() || created)) { Text("Add their contact text") }
+                        Button(onClick = { backend.importTheirs(target(), theirs); theirs = "" }, enabled = theirs.isNotBlank() && (name.isNotBlank() || hasContact)) { Text("Add their contact text") }
                     }
                     statusLine()
                 }
@@ -142,7 +154,7 @@ fun PairScreen(
                             addrs.forEach { a -> FilterChip(selected = ip == a, onClick = { ip = a }, label = { Text(a) }) }
                         }
                         SecureField(ip, { ip = it }, "This device's address (192.168.x.x)", modifier = Modifier.fillMaxWidth())
-                        Button(onClick = { backend.lanOffer(newName(), "${ip.trim()}:0"); created = true }, enabled = ip.isNotBlank() && (name.isNotBlank() || created), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Open for pairing") }
+                        Button(onClick = { backend.lanOffer(target(), "${ip.trim()}:0") }, enabled = ip.isNotBlank() && (name.isNotBlank() || hasContact), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Open for pairing") }
                     } else {
                         Card("Address and code") {
                             Text(lan.addr, fontFamily = FontFamily.Monospace, fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurface)
@@ -155,8 +167,10 @@ fun PairScreen(
                     Text("B. Enter the other device's address and code", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
                     SecureField(joinAddr, { joinAddr = it }, "Their address (192.168.x.x:port)", modifier = Modifier.fillMaxWidth())
                     SecureField(joinCode, { joinCode = it }, "Code (10 digits)", numeric = true, secret = true, modifier = Modifier.fillMaxWidth())
-                    Button(onClick = { val c = joinCode.toCharArray(); joinCode = ""; backend.lanJoin(newName(), joinAddr.trim(), c); created = true },
-                        enabled = joinAddr.isNotBlank() && joinCode.isNotBlank() && (name.isNotBlank() || created), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Pair") }
+                    val onThisNetwork = joinAddr.isBlank() || platform.onLink(joinAddr.trim())
+                    if (!onThisNetwork) Text("That address is not on a Wi-Fi network this phone is connected to.", color = SineTheme.colors.danger, fontSize = 13.sp)
+                    Button(onClick = { val c = joinCode.toCharArray(); joinCode = ""; backend.lanJoin(target(), joinAddr.trim(), c) },
+                        enabled = joinAddr.isNotBlank() && onThisNetwork && joinCode.isNotBlank() && (name.isNotBlank() || hasContact), modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Pair") }
                     statusLine()
                 }
             }

@@ -40,12 +40,18 @@ class MainActivity : ComponentActivity() {
     }
     private val openPicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
         val cb = pickCallback; pickCallback = null
-        if (uri != null && cb != null) readSmallText(uri)?.let(cb)
+        // read OFF the main thread (a slow provider must not freeze the app) and hand the text back on it
+        if (uri != null && cb != null) Thread { val t = readSmallText(uri); runOnUiThread { if (t != null) cb(t) } }.start()
     }
 
+    /** At most 8 KiB, read by hand: `InputStream.readNBytes(int)` only exists from Android 13 and this app runs on 10. Any failure (also an Error) means "no text", never a crash. */
     private fun readSmallText(uri: android.net.Uri): String? = try {
-        contentResolver.openInputStream(uri)?.use { s -> val b = s.readNBytes(8 * 1024 + 1); if (b.size > 8 * 1024) null else String(b, Charsets.UTF_8) }
-    } catch (_: Exception) { null }
+        contentResolver.openInputStream(uri)?.use { s ->
+            val out = java.io.ByteArrayOutputStream(); val buf = ByteArray(1024); var total = 0
+            while (true) { val n = s.read(buf); if (n < 0) break; total += n; if (total > 8 * 1024) return@use null; out.write(buf, 0, n) }
+            String(out.toByteArray(), Charsets.UTF_8)
+        }
+    } catch (_: Throwable) { null }
 
     private fun handleIntent(i: android.content.Intent?) {
         val d = i?.data ?: return
@@ -61,13 +67,30 @@ class MainActivity : ComponentActivity() {
             val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, text)
             try { startActivity(android.content.Intent.createChooser(send, null)) } catch (_: Exception) { }
         }
-        override fun saveText(suggestedName: String, text: String) { pendingSave = text; try { savePicker.launch(suggestedName) } catch (_: Exception) { pendingSave = null } }
+        // a NEUTRAL random file name: a suggested "sineloco-contact.txt" would advertise the app in Downloads and in any cloud drive the file lands in
+        override fun saveText(suggestedName: String, text: String) {
+            val rnd = java.security.SecureRandom(); val name = "note-" + (1..6).joinToString("") { "0123456789abcdef"[rnd.nextInt(16)].toString() } + ".txt"
+            pendingSave = text; try { savePicker.launch(name) } catch (_: Exception) { pendingSave = null }
+        }
         override fun pickText(onText: (String) -> Unit) { pickCallback = onText; try { openPicker.launch(arrayOf("text/*", "application/octet-stream")) } catch (_: Exception) { pickCallback = null } }
-        override fun lanAddresses(): List<String> = try {
+        /** Wi-Fi or Ethernet networks that are NOT a VPN: a "private" address on a VPN or on mobile data belongs to somebody else's network (the provider's, the carrier's). */
+        private fun localLinks(): List<android.net.LinkAddress> {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-            cm.allNetworks.flatMap { cm.getLinkProperties(it)?.linkAddresses.orEmpty() }.map { it.address }
-                .filterIsInstance<java.net.Inet4Address>().filter { it.isSiteLocalAddress }.mapNotNull { it.hostAddress }.distinct()
-        } catch (_: Exception) { emptyList() }
+            return cm.allNetworks.filter { n ->
+                val c = cm.getNetworkCapabilities(n)
+                c != null && !c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) &&
+                    (c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET))
+            }.flatMap { cm.getLinkProperties(it)?.linkAddresses.orEmpty() }.filter { (it.address as? java.net.Inet4Address)?.isSiteLocalAddress == true }
+        }
+        override fun lanAddresses(): List<String> = try { localLinks().mapNotNull { it.address.hostAddress }.distinct() } catch (_: Exception) { emptyList() }
+        /** is `ip:port` inside the subnet of one of those links? (else the packets would leave through some other interface, a VPN for instance) */
+        override fun onLink(addr: String): Boolean = try {
+            val ip = java.net.InetAddress.getByName(addr.substringBeforeLast(':')).address
+            localLinks().any { l ->
+                val net = l.address.address; val bits = l.prefixLength
+                ip.size == net.size && (0 until bits).all { i -> (ip[i / 8].toInt() shr (7 - i % 8) and 1) == (net[i / 8].toInt() shr (7 - i % 8) and 1) }
+            }
+        } catch (_: Exception) { false }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

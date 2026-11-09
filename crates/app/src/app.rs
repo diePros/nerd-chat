@@ -1073,6 +1073,7 @@ impl App {
         self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
         // the open chat is closed: messages that arrive meanwhile must COUNT as unread (the front end shows the list again after unlocking), and a half-typed draft must not wait behind the lock
         self.pane = Pane::Details; self.compose.clear(); self.scroll = 0;
+        self.close_lan_offer(); // a locked phone does not keep a port open on the network (a pairing over Tor may continue: it needs the lock's password to be finished)
         self.pw.clear(); self.input.clear(); self.code_buf.clear();
         self.lock_msg = self.locked_text(); self.lock_err = false;
     }
@@ -1098,6 +1099,8 @@ impl App {
     }
     /// The selected contact has no peer key (yet): the phone checks this after an import to know whether it worked.
     pub fn cur_peer_missing(&self) -> bool { self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).is_none_or(|c| c.peer.is_none()) }
+    /// The safety number of the finished pairing that waits for the user's answer: the phone shows it for a side-by-side comparison.
+    pub fn pairing_safety_number(&self) -> Option<&str> { self.pending_pair.as_ref().map(|(_, _, sn)| sn.as_str()) }
     pub fn lock_auth(&self) -> bool { self.locked && self.lock_auth }
     /// The only status text the locked screen may show.
     pub fn lock_msg(&self) -> &str { &self.lock_msg }
@@ -1733,7 +1736,7 @@ impl App {
                     .and_then(|b| String::from_utf8(b).map_err(|_| StoreError::Corrupt));
                 match r {
                     Err(e) => self.err(format!("Cannot read {text}: {e}")),
-                    Ok(s) => self.import_armored(&s),
+                    Ok(s) => { self.import_armored(&s); }
                 }
             }
             Prompt::ConfirmDelete => {
@@ -1768,7 +1771,14 @@ impl App {
                 // other device and throws this half away; nothing is saved, the contact stays unpaired and can be paired again at once.
                 if text.trim().eq_ignore_ascii_case("x") { drop(contact); self.ok("Discarded: nothing was saved. Pair again."); return; }
                 let mut contact = contact;
-                if !text.trim().eq_ignore_ascii_case("y") { contact.downgrade_to_unverified(); }
+                // "v": the user compared the safety number SIDE BY SIDE with the other device and it was identical: that is safety verification, stronger than "we met" (a QR code, a link
+                // or a contact text can come from anywhere; the number can only match if nobody is in between)
+                if text.trim().eq_ignore_ascii_case("v") {
+                    if let Some(mine) = self.vf.as_ref().and_then(|v| v.store.contacts.iter().find(|c| c.id == id)).map(|c| Bundle::from_identity(&c.identity)) {
+                        let view = contact.safety_view(&mine);
+                        contact.confirm(&mine, view);
+                    }
+                } else if !text.trim().eq_ignore_ascii_case("y") { contact.downgrade_to_unverified(); }
                 self.finish_pair(id, contact, sn);
             }
         }
@@ -1803,6 +1813,7 @@ impl App {
         let sel = self.sel;
         let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)) else { self.err(self.say(NO_CONTACT, NO_CONTACT_GUI)); return None };
         if c.next_transport.is_some() { self.err("A key rotation for this contact is still waiting for its answer: export after it finished."); return None; }
+        if self.pair_ctl.is_some() || self.pair_rx.is_some() || self.pending_pair.is_some() { self.err("A pairing is running or waiting for your answer: finish or cancel it first."); return None; }
         // the capability told to this contact: what was told before, else (no tor control to probe here) what this device can do
         let can_host = if c.adv_can_host.is_some() || !self.cfg.can_host { self.advertised(sel) } else { true };
         let armored = { let id = &self.vf.as_ref().expect("checked").store.contacts[sel].identity; file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id)) };
@@ -1812,24 +1823,24 @@ impl App {
     }
 
     /// Import the other person's contact text into the selected (unpaired) contact. Same checks as importing a file.
-    pub fn import_text(&mut self, text: &str) {
-        if text.len() as u64 > MAX_IMPORT_BYTES { return self.err("That text is too long to be a contact file."); }
-        if !self.require_no_peer() { return; }
-        self.import_armored(text);
+    pub fn import_text(&mut self, text: &str) -> bool {
+        if text.len() as u64 > MAX_IMPORT_BYTES { self.err("That text is too long to be a contact file."); return false; }
+        if !self.require_no_peer() { return false; }
+        self.import_armored(text)
     }
 
-    fn import_armored(&mut self, s: &str) {
+    fn import_armored(&mut self, s: &str) -> bool {
         match file::dearmor(s) {
-            Err(_) => self.err("Not a valid Sine Loco contact file."),
+            Err(_) => { self.err("Not a valid Sine Loco contact file."); false }
             Ok(b) => {
                 let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
-                if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return; }
-                if self.onion_collision(self.sel, &b) { self.err("Refused: this bundle reuses an onion address that another contact (or you) already has."); return; }
+                if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return false; }
+                if self.onion_collision(self.sel, &b) { self.err("Refused: this bundle reuses an onion address that another contact (or you) already has."); return false; }
                 let (peer, trust) = ImportedContact::from_file(b).into_parts();
                 let c = self.cur().expect("selected");
                 c.peer = Some(peer);
                 c.trust = trust;
-                if self.save() { let i = self.sel; self.engine_add(i); let m = self.say("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel.", "Imported - UNVERIFIED. Compare the safety number with them over another channel."); self.ok(m); }
+                if self.save() { let i = self.sel; self.engine_add(i); let m = self.say("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel.", "Imported - UNVERIFIED. Compare the safety number with them over another channel."); self.ok(m); true } else { false }
             }
         }
     }
@@ -1976,9 +1987,15 @@ impl App {
                     // ONE connection only: the listener is dropped right after, success or failure.
                     Ok((mut s, _)) => {
                         s.set_nonblocking(false).ok();
+                        // Anyone on the network can connect to this port. A connection that sends NOTHING within 3 s (a scan, connect-and-close, a stall) must neither use up the
+                        // one-shot offer nor count as a failed pairing: it is dropped and the offer keeps waiting for the real joiner, who writes first.
+                        s.set_read_timeout(Some(Duration::from_secs(3))).ok();
+                        let mut first = [0u8; 1];
+                        if !matches!(s.peek(&mut first), Ok(n) if n >= 1) { continue; }
                         *slot.lock().unwrap() = s.try_clone().ok();
                         if cancel.load(Ordering::SeqCst) { break Err(ExchangeError::Io); }
-                        break offer.accept(&mut s, ident);
+                        // `accept_remote` counts a failure toward the lockout only when a well-formed SPAKE2 message arrived (a real guess at the code), like pairing over Tor
+                        break offer.accept_remote(&mut s, ident).map_err(|(e, _)| e);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline { break Err(ExchangeError::Expired); }
@@ -2045,6 +2062,7 @@ impl App {
     /// Go offline; `true` when that is done or on its way. While tor is still STARTING the start is cancelled (tor is killed, whatever the start thread finds is dropped). With
     /// `force` the question about texts the contact has not confirmed yet is skipped: the user wants out now (the notification button, the lock screen).
     pub fn go_offline(&mut self, force: bool) -> bool {
+        self.close_lan_offer(); // an open listener on the local network is reachability too
         match self.online.clone() {
             Online::Starting(_) => {
                 // killing tor ends the start thread's bootstrap with an error that goes nowhere (its channel is dropped); a tor it spawns a moment later is killed by the generation check
@@ -2087,6 +2105,11 @@ impl App {
     fn drop_start(&mut self) {
         let Some(rx) = self.start_rx.take() else { return };
         while let Ok(m) = rx.try_recv() { if let StartMsg::Ready(e) = m { thread::spawn(move || drop(e)); } }
+    }
+
+    /// Close the local-network offer, if one is open: the port stops listening within a moment. (Pairing over Tor is not touched.)
+    pub fn close_lan_offer(&mut self) {
+        if self.lan_offer.is_some() { self.cancel_pairing(); }
     }
 
     /// What is true once the engine is gone for any reason: what is not in the history may or may not have arrived (what IS kept is sent again next time).
