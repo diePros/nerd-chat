@@ -12,6 +12,8 @@ use zeroize::Zeroizing;
 
 /// The core's compose buffer holds this many bytes and silently drops the rest: a longer text is refused here instead of truncated.
 pub const COMPOSE_MAX_BYTES: usize = 2048;
+/// The most a photo may weigh when it comes from the phone (it re-encodes to a few hundred KiB; the core accepts up to 8 MiB).
+pub const PHOTO_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Commands a screen may send (the core's normal-mode letters). NOT included: `q` quit, `o` (use "online"), `e`/`I`/`l`/`c`/`f`/`t`/`s`
 /// (files and the local link do not exist on the phone), `P` (use "in_person").
 const COMMANDS: &[char] = &['n', 'T', 'J', 'x', 'v', 'd', 'K', 'h', 'z'];
@@ -188,6 +190,23 @@ impl Bridge {
         snapshot(&self.app, &Extra { rejected, purge: self.purge, user_offline: self.user_offline, network_up: self.network_up, export: self.exported.as_ref().map(|s| s.as_str()) })
     }
 
+    /// Offer a photo (bytes the phone already re-encoded) to the open chat's contact. Binary data cannot travel through `call`'s text argument.
+    pub fn send_file(&mut self, data: Zeroizing<Vec<u8>>) -> Zeroizing<String> {
+        self.app.lock_deadline_check();
+        let rejected = if !self.in_main() || self.app.pane != Pane::Chat { Some("open a chat first") }
+            else if self.app.lock_auth() { Some("the app is locked") }
+            else if data.is_empty() || data.len() > PHOTO_MAX_BYTES { Some("the photo is too large or empty") }
+            else { self.app.send_file_bytes(data); None };
+        self.tick();
+        self.snapshot(rejected)
+    }
+
+    /// The re-cleaned file received in the open chat (RAM only), once the user accepted it. None everywhere else, and while locked.
+    pub fn file_bytes(&self) -> Option<Zeroizing<Vec<u8>>> {
+        if !self.in_main() || self.app.pane != Pane::Chat || self.app.lock_auth() { return None; }
+        self.app.received_file().map(|(d, _)| Zeroizing::new(d.to_vec()))
+    }
+
     /// One operation; always answers with the new snapshot. `arg` is zeroizing text for the ops that take any.
     pub fn call(&mut self, op: &str, arg: &Zeroizing<String>) -> Zeroizing<String> {
         // first of all: a locked app whose time is up erases itself before it answers anything (also when this call is a lock request or a snapshot)
@@ -244,6 +263,10 @@ impl Bridge {
                 if !COMMANDS.contains(&ch) { return Err("command not available on the phone"); }
                 if !self.in_main() { return Err(NOT_NOW); }
                 self.ensure_normal(); self.app.handle(Key::Char(ch));
+            }
+            "file_accept" | "file_decline" => {
+                if !self.in_main() || self.app.pane != Pane::Chat { return Err("open a chat first"); }
+                self.app.answer_file(op == "file_accept");
             }
             "new_contact" => {
                 // ONE operation for "create a contact": a failed creation (duplicate or invalid name) must not let the next step run against the WRONG selected contact
@@ -632,6 +655,35 @@ mod tests {
             assert!(std::time::Instant::now() < end, "timed out waiting for {what}: {s}");
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    fn photo_calls_are_guarded_and_the_chat_snapshot_carries_the_file_state() {
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (mut a, mut b) = (bridge(d1.path()), bridge(d2.path()));
+        create(&mut a); create(&mut b);
+        call(&mut a, "new_contact", "Bea"); call(&mut b, "new_contact", "Abe");
+        let text_b = field(&call(&mut b, "export_bundle", "0"), "export");
+        call(&mut a, "select", "0");
+        assert!(call(&mut a, "import_bundle", &text_b).contains("\"paired\":true"));
+        let jpg = Zeroizing::new(vec![0xFF, 0xD8, 1, 2, 3]);
+        // no chat open: refused, nothing readable
+        assert!(a.send_file(jpg.clone()).contains("open a chat first"));
+        assert!(a.file_bytes().is_none());
+        call(&mut a, "select", "0");
+        let s = call(&mut a, "open_chat", "");
+        assert!(s.contains("\"file\":{\"state\":\"none\"}"), "{s}");
+        // empty and oversized input are refused before the core sees them
+        assert!(a.send_file(Zeroizing::new(vec![])).contains("too large or empty"));
+        assert!(a.send_file(Zeroizing::new(vec![0; PHOTO_MAX_BYTES + 1])).contains("too large or empty"));
+        // the contact is not connected: the core refuses, no state appears
+        let s = a.send_file(jpg).to_string();
+        assert!(s.contains("\"state\":\"none\"") && s.contains("CONNECTED"), "{s}");
+        assert!(call(&mut a, "file_accept", "").contains("No file offer"));
+        // locked: refused and unreadable
+        call(&mut a, "lock", "");
+        assert!(a.send_file(Zeroizing::new(vec![1])).contains("open a chat first") || a.file_bytes().is_none());
+        assert!(a.file_bytes().is_none());
     }
 
     #[test]

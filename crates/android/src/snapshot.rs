@@ -1,7 +1,7 @@
 //! The visible state of the core as one JSON document (`"v": 1`). Only what a screen needs: passwords and the pairing code never appear
 //! (only how many characters were typed), chat lines only for the OPEN chat, like the Linux GUI.
 use crate::json::W;
-use sine_loco_app::app::{App, Mode, Online, Pane, Persist, Prompt, Screen};
+use sine_loco_app::app::{App, FileView, Mode, Online, Pane, Persist, Prompt, Screen};
 use sine_loco_core::trust::Trust;
 use std::time::Instant;
 use zeroize::Zeroizing;
@@ -112,6 +112,17 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
                 w.end_obj();
             }
             w.end_arr();
+            w.f_obj("file");
+            match app.file_view() {
+                FileView::None => w.f_str("state", "none"),
+                FileView::Preparing => w.f_str("state", "preparing"),
+                FileView::Sending => w.f_str("state", "sending"),
+                FileView::Sent => w.f_str("state", "sent"),
+                FileView::Arriving => w.f_str("state", "arriving"),
+                FileView::Offered { kib } => { w.f_str("state", "offered"); w.f_num("kib", kib as i64); }
+                FileView::Received { kib, ext } => { w.f_str("state", "received"); w.f_num("kib", kib as i64); w.f_str("ext", ext); }
+            }
+            w.end_obj();
             w.end_obj();
         }
         None => w.f_null("chat"),

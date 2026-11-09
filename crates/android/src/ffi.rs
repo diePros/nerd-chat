@@ -6,8 +6,8 @@
 use crate::bridge::{Bridge, Options};
 use sine_loco_app::app::Persist;
 use jni::{
-    objects::{JCharArray, JObject, JString},
-    sys::{jboolean, jint, jstring, JNI_TRUE},
+    objects::{JByteArray, JCharArray, JObject, JString},
+    sys::{jboolean, jbyteArray, jint, jstring, JNI_TRUE},
     JNIEnv,
 };
 use std::{path::PathBuf, sync::Mutex};
@@ -63,4 +63,30 @@ pub extern "system" fn Java_app_sineloco_model_NativeBridge_nCall<'l>(mut env: J
     drop(g);
     let r = out(&mut env, &json);
     r
+}
+
+/// `nSendFile(data: ByteArray): String` -> the new snapshot. Offers a photo (already re-encoded by the isolated media process) to the open chat's contact.
+/// The bytes are copied into zeroizing memory; the CALLER wipes its own array.
+#[no_mangle]
+pub extern "system" fn Java_app_sineloco_model_NativeBridge_nSendFile<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, data: JByteArray<'l>) -> jstring {
+    if data.is_null() { return out(&mut env, &err_json("no data")); }
+    // refuse oversized input BEFORE copying it
+    if env.get_array_length(&data).map(|n| n < 0 || n as usize > crate::bridge::PHOTO_MAX_BYTES).unwrap_or(true) { return out(&mut env, &err_json("the photo is too large")); }
+    let bytes = match env.convert_byte_array(&data) { Ok(b) => Zeroizing::new(b), Err(_) => return out(&mut env, &err_json("bad argument")) };
+    let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
+    let json = match g.as_mut() { Some(b) => b.send_file(bytes), None => Zeroizing::new(err_json("the bridge is not initialised")) };
+    drop(g);
+    out(&mut env, &json)
+}
+
+/// `nFileBytes(): ByteArray?` -> the re-cleaned file received in the open chat (the caller wipes the array after use), or null.
+#[no_mangle]
+pub extern "system" fn Java_app_sineloco_model_NativeBridge_nFileBytes<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>) -> jbyteArray {
+    let g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
+    let bytes = g.as_ref().and_then(|b| b.file_bytes());
+    drop(g);
+    match bytes {
+        Some(b) => env.byte_array_from_slice(&b).map(JByteArray::into_raw).unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
 }

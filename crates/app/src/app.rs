@@ -153,6 +153,10 @@ enum StartMsg { Progress(u8), Ready(Engine), Failed(String) }
 /// A received, re-cleaned file waiting in RAM until the user saves it (or it is wiped on panic/quit).
 struct Received { data: Zeroizing<Vec<u8>>, ext: &'static str }
 
+/// What is going on with a file of the selected contact (see `App::file_view`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileView { None, Preparing, Sending, Sent, Offered { kib: usize }, Arriving, Received { kib: usize, ext: &'static str } }
+
 /// One line of conversation. RAM only, wiped when dropped.
 pub struct ChatLine { pub mine: bool, pub text: Zeroizing<String>, /// sent, not yet CONFIRMED by the contact's app (the engine resends it on every new connection)
     pub queued: bool, /// the user saved this message into the vault
@@ -428,6 +432,8 @@ pub struct App {
     inbox: HashMap<[u8; 8], Received>,
     /// file being cleaned on a worker (cleaning is CPU-heavy on hostile input; the UI/panic key must stay live)
     prep_rx: Option<([u8; 8], Receiver<Result<(sine_loco_chat::FileOut, Vec<String>), sine_loco_strip::StripError>>)>,
+    /// files WE offered, per contact: false = offered/being sent, true = the contact has it (until the next file or a disconnect)
+    outgoing: HashMap<[u8; 8], bool>,
     /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
     pub alerts: Vec<(String, u32)>,
     /// This session's warnings, newest last, kept after they were acknowledged (memory only, wiped by panic/purge).
@@ -457,7 +463,7 @@ impl App {
             lockout: std::sync::Arc::new(Lockout::default()),
             engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, lan_offer: None, status_seen: (String::new(), Instant::now()), start_cancel: None, locked_since: None, lock_attempts: 0, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
-            prep_rx: None,
+            prep_rx: None, outgoing: HashMap::new(),
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
@@ -533,7 +539,7 @@ impl App {
     pub fn tor_died(&mut self) {
         if !matches!(self.online, Online::Online) { return; }
         if let Some(e) = self.engine.take() { thread::spawn(move || drop(e)); }
-        self.linked.clear(); self.offers.clear(); self.accepted.clear();
+        self.linked.clear(); self.offers.clear(); self.accepted.clear(); self.outgoing.clear();
         self.engine_gone();
         self.online = Online::Failed("tor stopped unexpectedly (the system may have ended it)".into());
         self.err("Tor stopped unexpectedly: you are NOT reachable. Restarting it.");
@@ -830,7 +836,7 @@ impl App {
         self.compose.clear();
         self.code_buf.clear();
         self.prep_rx = None;
-        self.offers.clear();
+        self.offers.clear(); self.outgoing.clear();
         self.accepted.clear();
         self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
@@ -1361,6 +1367,38 @@ impl App {
         self.inbox.get(&id).map(|r| format!("File received ({} KiB, RAM only, re-cleaned here): s = save to a neutral name, r = discard", r.data.len().div_ceil(1024)))
     }
 
+    /// The same state as `file_state`, as data, for a UI that draws its own card (Android).
+    pub fn file_view(&self) -> FileView {
+        let Some(id) = self.sel_id() else { return FileView::None };
+        if let Some((_, bucket)) = self.offers.get(&id) { return FileView::Offered { kib: (*bucket as usize) / 1024 }; }
+        if self.accepted.contains_key(&id) { return FileView::Arriving; }
+        if let Some(r) = self.inbox.get(&id) { return FileView::Received { kib: r.data.len().div_ceil(1024), ext: r.ext }; }
+        if matches!(&self.prep_rx, Some((p, _)) if *p == id) { return FileView::Preparing; }
+        match self.outgoing.get(&id) { Some(false) => FileView::Sending, Some(true) => FileView::Sent, None => FileView::None }
+    }
+
+    /// The re-cleaned file we hold for the selected contact (RAM only): for showing or saving it. Stays until `answer_file(false)`.
+    pub fn received_file(&self) -> Option<(&[u8], &'static str)> {
+        let id = self.sel_id()?;
+        self.inbox.get(&id).map(|r| (&r.data[..], r.ext))
+    }
+
+    /// Accept or decline the pending offer of the selected contact (`false` also discards a received file).
+    pub fn answer_file(&mut self, accept: bool) { self.reply_offer(accept) }
+
+    /// Offer raw bytes (a photo the phone already re-encoded) to the selected, CONNECTED contact: cleaned and padded on a worker thread, like the file prompt does.
+    pub fn send_file_bytes(&mut self, raw: Zeroizing<Vec<u8>>) {
+        if !self.sel_linked() { return; }
+        let Some(id) = self.sel_id() else { return };
+        if self.prep_rx.is_some() { return self.err("Still preparing the previous file."); }
+        if matches!(self.outgoing.get(&id), Some(false)) { return self.err("The previous file is still being sent."); }
+        let (tx, rx) = channel();
+        self.prep_rx = Some((id, rx));
+        self.outgoing.remove(&id);
+        self.ok("Preparing the photo ...");
+        thread::spawn(move || { let _ = tx.send(sine_loco_chat::Engine::prepare_file(&raw, sine_loco_strip::Mode::Auto)); });
+    }
+
     /// RAM we are willing to hold for received files in total.
     const FILE_RAM_BUDGET: usize = 24 * 1024 * 1024;
 
@@ -1791,7 +1829,7 @@ impl App {
         let (id, had_peer) = { let c = &self.vf().store.contacts[i]; (c.id, c.peer.is_some()) };
         if !had_peer { self.err("This contact is not paired yet."); return false; }
         if let Some(e) = &self.engine { e.remove(id); }
-        self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); self.inbox.remove(&id);
+        self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); self.inbox.remove(&id); self.outgoing.remove(&id);
         let c = &mut self.vf().store.contacts[i];
         // FRESH keys of our own for this contact as well: whoever completed the old pairing (the other half of a one-sided pairing, or someone who should never have) holds our old
         // bundle, our onion address and the client-authorisation key made from it. The new pairing must not be reachable through any of that.
@@ -2091,7 +2129,7 @@ impl App {
                 self.stop_rx = Some(rx);
                 self.online = Online::Stopping;
                 self.linked.clear();
-                self.offers.clear(); self.accepted.clear(); // no Disconnected events will arrive for the old engine's connections
+                self.offers.clear(); self.accepted.clear(); self.outgoing.clear(); // no Disconnected events will arrive for the old engine's connections
                 self.ok("Going offline: closing connections and removing onion services...");
                 true
             }
@@ -2278,7 +2316,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(StartMsg::Progress(p)) => self.online = Online::Starting(p),
-                    Ok(StartMsg::Ready(e)) => { self.offers.clear(); self.accepted.clear(); self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.hand_over_texts_kept_while_starting(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
+                    Ok(StartMsg::Ready(e)) => { self.offers.clear(); self.accepted.clear(); self.outgoing.clear(); self.engine = Some(e); self.online = Online::Online; keep = false; self.reconcile(); self.hand_over_texts_kept_while_starting(); self.ok("ONLINE. Contacts you dial or that dial you will connect as they come up."); break; }
                     Ok(StartMsg::Failed(m)) => { self.online = Online::Failed(m.clone()); keep = false; self.err(format!("Could not go online: {m}")); break; }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => { self.online = Online::Failed("start thread died".into()); keep = false; break; }
@@ -2293,8 +2331,8 @@ impl App {
             if stale { continue; }
             match ev {
                 Event::Connected { id } => { self.linked.insert(id); }
-                Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); }
-                Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); }
+                Event::Disconnected { id } => { self.linked.remove(&id); self.offers.remove(&id); self.accepted.remove(&id); self.outgoing.remove(&id); }
+                Event::FileCancelled { id } => { self.offers.remove(&id); self.accepted.remove(&id); self.outgoing.remove(&id); }
                 Event::Message { id, mid, text } => {
                     // the history takes a copy; it is written on the next tick
                     let hold = match self.history.as_mut() { Some(h) => { h.push(id, MsgState::Received, None, &text); h.persist().keeps_everything() } None => false };
@@ -2336,7 +2374,7 @@ impl App {
                     self.status = if resanitised { format!("File received. WARNING: it still contained metadata, removed here ({}). Select the contact, s = save.", report.join("; ").chars().take(200).collect::<String>()) }
                         else { "File received (RAM only). Select the contact, s = save under a neutral name.".into() };
                 }
-                Event::FileSent { .. } => self.status = "File delivered.".into(),
+                Event::FileSent { id } => { if self.outgoing.contains_key(&id) { self.outgoing.insert(id, true); } self.status = "File delivered.".into(); }
             }
         }
     }
@@ -2394,6 +2432,7 @@ impl App {
             Ok((f, report)) => {
                 if !self.linked.contains(&id) || self.engine.is_none() { return self.err("The contact disconnected while the file was being cleaned: not sent."); }
                 if let Some(e) = &self.engine { e.offer_file(id, f); }
+                self.outgoing.insert(id, false);
                 if report.is_empty() { self.ok("Offered (nothing needed removing). Waiting for the contact to accept."); }
                 else { let r = report.join("; "); self.ok(format!("Offered after cleaning: {}. Waiting for the contact to accept.", r.chars().take(300).collect::<String>())); }
             }
@@ -3077,6 +3116,40 @@ mod tests {
         type_str(&mut b, "second"); b.handle(Key::Enter);
         assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].chat_lines().len() == 3));
         assert_eq!(a.contact_rows()[0].4, 0);
+    }
+
+    /// The phone's route: bytes in (no path), structured states out, the received bytes readable until discarded.
+    #[test]
+    fn a_photo_sent_as_bytes_walks_through_the_structured_file_states_and_is_wiped_on_discard() {
+        let d = tempfile::tempdir().unwrap();
+        let (_net, mut a, mut b) = linked_pair(d.path());
+        go_online(&mut a); go_online(&mut b);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| is_linked(x[0]) && is_linked(x[1])));
+        let seg = |m: u8, body: &[u8]| { let mut v = vec![0xFF, m]; v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes()); v.extend_from_slice(body); v };
+        let mut jpg = vec![0xFF, 0xD8];
+        jpg.extend(seg(0xE1, b"Exif\0\0GPS-SECRET-LOCATION"));
+        jpg.extend(seg(0xDB, &[0; 65])); jpg.extend(seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0])); jpg.extend(seg(0xC4, &[0; 17])); jpg.extend(seg(0xDA, &[1, 1, 0, 0, 0x3F, 0]));
+        jpg.extend(vec![0x11u8; 5000]); jpg.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(a.file_view(), FileView::None);
+        a.send_file_bytes(Zeroizing::new(jpg.clone()));
+        assert_eq!(a.file_view(), FileView::Preparing);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].file_view() == FileView::Sending), "{}", a.status);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| matches!(x[1].file_view(), FileView::Offered { .. })), "no offer");
+        assert!(b.received_file().is_none(), "nothing is readable before the user accepts");
+        b.answer_file(true);
+        assert!(pump_until(&mut [&mut a, &mut b], |x| matches!(x[1].file_view(), FileView::Received { .. })), "file never arrived");
+        let (bytes, ext) = b.received_file().expect("held in RAM");
+        assert_eq!(ext, "jpg");
+        assert!(!bytes.windows(6).any(|w| w == b"Exif\0\0") && !bytes.windows(10).any(|w| w == b"GPS-SECRET"), "metadata reached the receiver's UI");
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].file_view() == FileView::Sent), "the sender never heard it arrived");
+        b.answer_file(false); // decline with nothing pending = discard what is held
+        assert_eq!(b.file_view(), FileView::None);
+        assert!(b.received_file().is_none() && b.inbox.is_empty());
+        // a second photo while the first is still being sent is refused, not queued
+        a.send_file_bytes(Zeroizing::new(jpg.clone()));
+        assert!(pump_until(&mut [&mut a, &mut b], |x| x[0].file_view() == FileView::Sending));
+        a.send_file_bytes(Zeroizing::new(jpg));
+        assert!(a.error && a.status.contains("still being sent"), "{}", a.status);
     }
 
     #[test]
