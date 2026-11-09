@@ -4,7 +4,7 @@ The third native front end next to the terminal UI and the Linux GUI. Kotlin + J
 bubbles, delivery marks, a coloured top bar) with the project's privacy rules kept: **no timestamps, no read receipts, no typing
 indicators, no presence beyond "connected over Tor"** (docs/DELIVERY.md). Focus: anonymity on the network first.
 
-> **Status: the app runs on the real Rust core; tor is embedded (built, packaged, wired) but NEVER RUN on a phone yet.** The screens talk to `nerd-chat-app` through a JNI bridge
+> **Status: the app runs on the real Rust core; tor is embedded and reaches "Tor connected" on the x86_64 emulator (Android 16); NOT yet tried on a real phone.** The screens talk to `nerd-chat-app` through a JNI bridge
 > (`crates/android`): vault creation and unlock (the real Argon2 key derivation), contacts, the chat engine, pairing over Tor, verification,
 > panic and purge are the core's own code. `libtor.so` (C tor 0.4.9.16 with OpenSSL 3.5.9 and libevent, built by `scripts/build-tor-android.sh` before Gradle, not committed) is started as a child
 > process by the core. The build declares `INTERNET` for tor only. NOT done: foreground service (Android may freeze tor when the app is in the background), network-change handling, bridges, a run on a device.

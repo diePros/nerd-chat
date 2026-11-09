@@ -111,3 +111,16 @@ Rust side and Kotlin UI/bridge use the `Persist` setting (nothing / unsent / 1 d
 What strength to expect: StrongBox (Pixels, many recent phones) = deleting the key is a real erase in secure hardware; TEE-only = the key blob is deleted but the hardware root key remains, so a forensic copy of the blob might still open it (best effort). `AndroidKeystoreKeys.level` says which one a phone got (not shown in the UI yet).
 A clock moved far into the future makes the erase job destroy younger keys too (history lost, nothing exposed).
 Things to look at on the phone: whether the history file stays at a constant size and inode (`adb shell stat`), f2fs write behaviour, keyboard flags in the message field (R32-K1).
+
+## 5. Emulator (verified 2026-11-09, Linux with KVM)
+```bash
+export ANDROID_HOME=$HOME/android-sdk
+$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "emulator" "system-images;android-36;default;x86_64"   # AOSP image: no Google services
+echo no | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -n nerdchat -k "system-images;android-36;default;x86_64" -d pixel_6
+$ANDROID_HOME/emulator/emulator -avd nerdchat -no-snapshot &              # add -no-window -gpu swiftshader_indirect for headless
+$ANDROID_HOME/platform-tools/adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+$ANDROID_HOME/platform-tools/adb shell am start -n app.nerdchat/.MainActivity
+```
+`/dev/kvm` must be readable by you (group `kvm`: `sudo usermod -aG kvm $USER`, then log in again). The emulator reaches the internet, so the embedded tor really bootstraps.
+`adb exec-out screencap` is BLACK on purpose (`FLAG_SECURE`); use `adb shell uiautomator dump` to read the screen. The emulator is x86_64: it tests `libtor.so`/the bridge for x86_64, not the arm64 build.
+Build `libtor.so` first (`scripts/build-tor-android.sh arm64-v8a` and `x86_64`). The libraries are not committed.
