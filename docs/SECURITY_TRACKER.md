@@ -554,3 +554,14 @@ Code: `store/src/book.rs` (SBS6, `OutMsg`, caps), `chat/src/engine.rs` (`with_ou
 | OB-9 | each confirmation batch writes the vault and the counter once (fsync) on the poll thread | INFO | measure on a phone; a slow flash could stall the UI thread |
 | OB-10 | the Android default is ON: a phone user who never opens Settings keeps unsent texts on flash | ACCEPTED | stated in the chat banner and in Settings |
 
+## Review 31 - timing metadata and message history (owner decision 2026-11-09: history default ON on Android, a setting on Linux; plan in `docs/HISTORY_AND_TIMING_PLAN.md`)
+| ID | Finding | Status | Notes |
+|---|---|---|---|
+| CT-1 | the rollback counter file is **plaintext** (`store/src/file.rs`: `counter.to_le_bytes()`) and counts every vault save; with the outbox it reveals roughly how many messages were sent or confirmed | OPEN (verified by reading the code) | fix: random monotone increments, fixed size, encrypted on Android; plan stage 2 |
+| CT-2 | `ctime` of the vault and counter files cannot be forged and always shows the real time of the last operation | OPEN (measured on ext4) | a "touch every minute" heartbeat alone does not hide it: all file operations must happen only on a fixed grid |
+| CT-3 | `write_atomic` (temp file + rename) gives each save a new inode whose birth time is the real save time | OPEN (measured on ext4; f2fs to be checked) | fix: in-place A/B slots in a pre-allocated file |
+| CT-4 | vault file mtime/ctime/birth time show WHEN you last sent or confirmed a message (outbox on) | OPEN | = OB-1 made precise; grid-gated I/O (plan section 2) |
+| CT-5 | a vault data key rotated on every sweep is NOT a crypto-erase: every old copy carries its own wrapped key and the same password opens it | INFO (design review) | deletion needs a key the password does not unlock: Android Keystore per epoch; Linux = best effort |
+| CT-6 | documentation said "nothing is written to disk" / "nothing is ever saved by itself" while the encrypted outbox can write unsent texts | FIXED (README, `save_selected` doc comment) | will change again when history exists |
+| CT-7 | the receiver confirms a text right after it is in RAM; with persistence a crash before the write loses a text the sender considers delivered | OPEN (design) | durable-before-confirm: queue confirmations until the tick's fsync (plan stage 4) |
+

@@ -906,7 +906,7 @@ impl App {
         }
     }
 
-    /// Save ONE message the user chose, by hand: the only way anything of a conversation ever reaches the disk.
+    /// Save ONE message the user chose, by hand: the only way anything of a conversation ever reaches the disk, apart from the opt-in encrypted outbox (unconfirmed texts you sent).
     fn save_selected(&mut self, from_newest: usize) {
         let Some(id) = self.chat_id() else { return };
         if self.cfg.path.is_none() { return self.err("RAM-only mode: nothing is written to disk, so nothing can be saved."); }
