@@ -43,11 +43,18 @@ cat <<NFT
 #!/usr/sbin/nft -f
 # Kill switch written by sineloco vpn-setup.sh. Do not edit by hand; rerun the installer instead.
 flush ruleset
+# Private (LAN) address ranges. They never route to the internet, so talking to them cannot leak.
+define lan4 = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
+define lan6 = { fc00::/7, fe80::/10 }
 table inet killswitch {
   chain input {
     type filter hook input priority 0; policy drop;
     iifname "lo" accept
     ct state established,related accept
+    # SSH, from the local network only (nothing listens unless you install sshd). Matched by port, not by
+    # connection state: a session that was already open when these rules loaded looks "new" to the tracker.
+    ip saddr \$lan4 tcp dport 22 accept
+    ip6 saddr \$lan6 tcp dport 22 accept
     # LAN plumbing that does not leave the LAN
     udp sport 67 udp dport 68 accept
     icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept
@@ -59,6 +66,9 @@ table inet killswitch {
     type filter hook output priority 0; policy drop;
     oifname "lo" accept
     oifname "$IF" accept
+    # SSH replies to the local network (private ranges only, so never the internet)
+    ip daddr \$lan4 tcp sport 22 accept
+    ip6 daddr \$lan6 tcp sport 22 accept
     udp sport 68 udp dport 67 accept
     icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
     # only the VPN's own handshake and carrier packets may leave outside the tunnel
@@ -108,9 +118,14 @@ grep -Eqi '^[[:space:]]*DNS[[:space:]]*=' /etc/wireguard/$IF.conf && DEBIAN_FRON
 echo "== kill switch"
 [ -f /etc/nftables.conf ] && [ ! -f /etc/nftables.conf.pre-sineloco ] && cp /etc/nftables.conf /etc/nftables.conf.pre-sineloco
 rules > /etc/nftables.conf.new
-nft -c -f /etc/nftables.conf.new
+nft -c -f /etc/nftables.conf.new                 # a syntax error stops here, before anything is applied
 mv /etc/nftables.conf.new /etc/nftables.conf
 systemctl enable nftables >/dev/null 2>&1
+# Safety net against locking yourself out: if this script has not confirmed success within 3 minutes,
+# the live rules are removed again. (Tor is not running yet at this point, so nothing is exposed;
+# the rules in /etc/nftables.conf still load at boot.)
+setsid sh -c 'sleep 180; nft delete table inet killswitch 2>/dev/null' >/dev/null 2>&1 &
+watchdog=$!
 nft -f /etc/nftables.conf
 
 echo "== tunnel"
@@ -135,4 +150,5 @@ if [ -n "$before" ] && [ "$before" = "$after" ]; then
   exit 1
 fi
 /usr/local/sbin/sineloco-vpn-check --quiet || { echo "The VPN check failed (see above). Stopping."; exit 1; }
+kill "$watchdog" 2>/dev/null || true             # confirmed: keep the kill switch
 echo "   leak test passed: nothing leaves outside the tunnel"

@@ -75,7 +75,8 @@ The installer makes sure that IP is your VPN's, and fails closed:
 - Tor is only started after three checks pass: a handshake with the VPN, a public IP that differs from the
   one before, and a leak test (a request forced out of the normal network port must fail).
 - `sudo sineloco-vpn-check` repeats all of that whenever you want.
-- There is no SSH in the container. Manage it from the host with `pct enter 210`.
+- Manage the container with `pct enter 210` from the host. SSH works too if you install `openssh-server`, but only from your local network (private address ranges); nothing from the internet can reach it.
+- While the installer loads the firewall it keeps a 3-minute safety timer: if it has not confirmed success by then, it removes the live rules so a broken run cannot lock you out. The saved rules still load at boot.
 - The container has no home-network access of its own other than the VPN endpoint and DHCP; apt updates
   also go through the VPN.
 
