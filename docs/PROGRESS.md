@@ -88,3 +88,17 @@ After the first-run dialog the GUI created the app core WITHOUT the vault path, 
 
 ## Window icon (2026-11-09)
 On Wayland the compositor finds the icon through the window's app id, which must equal the .desktop file name: the GUI now sets `app_id = "nerd-chat"` (matches `nerd-chat.desktop`, `StartupWMClass=nerd-chat`). Reported by the owner (default Wayland icon showed).
+
+## Merge of the Android branch (2026-11-09/10)
+`claude/stoic-hopper-i5rqlk` already contained `next` (merge 7e9280d), so `next` was fast-forwarded to 292f20d: history is linear main -> next -> Android work. Nothing was pushed, `main` is not yet moved.
+Workspace tests on the merged tip (uid 1000, `umask 077`, network for the `jni` crate): everything passes except `nerd-chat-app app::tests::a_failed_save_does_not_hide_that_the_vault_file_may_already_hold_the_message` (passed on ed528ee).
+Cause to settle first: since b300cfd a counter-file write failure is `StoreError::CounterWrite` and `App::save` returns true with a WARNING; the test expects the old "SAVE FAILED ... may already contain" text, and the status in the test is the "Saved into the vault" message, i.e. the WARNING is overwritten by the success text. Either the test is stale or the warning is hidden: check which, and fix.
+Test notes: without `umask 077` the bridge tests fail ("tempdir writable by other users", mode 775) - harden the tests to chmod their dir. `cargo --offline` cannot build the workspace: `jni`/`cesu8` are not in `vendor/`.
+
+## Next steps (ordered)
+1. Fix the failing test / hidden-warning question above; make bridge tests independent of umask.
+2. Review the new, un-reviewed Android-era security code with an Opus review (tracker rows OB-*, CT-1, history file, Keystore binding, KIND_REKEY): none of it is in a reviewed cycle yet. Re-run `cargo vet`/`cargo deny` (jni + exemptions added without running them).
+3. Re-run on this machine: static musl build, `scripts/sandbox-check.sh`, live Tor tests, `scripts/repro-check.sh`.
+4. Update CHANGELOG/README to one story (TUI + GUI + Android) and push `next`, then move `main`.
+5. Android: embedded Tor (`libtor.so`, INTERNET permission), foreground service + auto-lock, isolated-process cleaner, secure input path; first run on a real device (never run on one so far).
+6. Existing open items: purge inode-reuse bug (`purge_spares_planted_links...`), Tails/Whonix tests (owner), professional audit.
