@@ -120,6 +120,8 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
     let mut bad_frames = 0u32;
     let mut rot_frames = 0u32;
     let mut caps_frames = 0u32;
+    // the peer announced `CAP_REKEY`: only then is it ever sent a `KIND_REKEY` (an older peer would ignore the frame and then fail to decrypt the next cell)
+    let (mut peer_rekey, mut last_rekey) = (false, Instant::now());
     let (mut acks, mut ack_due): (Vec<proto::MsgId>, Option<Instant>) = (Vec::new(), None);
     'conn: loop {
         loop {
@@ -210,6 +212,12 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
             ack_due = None;
             last_tx = Instant::now();
         }
+        if peer_rekey && (sess.sent_since_rekey() >= t.rekey_cells || (sess.sent_since_rekey() > 0 && last_rekey.elapsed() >= t.rekey_after)) {
+            // the frame travels under the old key, then our sending key is replaced; the peer does the same when it has read the frame
+            if !send_body(&mut stream, &mut sess, &me, &proto::encode_rekey()) { break; }
+            sess.rekey_outgoing();
+            last_rekey = Instant::now(); last_tx = last_rekey;
+        }
         if last_tx.elapsed() >= t.keepalive {
             if !send_body(&mut stream, &mut sess, &me, &proto::keepalive()) { break; }
             last_tx = Instant::now();
@@ -288,8 +296,13 @@ pub(crate) fn run(mut stream: BoxStream, mut sess: Session, me: ContactIdentity,
                         // a few per connection (a flood of them is only noise); extra bytes of a later version are ignored
                         caps_frames += 1;
                         if let (Some(flags), true) = (proto::parse_caps(&m.body), caps_frames <= 3) {
+                            if flags & proto::CAP_REKEY != 0 { peer_rekey = true; }
                             if ev.send(In::Conn(ConnEvent::Caps { id, gen, flags })).is_err() { break; }
                         }
+                    }
+                    Some(proto::KIND_REKEY) => {
+                        if m.body.len() != 1 { break; }
+                        sess.rekey_incoming(); // everything the peer sends from the next cell on is under its new key
                     }
                     Some(proto::KIND_MSG_ACK) => {
                         let Some(mids) = proto::parse_msg_acks(&m.body) else { break };

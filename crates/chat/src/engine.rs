@@ -55,13 +55,16 @@ pub struct Timing {
     /// How long after a connection comes up we wait for the peer's capability frame before treating it as a v0.1.0 peer
     /// (plain text frames, no confirmation expected).
     pub caps_wait: Duration,
+    /// Ratchet our sending key (forward secrecy inside one connection) after this many cells sent, or after `rekey_after` if at least one cell was sent: whichever comes first.
+    pub rekey_cells: u64,
+    pub rekey_after: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
         Self { poll: Duration::from_millis(200), keepalive: Duration::from_secs(30), idle: Duration::from_secs(100),
                min_backoff: Duration::from_secs(3), max_backoff: Duration::from_secs(60), handshake: Duration::from_secs(45), handshakes_per_sec: 50.0,
-               ack_delay_min: Duration::from_secs(1), ack_delay_max: Duration::from_secs(5), caps_wait: Duration::from_secs(5) }
+               ack_delay_min: Duration::from_secs(1), ack_delay_max: Duration::from_secs(5), caps_wait: Duration::from_secs(5), rekey_cells: 32, rekey_after: Duration::from_secs(600) }
     }
 }
 
@@ -523,7 +526,7 @@ impl Core {
                 // peer that never announces (v0.1.0) would silently DROP the new id frames, so it gets plain ones after `caps_wait`
                 rt.peer_mode = PeerMode::Unknown;
                 rt.up_at = Instant::now();
-                let _ = tx.send(Out::Caps(proto::CAP_CONFIRM));
+                let _ = tx.send(Out::Caps(proto::CAP_CONFIRM | proto::CAP_REKEY));
                 // announce our current keys on every connection: a peer holding the NEW keys as pending learns the rotation is done
                 // even if the explicit DONE died with a replaced connection (it reveals nothing the peer does not already know)
                 let _ = tx.send(Out::Rotate { kind: proto::KIND_ROTATE_DONE, keys: rt.my_keys });
@@ -749,7 +752,7 @@ mod tests {
     pub fn fast() -> Timing {
         Timing { poll: Duration::from_millis(20), keepalive: Duration::from_millis(100), idle: Duration::from_millis(700),
                  min_backoff: Duration::from_millis(30), max_backoff: Duration::from_millis(200), handshake: Duration::from_secs(5), handshakes_per_sec: 1000.0,
-                 ack_delay_min: Duration::from_millis(20), ack_delay_max: Duration::from_millis(40), caps_wait: Duration::from_millis(400) }
+                 ack_delay_min: Duration::from_millis(20), ack_delay_max: Duration::from_millis(40), caps_wait: Duration::from_millis(400), rekey_cells: 32, rekey_after: Duration::from_secs(600) }
     }
 
     fn ident() -> (ContactIdentity, Bundle) { let i = ContactIdentity::generate(); let b = Bundle::from_identity(&i); (i, b) }
@@ -1384,7 +1387,9 @@ mod tests {
         panic!("no application frame");
     }
 
-    fn raw_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) {
+    fn raw_connect(net: &MemNet, lb: &Bundle, d: &ContactIdentity) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) { raw_connect_caps(net, lb, d, proto::CAP_CONFIRM) }
+
+    fn raw_connect_caps(net: &MemNet, lb: &Bundle, d: &ContactIdentity, caps: u8) -> (crate::transport::BoxStream, nerd_chat_core::session::Session) {
         let dial = net.transport().dial_fn();
         let end = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1392,7 +1397,7 @@ mod tests {
                 Ok(mut s) => {
                     s.set_timeout(Some(Duration::from_secs(5))).unwrap();
                     let mut sess = link::dial(&mut s, d, lb, &proto::keepalive()).unwrap();
-                    raw_send(&mut s, &mut sess, d, &proto::encode_caps(proto::CAP_CONFIRM)); // a NEW peer announces itself first
+                    raw_send(&mut s, &mut sess, d, &proto::encode_caps(caps)); // a NEW peer announces itself first
                     return (s, sess);
                 }
                 Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
@@ -1432,6 +1437,59 @@ mod tests {
         assert_eq!(f[0], proto::KIND_TEXT_ID_FINAL);
         assert_ne!(&f[1..9], &mid[..]);
         assert_eq!(&f[9..], b"next", "the confirmed text is not sent again");
+    }
+
+    /// The next frame, whatever it is (keepalives included).
+    fn raw_any(s: &mut crate::transport::BoxStream, sess: &mut nerd_chat_core::session::Session, me: &ContactIdentity) -> Vec<u8> {
+        use std::io::Read;
+        let mut cell = vec![0u8; nerd_chat_core::session::WIRE_CELL_LEN];
+        s.read_exact(&mut cell).unwrap();
+        sess.recv(me, &cell).expect("the cell must decrypt: a rekey that one side did not follow would end here").body.to_vec()
+    }
+
+    #[test]
+    fn the_key_is_ratcheted_inside_a_long_connection_and_the_peer_follows() {
+        let net = MemNet::new();
+        let ((l, lb), (d, _db)) = ordered();
+        let timing = Timing { rekey_cells: 2, ..fast() };
+        let el = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &l, _db.clone())], timing);
+        let (mut s, mut sess) = raw_connect_caps(&net, &lb, &d, proto::CAP_CONFIRM | proto::CAP_REKEY);
+        assert!(connected(&el));
+        let (mut rekeys, mut texts) = (0, Vec::new());
+        for i in 0..12 {
+            say(&el, ID, &format!("t{i}")); // one at a time: the engine ratchets between bursts, not inside one
+            while texts.len() <= i {
+                let f = raw_any(&mut s, &mut sess, &d);
+                if f == proto::encode_rekey() { rekeys += 1; sess.rekey_incoming(); }
+                else if f[0] == proto::KIND_TEXT_ID_FINAL { texts.push(String::from_utf8(f[9..].to_vec()).unwrap()); }
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            raw_send(&mut s, &mut sess, &d, &proto::keepalive()); // the engine drops a silent peer after `idle`
+        }
+        assert!(rekeys >= 3, "a rekey every 2 cells over 12+ cells: {rekeys}");
+        assert_eq!(texts, (0..12).map(|i| format!("t{i}")).collect::<Vec<_>>(), "everything was readable, in order, across the ratchets");
+        // and the engine follows OUR ratchet too
+        raw_send(&mut s, &mut sess, &d, &proto::encode_rekey());
+        sess.rekey_outgoing();
+        raw_send(&mut s, &mut sess, &d, &id_text(&[7; 8], "after our rekey"));
+        assert!(got(&el, "after our rekey"), "the engine switched its receiving key when it read our rekey frame");
+    }
+
+    #[test]
+    fn a_peer_that_did_not_announce_rekey_is_never_sent_one() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let timing = Timing { rekey_cells: 1, rekey_after: Duration::from_millis(50), ..fast() };
+        let el = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &l, db.clone())], timing);
+        let (mut s, mut sess) = raw_connect_caps(&net, &lb, &d, proto::CAP_CONFIRM); // an older build: confirms, but does not know REKEY
+        assert!(connected(&el));
+        for i in 0..8 { say(&el, ID, &format!("t{i}")); }
+        let mut n = 0;
+        while n < 8 {
+            let f = raw_any(&mut s, &mut sess, &d); // plain recv, never a ratchet: a rekey frame or a changed key would fail here
+            assert_ne!(f[0], proto::KIND_REKEY, "no rekey frame for a peer that cannot read it");
+            if f[0] == proto::KIND_TEXT_ID_FINAL { n += 1; }
+        }
     }
 
     fn id_text(mid: &proto::MsgId, t: &str) -> Vec<u8> { [&[proto::KIND_TEXT_ID_FINAL][..], &mid[..], t.as_bytes()].concat() }

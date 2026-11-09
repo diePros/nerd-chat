@@ -21,6 +21,12 @@ pub const KIND_TEXT_ID_FINAL: u8 = 0x33;
 pub const KIND_CAPS: u8 = 0x34;
 /// Flag: "I understand `TEXT_ID_*` frames and will confirm them" (further bytes/flags are ignored, never an error).
 pub const CAP_CONFIRM: u8 = 1;
+/// Flag: "I understand `KIND_REKEY`". Only a peer that announced it is ever sent one (v0.1.0 and earlier branch builds never see it).
+pub const CAP_REKEY: u8 = 2;
+/// Key ratchet: the cell carrying this one-byte frame is the LAST one the sender encrypts under its current key; both sides then replace that direction's key by a
+/// one-way function of it (`Session::rekey_outgoing` / `rekey_incoming`). The sender chooses when (every `Timing::rekey_cells` cells or `Timing::rekey_after`).
+pub const KIND_REKEY: u8 = 0x35;
+pub fn encode_rekey() -> Vec<u8> { vec![KIND_REKEY] }
 pub fn encode_caps(flags: u8) -> Vec<u8> { vec![KIND_CAPS, flags] }
 /// The flags byte of a capability frame; extra bytes of a later version are ignored.
 pub fn parse_caps(body: &[u8]) -> Option<u8> { body.get(1).copied() }

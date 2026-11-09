@@ -82,6 +82,7 @@ pub struct Session {
     recv_last: Option<u64>,
     peer: Bundle,
     confirmed: bool,
+    sent_since_rekey: u64,
 }
 
 impl Handshake {
@@ -160,13 +161,24 @@ impl Session {
         if !hs.is_handshake_finished() { return Err(Error::Malformed); }
         let id: [u8; 32] = hs.get_handshake_hash().try_into().map_err(|_| Error::Malformed)?;
         let ts = hs.into_stateless_transport_mode().map_err(|_| Error::Malformed)?;
-        Ok(Self { ts, id, send_ctr: 0, recv_last: None, peer: peer.clone(), confirmed })
+        Ok(Self { ts, id, send_ctr: 0, recv_last: None, peer: peer.clone(), confirmed, sent_since_rekey: 0 })
     }
 
     pub fn id(&self) -> &[u8; 32] { &self.id }
 
     /// False for a responder session until the first valid cell has been received.
     pub fn is_confirmed(&self) -> bool { self.confirmed }
+
+    /// Replace the key we SEND with from now on by a one-way function of itself (Noise `Rekey`); the old key is gone. Call it right after the cell that announces it was sent
+    /// (the application's `REKEY` frame): the peer calls [`Session::rekey_incoming`] right after it receives that cell. Cell numbers (nonces) are not affected.
+    /// This gives forward secrecy WITHIN a connection (a later key leak cannot open earlier cells); it does not heal a leak (only a new handshake does).
+    pub fn rekey_outgoing(&mut self) { self.ts.rekey_outgoing(); self.sent_since_rekey = 0; }
+
+    /// The receiving counterpart of [`Session::rekey_outgoing`]: call it right after a valid rekey announcement was received.
+    pub fn rekey_incoming(&mut self) { self.ts.rekey_incoming(); }
+
+    /// Cells sent since the last [`Session::rekey_outgoing`] (or since the start).
+    pub fn sent_since_rekey(&self) -> u64 { self.sent_since_rekey }
 
     /// Sign, pad and encrypt one message. Output is always `WIRE_CELL_LEN` bytes.
     /// No sender clock is transmitted (it would fingerprint the sender across contacts).
@@ -181,6 +193,7 @@ impl Session {
         let n = self.ts.write_message(next, &cell[..], &mut out).map_err(|_| Error::Malformed)?;
         debug_assert_eq!(n, WIRE_CELL_LEN);
         self.send_ctr = next; // commit only after success
+        self.sent_since_rekey += 1;
         Ok(out)
     }
 
@@ -231,6 +244,43 @@ mod tests {
         assert_eq!(sb.recv(&b, &w2).unwrap().body.len(), 800);
         let r = sb.send(&b, b"hi alice").unwrap();
         assert_eq!(&sa.recv(&a, &r).unwrap().body[..], b"hi alice");
+    }
+
+    #[test]
+    fn a_rekey_changes_the_key_in_step_and_both_directions_are_independent() {
+        let (a, ab, b, bb) = setup();
+        let (mut sa, mut sb) = connect(&a, &ab, &b, &bb);
+        let w = sa.send(&a, b"before").unwrap();
+        sb.recv(&b, &w).unwrap();
+        assert_eq!(sa.sent_since_rekey(), 1);
+        sa.rekey_outgoing();
+        assert_eq!(sa.sent_since_rekey(), 0);
+        let w = sa.send(&a, b"after").unwrap();
+        // the receiver that has not followed cannot open it, and the failed attempt changes nothing
+        assert!(sb.recv(&b, &w).is_err(), "a cell under the new key must not open under the old one");
+        sb.rekey_incoming();
+        assert_eq!(&sb.recv(&b, &w).unwrap().body[..], b"after", "the same cell opens once the receiver followed");
+        // the other direction was not touched
+        let r = sb.send(&b, b"reply").unwrap();
+        assert_eq!(&sa.recv(&a, &r).unwrap().body[..], b"reply");
+        // many ratchets, interleaved, still in step
+        for i in 0..50u32 {
+            let m = i.to_be_bytes();
+            let w = sa.send(&a, &m).unwrap(); sa.rekey_outgoing();
+            assert_eq!(&sb.recv(&b, &w).unwrap().body[..], &m); sb.rekey_incoming();
+            let w = sb.send(&b, &m).unwrap(); sb.rekey_outgoing();
+            assert_eq!(&sa.recv(&a, &w).unwrap().body[..], &m); sa.rekey_incoming();
+        }
+    }
+
+    #[test]
+    fn an_old_cell_cannot_be_replayed_after_a_rekey() {
+        let (a, ab, b, bb) = setup();
+        let (mut sa, mut sb) = connect(&a, &ab, &b, &bb);
+        let w1 = sa.send(&a, b"1").unwrap();
+        sb.recv(&b, &w1).unwrap();
+        sa.rekey_outgoing(); sb.rekey_incoming();
+        assert!(sb.recv(&b, &w1).is_err());
     }
 
     #[test]

@@ -568,6 +568,10 @@ Code: `store/src/book.rs` (SBS6, `OutMsg`, caps), `chat/src/engine.rs` (`with_ou
 | CT-9 | on a TEE-only phone deleting a Keystore key is not a hardware-grade erase | ACCEPTED (documented) | StrongBox phones give the real guarantee; the Settings text must say "best effort" where StrongBox is absent (not yet shown in the UI) |
 | CT-10 | the erase job trusts the wall clock: a clock moved forward destroys younger keys | ACCEPTED | loses history, never exposes it |
 | CT-11 | the history used to write an unusable (empty) wrapped key silently if the key store refused | FIXED | the write now fails and is retried; test `a_key_store_that_refuses_writes_nothing_and_loses_nothing` |
+| RK-1 | one transport key per connection: a memory leak at time T opens every cell of the connection that was recorded | FIXED (S2) | `KIND_REKEY` ratchet every 32 cells / 10 min; tests `a_rekey_changes_the_key_in_step...`, `the_key_is_ratcheted_inside_a_long_connection_and_the_peer_follows` |
+| RK-2 | a ratchet is one-way: it does NOT heal after a leak (the attacker can ratchet too) | ACCEPTED (documented) | healing needs a new handshake: a periodic reconnect is an open idea |
+| RK-3 | the ratchet check runs once per loop turn: a burst can put more than `rekey_cells` cells under one key | ACCEPTED | bound is "cells per burst + 32" |
+| RK-4 | not tested against the real v0.1.0 binary or over real Tor (`tests/live_chat.rs` is ignored here) | OPEN | run the ignored live tests on a machine with Tor |
 
 ## Review 32 - adversarial review of the outbox, the Rust bridge and the Android app (six independent Opus reviewers, 2026-11-09; the sixth is the design review behind review 31)
 Reviewed at commit 6be6ddd, each in its own scratch copy; bugs were proved with failing tests before they were fixed. Fixed in the commit that follows 6be6ddd/e9a20fa.

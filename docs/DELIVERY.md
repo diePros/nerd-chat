@@ -10,7 +10,8 @@ the contact confirms it, and sends every unconfirmed text again, oldest first, o
 |---|---|---|
 | `KIND_TEXT_ID_CONT` 0x32 / `KIND_TEXT_ID_FINAL` 0x33 | `kind \| id(8) \| payload` | a text with its id; EVERY chunk carries it |
 | `KIND_MSG_ACK` 0x31 | `kind \| id(8) * k`, 1 <= k <= 64 | "my UI has these texts" |
-| `KIND_CAPS` 0x34 | `kind \| flags`, bit 0 = "I understand id frames and will confirm them" | sent FIRST on every connection (extra bytes ignored) |
+| `KIND_CAPS` 0x34 | `kind \| flags`, bit 0 = "I understand id frames and will confirm them", bit 1 (`CAP_REKEY`) = "I understand `KIND_REKEY`" | sent FIRST on every connection (extra bytes ignored) |
+| `KIND_REKEY` 0x35 | `kind` only (exactly 1 byte, else the connection is cut) | key ratchet: this cell is the LAST the sender encrypts under its current key; the sender then replaces its sending key by a one-way function of it (Noise `Rekey`), the receiver does the same for its receiving key right after it has read the cell. Sent only to a peer that announced `CAP_REKEY`, every 32 cells sent or every 10 minutes (whichever first) |
 
 The id is inside the text frame, so a text of up to ~940 bytes is still ONE cell, exactly as before (an earlier draft sent the id as
 its own cell; review 24 pointed out that this made messages recognisable by their cell count). Frames are fixed-size padded cells inside
