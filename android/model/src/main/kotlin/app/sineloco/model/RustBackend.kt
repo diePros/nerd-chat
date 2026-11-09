@@ -70,8 +70,9 @@ class RustBackend(
 
     override fun submitPassword(password: CharArray) = op("secret", password, "enter" to null)
     override fun panic() { op("panic") }
-    // from every screen that has a vault behind it (a key derivation in progress remembers the request); quiet otherwise (a refusal would only show a banner on the unlock screen)
-    override fun lock() { if (s.value.stage == Stage.Ready || s.value.stage == Stage.Working) op("lock") }
+    // ALWAYS sent, whatever stage this side last saw: the last poll can be 250 ms old (the user taps Unlock and presses home in that time). The core ignores it when there is nothing
+    // to lock and never refuses, so there is no banner either.
+    override fun lock() { op("lock") }
     override fun goOfflineNow() { op("offline_now") }
     override fun panicBlocking(timeoutMillis: Long) {
         closed = true // stop the polling first: a poll after the wipe would only show the wiped screen

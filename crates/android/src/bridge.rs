@@ -329,9 +329,11 @@ mod tests {
     #[test]
     fn reconnecting_under_the_lock_never_types_into_the_password_and_offline_needs_no_password() {
         let d = tempfile::tempdir().unwrap();
-        let mut b = bridge(d.path());
+        private(d.path());
+        // a tor path that does not exist: the test must never start the host's real tor
+        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off, None).unwrap();
         create(&mut b);
-        b.auto_online = true; b.started = true;
+        b.started = true;
         call(&mut b, "lock", "");
         b.app.online = Online::Failed("test".into());
         b.retry_at = Some(Instant::now() - Duration::from_secs(1));
@@ -341,6 +343,42 @@ mod tests {
         let s = call(&mut b, "offline_now", "");
         assert!(s.contains("\"user_offline\":true") && s.contains("\"locked\":true"), "{s}");
         assert!(matches!(b.app.online, Online::Offline | Online::Stopping), "offline needs no password");
+    }
+
+    #[test]
+    fn a_lock_requested_during_the_locks_own_password_check_keeps_the_app_locked() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        call(&mut b, "new_contact", "Mira");
+        call(&mut b, "lock", "");
+        call(&mut b, "secret", PW);
+        b.call("enter", &z(""));                 // the check runs on its thread: the screen is "working"
+        let during = call(&mut b, "lock", "");   // the user presses power / home right now
+        assert!(during.contains("\"locked\":true") || during.contains("\"screen\":\"working\""), "{during}");
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        let mut s = String::new();
+        while std::time::Instant::now() < end { s = call(&mut b, "snapshot", ""); if !s.contains("\"screen\":\"working\"") { break; } std::thread::sleep(Duration::from_millis(50)); }
+        assert!(s.contains("\"locked\":true") && s.contains("\"screen\":\"unlock\"") && !s.contains("Mira"), "the right password must NOT unlock an app the user already left: {s}");
+        // and the password is still good afterwards
+        call(&mut b, "secret", PW);
+        b.call("enter", &z(""));
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < end { s = call(&mut b, "snapshot", ""); if !s.contains("\"screen\":\"working\"") { break; } std::thread::sleep(Duration::from_millis(50)); }
+        assert!(s.contains("\"locked\":false") && s.contains("Mira"), "{s}");
+    }
+
+    #[test]
+    fn the_locked_screen_shows_its_own_error_bit_and_never_the_apps() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = bridge(d.path());
+        create(&mut b);
+        b.app.error = true; b.app.status = "something with Mira".into();
+        let s = call(&mut b, "lock", "");
+        assert!(s.contains("\"error\":false") && !s.contains("Mira"), "{s}");
+        call(&mut b, "secret", "wrong wrong wrong");
+        let s = call(&mut b, "enter", "");
+        assert!(s.contains("\"error\":true") && s.contains("Wrong password"), "a wrong password must be SHOWN as an error: {s}");
     }
 
     #[test]

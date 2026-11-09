@@ -54,7 +54,7 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     let locked = app.lock_auth();
     // while locked the status line is the lock's own text: events, alerts and contact names must never reach the lock screen
     w.f_str("status", if locked { app.lock_msg() } else { &app.status });
-    w.f_bool("error", app.error);
+    w.f_bool("error", if app.lock_auth() { app.lock_is_error() } else { app.error }); // while locked only the lock's own error bit
     w.f_opt_str("rejected", x.rejected);
     // typed secrets: counts only
     w.f_num("pw_chars", app.pw.chars() as i64);

@@ -57,7 +57,7 @@ fun SettingsScreen(
             InfoRow("Presence", "Online only while the app is open. A phone that is always on shows a daily pattern to anyone who knows your address.")
 
             SectionLabel("Danger zone")
-            Button(onClick = onLock, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().height(50.dp)) { Text("Lock now (wipe memory)") }
+            Button(onClick = onLock, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().height(50.dp)) { Text("Wipe now (erase from memory)") }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = { confirmPurge = true }, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().height(50.dp)) { Text("Purge everything…", color = SineTheme.colors.danger) }
             Spacer(Modifier.height(24.dp))

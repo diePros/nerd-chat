@@ -19,10 +19,12 @@ pub struct SpawnConfig {
     pub allow_disk: bool,
     /// Extra torrc lines, e.g. `UseBridges 1` / `Bridge obfs4 ...`. Single-line, validated.
     pub extra_torrc: Vec<String>,
+    /// The generation (see [`generation`]) read by the CALLER when it decided to start: a kill that happened between that decision and the spawn is then noticed. `None`: read it at the start.
+    pub generation: Option<u64>,
 }
 
 impl SpawnConfig {
-    pub fn new(tor_path: PathBuf) -> Self { Self { tor_path, runtime_base: None, allow_disk: false, extra_torrc: vec![] } }
+    pub fn new(tor_path: PathBuf) -> Self { Self { tor_path, runtime_base: None, allow_disk: false, extra_torrc: vec![], generation: None } }
 }
 
 /// First executable `tor` in PATH. Relative/empty PATH entries ('.', '') are ignored (no `./tor` hijack).
@@ -75,6 +77,9 @@ static LIVE: std::sync::Mutex<Vec<(u32, PathBuf)>> = std::sync::Mutex::new(Vec::
 /// SIGKILL every tor we spawned and delete its directory (state with guard fingerprints, consensus times, cookie), right now. For panic and purge.
 /// Bumped by every kill: a start that began before it and spawns tor AFTER it (a panic or a cancel that raced the start) sees the change and kills its own tor at once.
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current kill generation: read it BEFORE starting a thread that will start tor, and pass it in [`SpawnConfig::generation`].
+pub fn generation() -> u64 { GENERATION.load(std::sync::atomic::Ordering::SeqCst) }
 
 pub fn kill_spawned() {
     let v = {
@@ -154,7 +159,7 @@ fn private_dir(cfg: &SpawnConfig) -> Result<PathBuf, TorError> {
 
 impl SpawnedTor {
     pub fn start(cfg: &SpawnConfig) -> Result<Self, TorError> {
-        let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+        let generation = cfg.generation.unwrap_or_else(generation);
         let dir = private_dir(cfg)?;
         let result = (|| {
             let rc = torrc(&dir, std::process::id(), &cfg.extra_torrc)?;
@@ -208,6 +213,19 @@ mod tests {
     use super::*;
     /// the registry of live tors is process-wide: the tests that use it run one at a time
     static REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_kill_that_happens_before_the_start_reaches_the_spawn_is_noticed() {
+        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let base = tempfile::tempdir().unwrap();
+        let before = generation();          // the caller decides to start ...
+        kill_spawned();                     // ... a cancel or panic comes in before the start thread gets to spawn ...
+        let cfg = SpawnConfig { runtime_base: Some(base.path().into()), allow_disk: true, generation: Some(before), ..SpawnConfig::new("sleep".into()) };
+        let r = SpawnedTor::start(&cfg);    // ... so this start must refuse (and leave nothing behind), whatever tor it would have spawned
+        assert!(r.is_err());
+        assert_eq!(fs::read_dir(base.path()).unwrap().count(), 0, "no directory left");
+        assert_eq!(spawned_status(), (0, 0));
+    }
 
     #[test]
     fn kill_spawned_kills_the_process_and_removes_its_directory_and_the_status_sees_it() {

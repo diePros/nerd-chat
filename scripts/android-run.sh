@@ -12,9 +12,9 @@ for abi in x86_64 arm64-v8a; do [ -f "$ROOT/android/app/src/main/jniLibs/$abi/li
 if ! "$EMU" -list-avds | grep -qx "$AVD"; then
   echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n "$AVD" -k "system-images;android-36;default;x86_64" -d pixel_6 --force
   # avdmanager creates the device WITHOUT host keyboard input: typing on the PC keyboard would do nothing
-  sed -i 's/^hw.keyboard=.*/hw.keyboard=yes/' "$HOME/.android/avd/$AVD.avd/config.ini"
+  CFG="$HOME/.android/avd/$AVD.avd/config.ini"; sed -i '/^hw.keyboard=/d' "$CFG"; echo "hw.keyboard=yes" >> "$CFG"
 fi
-[ -f "$HOME/.android/avd/$AVD.avd/config.ini" ] && sed -i 's/^hw.keyboard=.*/hw.keyboard=yes/' "$HOME/.android/avd/$AVD.avd/config.ini"
+if [ -f "$HOME/.android/avd/$AVD.avd/config.ini" ]; then CFG="$HOME/.android/avd/$AVD.avd/config.ini"; sed -i '/^hw.keyboard=/d' "$CFG"; echo "hw.keyboard=yes" >> "$CFG"; fi
 if ! "$ADB" devices | grep -q "emulator-.*device"; then
   OPTS="-no-snapshot -no-audio"; [ "${1:-}" = "--headless" ] && OPTS="$OPTS -no-window -no-boot-anim -gpu swiftshader_indirect"
   nohup "$EMU" -avd "$AVD" $OPTS >/tmp/sineloco-emulator.log 2>&1 &

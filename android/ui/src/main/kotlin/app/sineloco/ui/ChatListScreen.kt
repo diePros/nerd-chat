@@ -41,7 +41,7 @@ fun ChatListScreen(
             Box {
                 IconButton(onClick = { menu = true }) { Icon(SineIcons.More, "Menu", SineTheme.colors.onBar) }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Lock now (wipe memory)") }, onClick = { menu = false; onLock() })
+                    DropdownMenuItem(text = { Text("Wipe now (erase from memory)") }, onClick = { menu = false; onLock() })
                 }
             }
         }

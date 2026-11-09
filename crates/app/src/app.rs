@@ -105,7 +105,7 @@ fn history_unsafe_fs(dir: &Path) -> Option<&'static str> {
 #[cfg(target_os = "android")]
 fn history_unsafe_fs(_dir: &Path) -> Option<&'static str> { None }
 
-fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<dyn Transport>, String> {
+fn build_tor_transport(c: &TorCfg, generation: u64, progress: &mut dyn FnMut(u8)) -> Result<Box<dyn Transport>, String> {
     let setup = match &c.control {
         Some(ctl) => TorSetup::External {
             control: ctl.clone(),
@@ -119,6 +119,7 @@ fn build_tor_transport(c: &TorCfg, progress: &mut dyn FnMut(u8)) -> Result<Box<d
             let mut sc = SpawnConfig::new(path);
             sc.runtime_base = c.runtime_base.clone();
             sc.allow_disk = c.allow_disk;
+            sc.generation = Some(generation);
             TorSetup::Spawn(sc)
         }
     };
@@ -381,6 +382,10 @@ pub struct App {
     lock_auth: bool,
     /// A lock was requested while the screen could not take it (a key derivation is running): it is applied the moment the app is back on the main screen.
     lock_pending: bool,
+    /// Lets a start that is under way know that it was cancelled.
+    start_cancel: Option<Arc<AtomicBool>>,
+    /// The locked screen's own message is an error (wrong password, delay): the ONLY error bit the locked snapshot may carry.
+    lock_err: bool,
     /// The ONLY status text the locked screen may show (set by the lock itself, never by events, alerts or contact names).
     lock_msg: String,
     /// Lines scrolled up from the newest message (the UI clamps what it can show).
@@ -429,7 +434,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, start_cancel: None, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -952,6 +957,11 @@ impl App {
         self.kdf_creating = false;
         let back = std::mem::replace(&mut self.kdf_back, Screen::Unlock);
         match msg {
+            KdfMsg::LockChecked(Ok(())) if self.lock_pending => {
+                // the password was right, but the user left the screen while it was being checked: the lock stays
+                self.lock_pending = false; self.failures = 0; self.locked_until = None;
+                self.screen = back; self.lock_msg = "Locked. Enter the vault password.".into(); self.lock_err = false;
+            }
             KdfMsg::LockChecked(Ok(())) => {
                 // the password was right: that is all this derivation was for; the running state stays exactly as it is
                 self.lock_auth = false; self.locked = false; self.failures = 0; self.locked_until = None;
@@ -965,6 +975,7 @@ impl App {
                     if self.failures >= 3 { self.locked_until = Some(Instant::now() + Duration::from_secs(5u64 << (self.failures - 3).min(6))); }
                     self.lock_msg = "Wrong password or keyfile.".into();
                 } else { self.lock_msg = format!("Cannot check the password: {e}"); }
+                self.lock_err = true;
             }
             KdfMsg::Opened(Ok((vf, info))) => {
                 self.vf = Some(vf);
@@ -1017,15 +1028,16 @@ impl App {
     /// unlock screen. Works from EVERY screen: an open prompt or the safety-number view is closed first (nothing is applied by closing it), and while a key derivation or other
     /// work is running the lock is remembered and applied the moment that is over. Not possible without a password (a RAM-only vault).
     pub fn lock(&mut self) {
-        if self.cfg.path.is_none() || self.locked { return; }
-        // a derivation is running (the first unlock included, when no vault is open yet): remember the request, it is applied when the work is over
+        if self.cfg.path.is_none() { return; }
+        // a derivation is running (the first unlock, or the LOCK'S OWN password check): remember the request, it is applied when the work is over
         if self.screen == Screen::Working { self.lock_pending = true; return; }
-        if self.vf.is_none() { return; }
+        if self.locked || self.vf.is_none() { return; }
         match self.screen {
             Screen::Wiped | Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Working => return,
             Screen::Main => {}
             Screen::Verify => self.key_verify(Key::Esc),
-            Screen::Prompt(_) => self.key_prompt(Key::Esc),
+            // closed WITHOUT key handling: Esc on a prompt can answer it (the in-person question saves the contact) or discard a pairing the peer already committed
+            Screen::Prompt(_) => { self.screen = Screen::Main; self.input.clear(); self.code_buf.clear(); }
             Screen::Help => self.screen = Screen::Main,
         }
         self.lock_pending = false;
@@ -1033,11 +1045,12 @@ impl App {
         self.screen = Screen::Main;
         self.mode = Mode::Normal; self.select = None; self.quit_armed = false;
         self.pw.clear(); self.input.clear(); self.code_buf.clear();
-        self.lock_msg = "Locked. Enter the vault password.".into();
+        self.lock_msg = "Locked. Enter the vault password.".into(); self.lock_err = false;
     }
     pub fn lock_auth(&self) -> bool { self.locked && self.lock_auth }
     /// The only status text the locked screen may show.
     pub fn lock_msg(&self) -> &str { &self.lock_msg }
+    pub fn lock_is_error(&self) -> bool { self.lock_err }
 
     /// Privacy screen: nothing but unlock/quit (and the panic key, handled before this). With `lock_auth`: a password prompt.
     fn key_lock(&mut self, k: Key) -> Action {
@@ -1046,13 +1059,13 @@ impl App {
             if Self::secret_edit(&mut self.pw, k) { return Action::None; }
             if k == Key::Enter {
                 if let Some(t) = self.locked_until {
-                    if Instant::now() < t { self.lock_msg = format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1); self.pw.clear(); return Action::None; }
+                    if Instant::now() < t { self.lock_msg = format!("Too many failures: wait {} s.", (t - Instant::now()).as_secs() + 1); self.lock_err = true; self.pw.clear(); return Action::None; }
                 }
                 let Some(check) = self.vf.as_ref().map(|v| v.credential_check()) else { return Action::None };
                 let pw = Zeroizing::new(self.pw.as_bytes().to_vec());
                 self.pw.clear();
                 let kf = self.cfg.keyfile.clone();
-                self.lock_msg = "Checking the password...".into();
+                self.lock_msg = "Checking the password...".into(); self.lock_err = false;
                 self.start_kdf(Screen::Main, move || KdfMsg::LockChecked(check.verify(&pw, kf.as_deref().map(|v| v.as_slice()))));
             }
             return Action::None;
@@ -1927,6 +1940,7 @@ impl App {
         match self.online.clone() {
             Online::Starting(_) => {
                 // killing tor ends the start thread's bootstrap with an error that goes nowhere (its channel is dropped); a tor it spawns a moment later is killed by the generation check
+                if let Some(c) = self.start_cancel.take() { c.store(true, Ordering::SeqCst); }
                 sine_loco_net::tor::spawn::kill_spawned();
                 self.start_rx = None;
                 self.online = Online::Offline;
@@ -1942,6 +1956,8 @@ impl App {
                     return false;
                 }
                 self.offline_armed = false;
+                // forced (the user is getting out NOW): our tor dies at once, so that nothing stays reachable while the orderly teardown runs, or if the process is frozen part-way
+                if force { sine_loco_net::tor::spawn::kill_spawned(); }
                 if self.pair_ctl.as_ref().is_some_and(|c| c.tor.is_some()) { self.cancel_pairing(); } // the pairing service lives in the engine's Tor: it goes with it
                 // tear down on a worker so the UI (and the panic key) stay responsive while onion services are removed
                 let (tx, rx) = channel();
@@ -1972,11 +1988,17 @@ impl App {
         self.started_outbox = self.history.as_ref().map(|h| h.all_queued_mids().into_iter().map(|(_, m)| m).collect()).unwrap_or_default();
         let (factory, tor, timing) = (self.cfg.transport.clone(), self.cfg.tor.clone(), self.cfg.timing);
         let (tx, rx) = channel();
+        // decided HERE, on the caller's thread: a cancel or panic that comes in before the start thread reaches its spawn must still win (generation), and an external tor, which
+        // there is nothing to kill for, is stopped by this flag before the engine starts (no onion service is created, no contact is dialled)
+        let generation = sine_loco_net::tor::spawn::generation();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.start_cancel = Some(cancel.clone());
         thread::spawn(move || {
             let txp = tx.clone();
             let mut progress = move |p: u8| { let _ = txp.send(StartMsg::Progress(p)); };
-            let r = match factory { Some(f) => f(&mut progress), None => build_tor_transport(&tor, &mut progress) };
+            let r = match factory { Some(f) => f(&mut progress), None => build_tor_transport(&tor, generation, &mut progress) };
             let _ = match r {
+                Ok(t) if cancel.load(Ordering::SeqCst) => { drop(t); Ok(()) }
                 Ok(t) => tx.send(StartMsg::Ready(Engine::start(t, contacts, timing))),
                 Err(e) => tx.send(StartMsg::Failed(e)),
             };

@@ -9,7 +9,7 @@ plugins {
 // ---- the Rust core: libsineloco_bridge.so for each ABI, built with cargo + the NDK linker and packaged as native libraries ----
 // -Pdemo=true: the in-memory demo backend. Only the literal value `true` counts (a `demo=false` or an empty value must not turn it on), and a RELEASE build refuses it.
 val demoBuild = providers.gradleProperty("demo").map { it.equals("true", ignoreCase = true) }.orElse(false).get()
-gradle.taskGraph.whenReady { if (demoBuild && allTasks.any { it.project.path == ":app" && it.name.contains("Release") && it.name.startsWith("assemble", true) }) throw GradleException("-Pdemo=true must never be used for a release build: it would ship the fake backend (any password opens it)") }
+gradle.taskGraph.whenReady { if (demoBuild && allTasks.any { it.project.path == ":app" && it.name.contains("Release", ignoreCase = true) }) throw GradleException("-Pdemo=true must never be used for a release build: it would ship the fake backend (any password opens it)") }
 val ndkVersion = "29.0.14206865"
 val repoRoot = rootDir.parentFile
 val sdkDir: String? = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
@@ -116,6 +116,12 @@ fun registerVerifyLibtor(name: String, strict: Boolean) = tasks.register(name) {
                 val got = MessageDigest.getInstance("SHA-256").digest(f.readBytes()).joinToString("") { "%02x".format(it) }
                 if (got != want) problems += "$rel: sha256 $got is not the pinned $want"
             }
+        }
+        // every native library that would be packaged must be a pinned one: an extra .so dropped into jniLibs would ship unchecked
+        val pinned = pins.readLines().filter { it.isNotBlank() }.map { it.trim().split(Regex("\\s+"), limit = 2)[1] }.toSet()
+        libs.walkTopDown().filter { it.isFile && it.name.endsWith(".so") }.forEach { f ->
+            val rel = f.relativeTo(libs).path
+            if (rel !in pinned) problems += "$rel is not in android/libtor.sha256 (unpinned native library)"
         }
         if (problems.isNotEmpty()) {
             val msg = "libtor.so does not match android/libtor.sha256:\n  " + problems.joinToString("\n  ")
