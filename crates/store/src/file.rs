@@ -197,6 +197,19 @@ impl VaultFile {
         Ok((Self { path: Some(path.to_path_buf()), counter_path: Some(cpath), vault, store }, info))
     }
 
+    /// Touch the vault file and its counter file (modification time = now), without writing any data. The grid calls this on every tick, so that the times of these
+    /// files only ever say "the app was running until about T" (a SAVE, a rare management event such as adding a contact, is the one thing that still shows its own moment).
+    pub fn touch(&self) -> Result<(), StoreError> {
+        for p in self.path.iter().chain(self.counter_path.iter()) {
+            let f = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(p).map_err(io)?;
+            f.set_modified(std::time::SystemTime::now()).map_err(io)?;
+        }
+        Ok(())
+    }
+
+    /// A key for another file that belongs to this vault (the history file), derived from the vault's data key.
+    pub fn subkey(&self, label: &[u8]) -> zeroize::Zeroizing<[u8; 32]> { self.vault.subkey(label) }
+
     /// Persist the store (atomic) and advance the external rollback counter.
     /// RAM-only vaults skip all disk I/O.
     pub fn save(&mut self) -> Result<(), StoreError> { self.save_unless(&AtomicBool::new(false)) }

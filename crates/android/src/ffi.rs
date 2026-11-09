@@ -4,9 +4,10 @@
 #![allow(unsafe_code)]
 
 use crate::bridge::{Bridge, Options};
+use nerd_chat_app::app::Persist;
 use jni::{
     objects::{JCharArray, JObject, JString},
-    sys::{jboolean, jstring, JNI_TRUE},
+    sys::{jboolean, jint, jstring, JNI_TRUE},
     JNIEnv,
 };
 use std::{path::PathBuf, sync::Mutex};
@@ -25,14 +26,14 @@ fn err_json(msg: &str) -> String {
     w.finish().to_string()
 }
 
-/// `nInit(dir: String, lowMem: Boolean, torPath: String?, keepOutboxDefault: Boolean): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
+/// `nInit(dir: String, lowMem: Boolean, torPath: String?, historyDefault: Int): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
 #[no_mangle]
-pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, keep_outbox: jboolean) -> jstring {
+pub extern "system" fn Java_app_nerdchat_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, history_default: jint) -> jstring {
     let dir: String = match env.get_string(&dir) { Ok(s) => s.into(), Err(_) => return out(&mut env, &err_json("bad directory argument")) };
     let tor_path = if tor.is_null() { None } else { env.get_string(&tor).ok().map(|s| PathBuf::from(String::from(s))) };
     let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(old) = g.as_mut() { old.wipe(); } // a second init must not leave a running core (or a half-written new vault) behind
-    let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path, keep_outbox_default: keep_outbox == JNI_TRUE }) {
+    let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path, persist_default: match history_default { 1 => Persist::Outbox, 2 => Persist::Day, 3 => Persist::Week, _ => Persist::Off } }) {
         Ok(b) => { let s = b.snapshot(None); *g = Some(b); s.to_string() }
         Err(e) => err_json(&e),
     };

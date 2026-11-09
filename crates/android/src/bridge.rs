@@ -3,7 +3,7 @@
 //! (a typed letter anywhere else would be a one-key command, e.g. `q` or `o`), and only an allowlist of commands can be sent.
 use crate::snapshot::{snapshot, Extra};
 use nerd_chat_app::{
-    app::{Action, App, Config, Key, Mode, Online, Pane, Prompt, Screen},
+    app::{Action, App, Config, Key, Mode, Online, Pane, Persist, Prompt, Screen},
     startup, vault_path,
 };
 use nerd_chat_vault::Profile;
@@ -22,7 +22,7 @@ pub struct Options {
     /// the tor executable to start (`libtor.so` in the app's native library directory); None = the core looks in PATH and will fail
     pub tor_path: Option<PathBuf>,
     /// what the encrypted outbox does until the user chooses (the phone turns it on: the OS kills the app at will); the user's choice is stored in the vault and wins
-    pub keep_outbox_default: bool,
+    pub persist_default: Persist,
 }
 
 pub struct Bridge {
@@ -37,10 +37,10 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(dir: &Path, o: Options) -> Result<Self, String> {
-        Self::with_profile(dir, o.tor_path, if o.low_mem { Profile::LowMem } else { Profile::Strong }, o.keep_outbox_default)
+        Self::with_profile(dir, o.tor_path, if o.low_mem { Profile::LowMem } else { Profile::Strong }, o.persist_default)
     }
 
-    pub(crate) fn with_profile(dir: &Path, tor_path: Option<PathBuf>, profile: Profile, keep_outbox_default: bool) -> Result<Self, String> {
+    pub(crate) fn with_profile(dir: &Path, tor_path: Option<PathBuf>, profile: Profile, persist_default: Persist) -> Result<Self, String> {
         // `--no-sandbox`: the core's file cleaner re-executes /proc/self/exe, which on Android is app_process, not us. The phone app exposes no file
         // feature, so the cleaner is never called; the isolated-process cleaner (docs/ANDROID_PORT.md 3.3) replaces this before files arrive.
         let _ = startup::startup(&["nerd-chat".into(), "--no-sandbox".into()]);
@@ -50,7 +50,7 @@ impl Bridge {
         let mut cfg = Config::new(Some(path), None, None, profile);
         cfg.tor.tor_path = tor_path.clone();
         cfg.can_host = true;
-        cfg.keep_outbox_default = keep_outbox_default;
+        cfg.persist_default = persist_default;
         Ok(Self { app: App::new(cfg), user_offline: false, started: false, retry_at: None, retries: 0, auto_online: tor_path.is_some(), purge: None })
     }
 
@@ -196,9 +196,10 @@ impl Bridge {
                 if !self.in_main() { return Err(NOT_NOW); }
                 self.ensure_normal(); self.app.handle(Key::Char('z'));
             }
-            "keep_outbox" => {
+            "persist" => {
                 if !self.in_main() { return Err(NOT_NOW); }
-                self.app.set_keep_outbox(arg.as_str() == "1");
+                let p = match arg.as_str() { "off" => Persist::Off, "outbox" => Persist::Outbox, "day" => Persist::Day, "week" => Persist::Week, _ => return Err("unknown setting") };
+                self.app.set_persist(p);
             }
             "panic" => { let _ = self.app.handle(Key::F12); }
             "purge" => {
@@ -220,8 +221,8 @@ mod tests {
     use std::time::Duration;
 
     fn z(s: &str) -> Zeroizing<String> { Zeroizing::new(s.to_string()) }
-    fn bridge(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, false).unwrap() }
-    fn bridge_keep(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, true).unwrap() }
+    fn bridge(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Off).unwrap() }
+    fn bridge_keep(dir: &Path) -> Bridge { Bridge::with_profile(dir, None, Profile::InsecureTest, Persist::Day).unwrap() }
     /// Run `op` and wait until the (threaded) key derivation is over.
     fn call(b: &mut Bridge, op: &str, arg: &str) -> String {
         let mut s = b.call(op, &z(arg));
@@ -337,7 +338,7 @@ mod tests {
     #[test]
     fn going_online_without_a_tor_executable_fails_with_a_message_instead_of_hanging() {
         let d = tempfile::tempdir().unwrap();
-        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, false).unwrap();
+        let mut b = Bridge::with_profile(d.path(), Some(PathBuf::from("/nonexistent/tor")), Profile::InsecureTest, Persist::Off).unwrap();
         create(&mut b);
         // the bridge connects by itself because a tor path was configured: it must end in a visible failure, not a stuck "starting"
         let mut s = String::new();
@@ -346,29 +347,32 @@ mod tests {
     }
 
     #[test]
-    fn the_encrypted_outbox_default_comes_from_the_options_and_the_users_choice_is_stored() {
+    fn what_is_kept_has_a_default_from_the_options_and_the_users_choice_is_stored() {
         let d = tempfile::tempdir().unwrap();
         let mut b = bridge_keep(d.path());
         create(&mut b);
-        assert!(b.snapshot(None).contains("\"keep_outbox\":true"), "the phone's default is on until the user chooses");
-        let s = call(&mut b, "keep_outbox", "0");
-        assert!(s.contains("\"keep_outbox\":false") && s.contains("\"rejected\":null"), "{s}");
+        assert!(b.snapshot(None).contains("\"persist\":\"day\""), "the phone's default is a day until the user chooses");
+        let s = call(&mut b, "persist", "off");
+        assert!(s.contains("\"persist\":\"off\"") && s.contains("\"rejected\":null"), "{s}");
         drop(b);
         // the same default, a second run: the stored choice wins
         let mut b = bridge_keep(d.path());
         call(&mut b, "secret", PW);
         let s = call(&mut b, "enter", "");
-        assert!(s.contains("\"screen\":\"main\"") && s.contains("\"keep_outbox\":false"), "the choice survived the restart: {s}");
-        let s = call(&mut b, "keep_outbox", "1");
-        assert!(s.contains("\"keep_outbox\":true"), "{s}");
+        assert!(s.contains("\"screen\":\"main\"") && s.contains("\"persist\":\"off\""), "the choice survived the restart: {s}");
+        for (arg, want) in [("outbox", "outbox"), ("week", "week"), ("day", "day")] {
+            let s = call(&mut b, "persist", arg);
+            assert!(s.contains(&format!("\"persist\":\"{want}\"")), "{arg}: {s}");
+        }
+        assert!(call(&mut b, "persist", "forever").contains("\"rejected\":\"unknown setting\""));
     }
 
     #[test]
-    fn the_outbox_switch_is_refused_outside_the_main_screen() {
+    fn the_setting_is_refused_outside_the_main_screen() {
         let d = tempfile::tempdir().unwrap();
         let mut b = bridge(d.path());
-        let s = call(&mut b, "keep_outbox", "1");
-        assert!(s.contains("\"rejected\":\"not possible on this screen\"") && s.contains("\"keep_outbox\":false"), "{s}");
+        let s = call(&mut b, "persist", "day");
+        assert!(s.contains("\"rejected\":\"not possible on this screen\"") && s.contains("\"persist\":\"off\""), "{s}");
     }
 
     // ---- regressions found by the adversarial review of the bridge (review 30)

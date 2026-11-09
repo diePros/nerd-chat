@@ -1,7 +1,7 @@
 //! The visible state of the core as one JSON document (`"v": 1`). Only what a screen needs: passwords and the pairing code never appear
 //! (only how many characters were typed), chat lines only for the OPEN chat, like the Linux GUI.
 use crate::json::W;
-use nerd_chat_app::app::{App, Mode, Online, Pane, Prompt, Screen};
+use nerd_chat_app::app::{App, Mode, Online, Pane, Persist, Prompt, Screen};
 use nerd_chat_core::trust::Trust;
 use std::time::Instant;
 use zeroize::Zeroizing;
@@ -60,7 +60,7 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     w.f_num("code_chars", app.code_chars() as i64);
     w.f_bool("privacy_locked", app.locked);
     w.f_bool("ram_only", app.is_ram_only());
-    w.f_bool("keep_outbox", app.keep_outbox());
+    w.f_str("persist", match app.persist() { Persist::Off => "off", Persist::Outbox => "outbox", Persist::Day => "day", Persist::Week => "week" });
     w.f_bool("user_offline", x.user_offline);
 
     let (online, pct, fail) = match &app.online {

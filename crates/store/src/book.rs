@@ -1,4 +1,4 @@
-use crate::StoreError;
+use crate::{history::Persist, StoreError};
 use nerd_chat_core::{bundle::{Bundle, KEM_PUB_LEN}, identity::{ContactIdentity, SECRET_LEN}, trust::Trust};
 use zeroize::Zeroizing;
 
@@ -68,8 +68,9 @@ impl std::fmt::Debug for Contact {
 #[derive(Default, Debug)]
 pub struct Store {
     pub contacts: Vec<Contact>,
-    /// The user's choice to keep unconfirmed texts in the vault (`None` = never chosen: the front end's default applies).
-    pub keep_outbox: Option<bool>,
+    /// What the user chose to keep on the device (`None` = never chosen: the front end's default applies). The messages themselves live in the HISTORY file (`history.rs`),
+    /// not in this payload; the per-contact `outbox` below is the older place for unconfirmed texts and is only read (and moved to the history file) now.
+    pub persist: Option<Persist>,
 }
 
 fn valid_name(n: &str) -> bool {
@@ -183,11 +184,11 @@ impl Store {
         // reserve the final size up front: a growing Vec would leave copies of keys and saved messages in freed heap
         let mut v = Zeroizing::new(Vec::with_capacity(self.encoded_size()));
         // SBS6 only when the feature is in use: every other vault stays SBS5 and stays readable by older binaries
-        let sbs6 = self.keep_outbox.is_some() || self.contacts.iter().any(|c| !c.outbox.is_empty());
+        let sbs6 = self.persist.is_some() || self.contacts.iter().any(|c| !c.outbox.is_empty());
         v.extend_from_slice(if sbs6 { MAGIC_V6 } else { MAGIC });
         v.extend_from_slice(&(self.contacts.len() as u16).to_be_bytes());
-        // SBS6: vault flags: bit0 = the outbox choice was made, bit1 = its value
-        if sbs6 { v.push(self.keep_outbox.is_some() as u8 | ((self.keep_outbox == Some(true)) as u8) << 1); }
+        // SBS6: vault flags: bit0 = a choice was made, bits1-2 = what to keep (0 nothing, 1 unsent texts only, 2 one day, 3 one week; 0/1 are what the first SBS6 wrote as off/on)
+        if sbs6 { v.push(self.persist.is_some() as u8 | (match self.persist { None | Some(Persist::Off) => 0, Some(Persist::Outbox) => 1, Some(Persist::Day) => 2, Some(Persist::Week) => 3 }) << 1); }
         for c in &self.contacts {
             v.extend_from_slice(&c.id);
             v.push(c.name.len() as u8);
@@ -231,8 +232,8 @@ impl Store {
         let mut s = Store::new();
         if v6 {
             let vf = r.take(1)?[0];
-            if vf & !0b11 != 0 || (vf & 0b10 != 0 && vf & 1 == 0) { return Err(StoreError::Corrupt); } // unknown bits, or a value without 'set'
-            if vf & 1 != 0 { s.keep_outbox = Some(vf & 0b10 != 0); }
+            if vf & !0b111 != 0 || (vf & 0b110 != 0 && vf & 1 == 0) { return Err(StoreError::Corrupt); } // unknown bits, or a value without 'set'
+            if vf & 1 != 0 { s.persist = Some(match (vf >> 1) & 3 { 0 => Persist::Off, 1 => Persist::Outbox, 2 => Persist::Day, _ => Persist::Week }); }
         }
         for _ in 0..n {
             let id: [u8; 8] = r.take(8)?.try_into().unwrap();
@@ -325,24 +326,25 @@ mod tests {
         let mut s = Store::new(); paired(&mut s, "alice");
         assert_eq!(&s.encode()[..4], b"SBS5", "untouched vaults keep the old format");
         let d = Store::decode(&s.encode()).unwrap();
-        assert_eq!(d.keep_outbox, None); assert!(d.contacts[0].outbox.is_empty());
+        assert_eq!(d.persist, None); assert!(d.contacts[0].outbox.is_empty());
     }
 
     #[test]
     fn the_outbox_roundtrips_in_sbs6_in_order_with_its_flags() {
         let mut s = Store::new();
         let a = paired(&mut s, "alice"); let b = paired(&mut s, "bob");
-        s.keep_outbox = Some(true);
+        s.persist = Some(Persist::Outbox);
         s.queue_outbox(a, [1; 8], "first \u{1F600}").unwrap(); s.queue_outbox(a, [2; 8], "second").unwrap(); s.queue_outbox(b, [3; 8], "for bob").unwrap();
         let enc = s.encode();
         assert_eq!(&enc[..4], b"SBS6");
         let d = Store::decode(&enc).unwrap();
-        assert_eq!(d.keep_outbox, Some(true));
+        assert_eq!(d.persist, Some(Persist::Outbox));
         assert_eq!(d.contacts[a].outbox.iter().map(|m| (m.mid, m.text.to_string())).collect::<Vec<_>>(), vec![([1; 8], "first \u{1F600}".to_string()), ([2; 8], "second".to_string())]);
         assert_eq!(d.contacts[b].outbox.len(), 1, "an outbox belongs to one contact only");
         // an explicit "off" is remembered too (so the front end's default does not come back)
-        let mut off = Store::new(); paired(&mut off, "carol"); off.keep_outbox = Some(false);
-        assert_eq!(Store::decode(&off.encode()).unwrap().keep_outbox, Some(false));
+        let mut off = Store::new(); paired(&mut off, "carol"); off.persist = Some(Persist::Off);
+        assert_eq!(Store::decode(&off.encode()).unwrap().persist, Some(Persist::Off));
+        for p in [Persist::Day, Persist::Week] { let mut s = Store::new(); paired(&mut s, "dan"); s.persist = Some(p); assert_eq!(Store::decode(&s.encode()).unwrap().persist, Some(p), "{p:?}"); }
     }
 
     #[test]
@@ -386,13 +388,14 @@ mod tests {
     #[test]
     fn hostile_sbs6_blobs_are_refused() {
         let mut s = Store::new(); let a = paired(&mut s, "alice");
-        s.keep_outbox = Some(true); s.queue_outbox(a, [7; 8], "ab").unwrap();
+        s.persist = Some(Persist::Outbox); s.queue_outbox(a, [7; 8], "ab").unwrap();
         let enc = s.encode().to_vec();
         let at = enc.len() - (8 + 2 + 2);                                // mid(8) len(2) "ab"(2)
         let mutate = |f: &dyn Fn(&mut Vec<u8>)| { let mut t = enc.clone(); f(&mut t); Store::decode(&t) };
         assert!(mutate(&|_| {}).is_ok());
-        assert!(mutate(&|t| t[6] = 0b100).is_err(), "unknown vault flag");
+        assert!(mutate(&|t| t[6] = 0b1000).is_err(), "unknown vault flag");
         assert!(mutate(&|t| t[6] = 0b10).is_err(), "a value without 'set'");
+        assert!(mutate(&|t| t[6] = 0b101).is_ok(), "mode 'day' with 'set' is a valid flag byte");
         assert!(mutate(&|t| { t[at + 8] = 0; t[at + 9] = 0; }).is_err(), "zero length");
         assert!(mutate(&|t| t[at + 9] = 3).is_err(), "length larger than the data left");
         assert!(mutate(&|t| t[at + 10] = 0xff).is_err(), "invalid UTF-8");
@@ -401,7 +404,7 @@ mod tests {
         // count above the cap
         assert!(mutate(&|t| { t[at - 2] = 0; t[at - 1] = (MAX_OUTBOX + 1) as u8; }).is_err());
         // an outbox for a contact without a peer, and a duplicate id
-        let mut np = Store::new(); let c = np.add_contact("nopeer").unwrap(); np.keep_outbox = Some(true);
+        let mut np = Store::new(); let c = np.add_contact("nopeer").unwrap(); np.persist = Some(Persist::Outbox);
         np.contacts[c].outbox.push(OutMsg { mid: [1; 8], text: Zeroizing::new("x".into()) });
         assert!(Store::decode(&np.encode()).is_err());
         let mut dup = Store::new(); let d = paired(&mut dup, "dave");

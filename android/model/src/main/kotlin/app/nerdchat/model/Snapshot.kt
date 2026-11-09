@@ -77,7 +77,7 @@ object Snapshot {
             stage = stage, status = m.str("status") ?: "", statusIsError = m.bool("error"), pwChars = m.int("pw_chars"),
             tor = tor, online = online, chats = contacts, messages = messages, torOffer = offer,
             pairingWaiting = m.bool("pairing_waiting"), verifyNumber = m.str("verify_number"),
-            alerts = m.list("alerts").mapNotNull { it.str("text") }, rejected = m.str("rejected"), keepOutbox = m.bool("keep_outbox"), promptOpen = m.str("screen") == "prompt",
+            alerts = m.list("alerts").mapNotNull { it.str("text") }, rejected = m.str("rejected"), persist = when (m.str("persist")) { "outbox" -> Persist.Outbox; "day" -> Persist.Day; "week" -> Persist.Week; else -> Persist.Off }, promptOpen = m.str("screen") == "prompt",
         )
     }
 }

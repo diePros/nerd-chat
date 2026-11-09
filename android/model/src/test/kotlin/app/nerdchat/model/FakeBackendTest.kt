@@ -67,11 +67,10 @@ class FakeBackendTest {
         assertEquals("Sam", o.forContact); assertTrue(o.link.startsWith("nerdchat:pair/")); assertEquals(12, o.code.length)
     }
 
-    @Test fun theEncryptedOutboxSwitchIsRememberedInState() {
-        val b = FakeBackend(); assertFalse(b.state.value.keepOutbox)
-        b.setKeepOutbox(true); assertTrue(b.state.value.keepOutbox)
-        b.setKeepOutbox(false); assertFalse(b.state.value.keepOutbox)
-        assertTrue(FakeBackend(keepOutbox = true).state.value.keepOutbox, "the phone's default")
+    @Test fun whatIsKeptIsRememberedInState() {
+        val b = FakeBackend(); assertEquals(Persist.Off, b.state.value.persist)
+        for (p in Persist.entries) { b.setPersist(p); assertEquals(p, b.state.value.persist) }
+        assertEquals(Persist.Day, FakeBackend(persist = Persist.Day).state.value.persist, "the phone's default")
     }
 
     @Test fun modelHasNoTimestampsOrReadState() {

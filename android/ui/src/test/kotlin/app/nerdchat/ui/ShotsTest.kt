@@ -39,7 +39,7 @@ class ShotsTest {
         m["list"] = render("$tag-list") { NerdTheme(p, mode) { ChatListScreen(demo.chats, TorState.Ready, true, {}, {}, {}) } }
         m["chat"] = render("$tag-chat") { NerdTheme(p, mode) { ChatScreen(contact(0), demo.messages[0]!!, TorState.Ready, true, {}, {}, {}) } }
         m["unverified"] = render("$tag-chat-unverified") { NerdTheme(p, mode) { ChatScreen(contact(1), demo.messages[1]!!, TorState.Ready, true, {}, {}, {}) } }
-        m["settings"] = render("$tag-settings") { NerdTheme(p, mode) { SettingsScreen(p, mode, true, TorState.Ready, true, {}, {}, {}, {}, {}, {}) } }
+        m["settings"] = render("$tag-settings") { NerdTheme(p, mode) { SettingsScreen(p, mode, true, TorState.Ready, Persist.Day, {}, {}, {}, {}, {}, {}) } }
         return m
     }
 
@@ -65,8 +65,8 @@ class ShotsTest {
         render("fern-light-details-verify") { NerdTheme(p, DarkMode.Light) { DetailsScreen(contact(1), "48213 07791 36502 91844 20365 77018", {}, {}, {}) } }
         render("fern-light-details-verified") { NerdTheme(p, DarkMode.Light) { DetailsScreen(contact(0), null, {}, {}, {}) } }
         render("fern-light-chat-offline-outbox") { NerdTheme(p, DarkMode.Light) {
-            ChatScreen(contact(0), demo.messages[0]!! + Message(99, true, "Writing this while offline: it waits, encrypted.", Delivery.Queued), TorState.Off, false, {}, {}, {}, keepOutbox = true) } }
-        render("fern-dark-settings-outbox") { NerdTheme(p, DarkMode.Dark) { SettingsScreen(p, DarkMode.Dark, true, TorState.Ready, true, {}, {}, {}, {}, {}, {}) } }
+            ChatScreen(contact(0), demo.messages[0]!! + Message(99, true, "Writing this while offline: it waits, encrypted.", Delivery.Queued), TorState.Off, false, {}, {}, {}, persist = Persist.Day) } }
+        render("fern-dark-settings-outbox") { NerdTheme(p, DarkMode.Dark) { SettingsScreen(p, DarkMode.Dark, true, TorState.Ready, Persist.Day, {}, {}, {}, {}, {}, {}) } }
         render("fern-light-empty") { NerdTheme(p, DarkMode.Light) { ChatListScreen(emptyList(), TorState.Off, false, {}, {}, {}) } }
     }
 

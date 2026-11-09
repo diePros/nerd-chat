@@ -19,12 +19,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.nerdchat.model.Palette
 import app.nerdchat.model.Palettes
+import app.nerdchat.model.Persist
 import app.nerdchat.model.TorState
 
 @Composable
 fun SettingsScreen(
-    palette: Palette, mode: DarkMode, online: Boolean, tor: TorState = TorState.Off, keepOutbox: Boolean = false,
-    onPalette: (Palette) -> Unit, onMode: (DarkMode) -> Unit, onOnline: (Boolean) -> Unit, onKeepOutbox: (Boolean) -> Unit = {},
+    palette: Palette, mode: DarkMode, online: Boolean, tor: TorState = TorState.Off, persist: Persist = Persist.Off,
+    onPalette: (Palette) -> Unit, onMode: (DarkMode) -> Unit, onOnline: (Boolean) -> Unit, onPersist: (Persist) -> Unit = {},
     onLock: () -> Unit, onPurge: () -> Unit,
 ) {
     var confirmPurge by remember { mutableStateOf(false) }
@@ -51,7 +52,7 @@ fun SettingsScreen(
                 TorState.Ready -> Text("Tor is connected.", color = NerdTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp))
                 TorState.Off -> {}
             }
-            ToggleRow("Keep unsent messages", "A message your contact has not confirmed yet is kept in your password-locked vault and sent again until it arrives. It survives a restart and lets you write while offline. Costs: the vault file changes whenever you send or a message arrives, and an old copy may stay in flash memory.", keepOutbox, onKeepOutbox)
+            PersistPicker(persist, onPersist)
             InfoRow("Bridges", "Not configured. Needed where Tor is blocked (comes with the Tor integration).")
             InfoRow("Presence", "Online only while the app is open. A phone that is always on shows a daily pattern to anyone who knows your address.")
 
@@ -92,6 +93,37 @@ private fun PaletteCard(p: Palette, selected: Boolean, dark: Boolean, onClick: (
             Text(p.tagline, color = NerdTheme.colors.muted, fontSize = 13.sp)
         }
         if (selected) Icon(NerdIcons.Check, "Selected", MaterialTheme.colorScheme.primary)
+    }
+}
+
+/** What this device keeps of the conversations. The text under it is the honest one: nothing here is "disappearing". */
+@Composable
+private fun PersistPicker(persist: Persist, onPersist: (Persist) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+        Text("Messages on this phone", fontSize = 16.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp)) {
+            listOf(Persist.Off to "Nothing", Persist.Outbox to "Unsent", Persist.Day to "1 day", Persist.Week to "7 days").forEach { (p, label) ->
+                val sel = p == persist
+                Box(Modifier.weight(1f).clip(RoundedCornerShape(20.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).clickable { onPersist(p) }.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                    Text(label, color = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            when (persist) {
+                Persist.Off -> "Nothing is kept: messages exist only in memory and are gone when the app ends."
+                Persist.Outbox -> "Only messages you sent that your contact has not confirmed yet are kept, encrypted, until they arrive. You can write while offline."
+                Persist.Day -> "Messages are kept on this phone for about a day (24-30 hours), encrypted with your vault. Your contact's phone follows its own setting."
+                Persist.Week -> "Messages are kept on this phone for about a week, encrypted with your vault. Your contact's phone follows its own setting."
+            },
+            color = NerdTheme.colors.muted, fontSize = 13.sp,
+        )
+        if (persist.ordinal > 0) Text(
+            "Anyone with your phone and your password can read what is kept. A deleted message may survive in the phone's storage until it is overwritten.",
+            color = NerdTheme.colors.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp),
+        )
     }
 }
 

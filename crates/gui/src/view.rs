@@ -557,10 +557,15 @@ pub fn settings(ctx: &egui::Context, app: &mut App, open: &mut bool, hidden: &mu
         });
         ui.label(RichText::new("Kept in memory only, until you close the app or press panic.").color(MUTED).small());
         ui.separator();
-        ui.label(RichText::new("Unsent messages").strong());
-        let mut keep = app.keep_outbox();
-        if ui.checkbox(&mut keep, "Keep unsent messages in the encrypted vault (they survive a restart)").changed() { app.set_keep_outbox(keep); }
-        ui.label(RichText::new("Off: messages exist only in memory. On: a message the contact has not confirmed yet is kept in your password-locked vault until it is confirmed, so it survives closing the app. The vault file then changes whenever you send or a message is confirmed (visible to anyone who can see your disk), and an old copy of a removed message may stay in flash memory. Texts never carry a timestamp.").color(MUTED).small());
+        ui.label(RichText::new("Messages on this computer").strong());
+        let mut p = app.persist();
+        let before = p;
+        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Off, "Keep nothing (messages exist only in memory)");
+        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Outbox, "Keep only unsent messages until they arrive");
+        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Day, "Keep all messages for about a day");
+        ui.radio_value(&mut p, nerd_chat_app::app::Persist::Week, "Keep all messages for about a week");
+        if p != before { app.set_persist(p); }
+        ui.label(RichText::new("Kept messages are encrypted in a separate file next to your vault and only written every few seconds. Anyone with this computer and your password can read what is kept; a deleted message may survive in the disk's storage (an overwrite does not reach copy-on-write file systems or an SSD's spare blocks). Texts never carry a timestamp.").color(MUTED).small());
         ui.separator();
         ui.label(RichText::new("Purge").strong().color(RED));
         ui.label(RichText::new("Like panic, and in addition every file this session made (your vault, saved contact files, saved received files) is overwritten and deleted. This cannot be undone.").color(MUTED).small());

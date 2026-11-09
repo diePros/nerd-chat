@@ -3,7 +3,7 @@ package app.nerdchat.model
 import kotlin.test.*
 
 class SnapshotTest {
-    private fun snap(body: String) = """{"v":1,"screen":"main","prompt":null,"status":"ok","error":false,"rejected":null,"pw_chars":0,"confirm_chars":0,"code_chars":0,"online":"offline","online_pct":0,"online_error":null,"keep_outbox":false,"sel":0,"pane":"details","mode":"normal","contacts":[],"chat":null,"detail":null,"verify_number":null,"tor_offer":null,"pairing_waiting":false,"alerts":[]$body}"""
+    private fun snap(body: String) = """{"v":1,"screen":"main","prompt":null,"status":"ok","error":false,"rejected":null,"pw_chars":0,"confirm_chars":0,"code_chars":0,"online":"offline","online_pct":0,"online_error":null,"persist":"off","sel":0,"pane":"details","mode":"normal","contacts":[],"chat":null,"detail":null,"verify_number":null,"tor_offer":null,"pairing_waiting":false,"alerts":[]$body}"""
 
     @Test fun screensMapToStages() {
         for ((screen, stage) in mapOf("unlock" to Stage.Unlock, "create_pw" to Stage.CreatePassword, "create_confirm" to Stage.ConfirmPassword,
@@ -36,9 +36,9 @@ class SnapshotTest {
         assertEquals(TorState.Failed("no tor"), Snapshot.parse(snap("").replace("\"online\":\"offline\"", "\"online\":\"failed\"").replace("\"online_error\":null", "\"online_error\":\"no tor\"")).tor)
     }
 
-    @Test fun theOutboxSwitchComesFromTheSnapshot() {
-        assertFalse(Snapshot.parse(snap("")).keepOutbox)
-        assertTrue(Snapshot.parse(snap("").replace("\"keep_outbox\":false", "\"keep_outbox\":true")).keepOutbox)
+    @Test fun whatIsKeptComesFromTheSnapshot() {
+        assertEquals(Persist.Off, Snapshot.parse(snap("")).persist)
+        assertEquals(Persist.Day, Snapshot.parse(snap("").replace("\"persist\":\"off\"", "\"persist\":\"day\"")).persist)
     }
 
     @Test fun unknownScreensAndTheCoresPrivacyScreenNeverShowTheMainUi() {

@@ -18,7 +18,7 @@ class RustJniTest {
 
     private fun backend(dir: File): RustBackend {
         NativeBridge.load(lib!!.absolutePath)
-        return RustBackend(NativeBridge, dir.absolutePath, lowMem = true, torPath = null, keepOutboxDefault = true, pollMillis = 20, pollMillisBusy = 20)
+        return RustBackend(NativeBridge, dir.absolutePath, lowMem = true, torPath = null, historyDefault = Persist.Day, pollMillis = 20, pollMillisBusy = 20)
     }
 
     private fun await(b: RustBackend, what: String, max: Long = 90_000, ok: (AppState) -> Boolean): AppState = runBlocking {
@@ -66,13 +66,13 @@ class RustJniTest {
             val again = await(b, "unlock") { it.stage == Stage.Ready }
             assertEquals(name, again.chats.single().contact.name, "the contact survived in the vault")
             // the encrypted outbox: the phone's default is ON, the user's choice is written to the vault and wins over the default on the next start
-            assertTrue(again.keepOutbox, "default on until the user chooses")
-            b.setKeepOutbox(false)
-            await(b, "outbox switched off") { !it.keepOutbox }
+            assertEquals(Persist.Day, again.persist, "default on until the user chooses")
+            b.setPersist(Persist.Off)
+            await(b, "history switched off") { it.persist == Persist.Off }
             b.close()
             b = backend(dir)
             b.submitPassword(pw.toCharArray())
-            assertFalse(await(b, "unlock again") { it.stage == Stage.Ready }.keepOutbox, "the stored choice beat the default (on) after a restart")
+            assertEquals(Persist.Off, await(b, "unlock again") { it.stage == Stage.Ready }.persist, "the stored choice beat the default (on) after a restart")
 
             // text goes only where the core takes text: asking for a chat that does not exist is refused by the bridge, not typed into the core
             b.send(0, "hello")

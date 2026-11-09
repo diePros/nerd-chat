@@ -3,8 +3,10 @@
 #![forbid(unsafe_code)]
 
 mod book;
+pub mod history;
 mod file;
 
+pub use history::{Clock, History, Line, NoPlatformKeys, Persist, PlatformKeys, State, Swept, SystemClock, Tick};
 pub use book::{Contact, OutMsg, SavedMsg, Store, MAX_CONTACTS, MAX_NAME, MAX_OUTBOX, MAX_OUTBOX_TOTAL, MAX_SAVED, MAX_SAVED_TOTAL};
 pub use file::{counter_path_for, read_regular_file, shred_file, OpenInfo, VaultFile};
 

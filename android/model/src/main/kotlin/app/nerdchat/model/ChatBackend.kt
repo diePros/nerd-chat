@@ -62,9 +62,9 @@ interface ChatBackend {
     fun acknowledgeAlert()
 
     /**
-     * The ENCRYPTED OUTBOX. On: a message the contact has not confirmed yet is written to the password-locked vault and sent again on every new connection
-     * until it is confirmed, so it survives a restart or the OS killing the app, and can even be typed while offline. Off: messages exist only in memory.
-     * Costs: the vault file changes whenever a message is sent or confirmed, and an old copy of a removed message may stay in flash memory.
+     * What is kept on the device: nothing, only unconfirmed outgoing texts, or everything for about a day or a week (encrypted in a separate history file that is written only on a
+     * fixed 5-second clock, so its file times never show when a message was sent). Kept texts survive a restart or the OS killing the app, and can be typed while offline.
+     * Costs: anyone with the device and the password can read what is kept, and a deleted message may survive in the phone's storage.
      */
-    fun setKeepOutbox(keep: Boolean)
+    fun setPersist(persist: Persist)
 }

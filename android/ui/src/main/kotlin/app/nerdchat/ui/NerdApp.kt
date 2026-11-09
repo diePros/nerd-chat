@@ -71,9 +71,9 @@ fun NerdApp(
                                         onOffer = { name -> backend.addContact(name); backend.startOffer() },
                                         onJoin = { name, link, code -> backend.addContact(name); backend.joinWithLink(link, code) },
                                         onCancel = backend::cancelPairing, onCopy = onCopy)
-                                    else -> SettingsScreen(palette, mode, st.online, st.tor, st.keepOutbox,
+                                    else -> SettingsScreen(palette, mode, st.online, st.tor, st.persist,
                                         onPalette = { palette = it; onThemeChanged(it, mode) }, onMode = { mode = it; onThemeChanged(palette, it) },
-                                        onOnline = backend::setOnline, onKeepOutbox = backend::setKeepOutbox, onLock = panic, onPurge = { backend.purge() })
+                                        onOnline = backend::setOnline, onPersist = backend::setPersist, onLock = panic, onPurge = { backend.purge() })
                                 }
                             }
                             NavigationBar(containerColor = MaterialTheme.colorScheme.background) {
@@ -83,7 +83,7 @@ fun NerdApp(
                             }
                         }
                         is Dest.Chat -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
-                            ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) }, keepOutbox = st.keepOutbox)
+                            ChatScreen(c, st.messages[c.id].orEmpty(), st.tor, st.online, onBack = { backend.closeChat(); dest = Dest.Main(0) }, onSend = { backend.send(c.id, it) }, onDetails = { dest = Dest.Details(c.id) }, persist = st.persist)
                         } ?: run { dest = Dest.Main(0) }
                         is Dest.Details -> st.chats.firstOrNull { it.contact.id == d.id }?.contact?.let { c ->
                             DetailsScreen(c, st.verifyNumber, onBack = { backend.open(c.id); dest = Dest.Chat(c.id) }, onStartVerify = { backend.startVerify(c.id) }, onConfirmVerify = backend::confirmVerify)

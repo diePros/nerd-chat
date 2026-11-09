@@ -55,6 +55,12 @@ enum class Stage { Unlock, CreatePassword, ConfirmPassword, Working, Ready, Wipe
 /** The link and code of an open pairing offer over Tor: the link goes to the partner by any channel, the code by a DIFFERENT one. */
 data class TorOffer(val link: String, val code: String, val expiresInSeconds: Int, val forContact: String?)
 
+/**
+ * What is kept on the device. [Off]: messages exist only in memory. [Outbox]: only texts we sent that the contact has not confirmed yet. [Day] / [Week]: every message, deleted after
+ * about a day (24-30 h) or a week. Deletion is best effort: see docs/HISTORY_AND_TIMING_PLAN.md.
+ */
+enum class Persist { Off, Outbox, Day, Week }
+
 data class AppState(
     val stage: Stage = Stage.Unlock,
     /** the core's status line, shown under the password field and in banners */
@@ -77,8 +83,8 @@ data class AppState(
     val alerts: List<String> = emptyList(),
     /** why the last command was refused by the bridge's guards (None: accepted) */
     val rejected: String? = null,
-    /** unconfirmed messages are kept in the encrypted vault until the contact confirms them (they survive a restart or the OS killing the app) */
-    val keepOutbox: Boolean = false,
+    /** what is kept on the device (the core's effective setting: the user's choice, else the phone's default) */
+    val persist: Persist = Persist.Off,
     /** the core has a text prompt open (a half-finished step): the backend closes it when a step of a chain was refused */
     val promptOpen: Boolean = false,
 )

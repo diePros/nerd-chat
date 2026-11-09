@@ -128,7 +128,7 @@ impl ContactCfg {
     pub fn with_caps(mut self, our_can_host: bool, host_anyway: bool) -> Self { self.our_can_host = our_can_host; self.host_anyway = host_anyway; self }
 }
 
-pub enum Command { Add(ContactCfg), Remove([u8; 8]), Send { id: [u8; 8], mid: proto::MsgId, text: Zeroizing<String> }, Confirm { id: [u8; 8], mid: proto::MsgId }, SendFile { id: [u8; 8], file: FileOut }, FileReply { id: [u8; 8], xid: file::Xid, accept: bool }, Rotate { id: [u8; 8], kind: u8, keys: Option<[u8; 64]> }, Shutdown }
+pub enum Command { Add(ContactCfg), Remove([u8; 8]), Send { id: [u8; 8], mid: proto::MsgId, text: Zeroizing<String> }, Confirm { id: [u8; 8], mid: proto::MsgId }, Cancel { id: [u8; 8], mid: proto::MsgId }, SendFile { id: [u8; 8], file: FileOut }, FileReply { id: [u8; 8], xid: file::Xid, accept: bool }, Rotate { id: [u8; 8], kind: u8, keys: Option<[u8; 64]> }, Shutdown }
 
 #[derive(Debug)]
 pub enum Event {
@@ -232,6 +232,9 @@ impl Engine {
     /// The UI holds the text of `Event::Message { mid: Some(mid), .. }`: tell the sender so. NEVER call it before the text is safely in
     /// the UI's own state (the sender wipes its copy when it hears this). If the UI is gone (going offline, quitting) nothing is
     /// confirmed, and the sender simply resends later.
+    /// Forget an unconfirmed text for good (its time ran out: the app told the user "expired, not sent"): it is not written again on any later connection and does not count
+    /// against the outbox cap. A text already written to a live connection cannot be recalled.
+    pub fn cancel(&self, id: [u8; 8], mid: proto::MsgId) { let _ = self.tx.send(In::Cmd(Command::Cancel { id, mid })); }
     pub fn confirm(&self, id: [u8; 8], mid: proto::MsgId) { let _ = self.tx.send(In::Cmd(Command::Confirm { id, mid })); }
 
     /// Clean (metadata stripped by allowlist, unknown formats refused), pad to a size bucket and offer a file to a CONNECTED
@@ -483,6 +486,7 @@ impl Core {
             In::Cmd(Command::Add(c)) => self.add(c),
             In::Cmd(Command::Remove(id)) => self.remove(id),
             In::Cmd(Command::Send { id, mid, text }) => self.send(id, mid, text),
+            In::Cmd(Command::Cancel { id, mid }) => { if let Some(rt) = self.rts.get_mut(&id) { rt.unacked.retain(|(m, _)| *m != mid); } }
             In::Cmd(Command::Confirm { id, mid }) => {
                 let Some(rt) = self.rts.get_mut(&id) else { return };
                 let Some(entry) = rt.seen.iter_mut().find(|(m, _)| *m == mid) else { return };
@@ -1301,6 +1305,21 @@ mod tests {
         assert!(connected(&el) && connected(&ed));
         assert!(got(&el, "once"));
         assert!(!wait_for(&el, Duration::from_millis(600), |e| matches!(e, Event::Message { text, .. } if &***text == "once")), "never shown a second time");
+    }
+
+    #[test]
+    fn a_cancelled_text_is_never_sent_on_a_later_connection() {
+        let net = MemNet::new();
+        let ((l, lb), (d, db)) = ordered();
+        let ed = Engine::start(Box::new(net.transport()), vec![ContactCfg::new(ID, &d, lb.clone())], fast());
+        let (m1, m2) = ([0x51u8; 8], [0x52u8; 8]);
+        ed.send_with_mid(ID, m1, Zeroizing::new("expired".into()));
+        ed.send_with_mid(ID, m2, Zeroizing::new("still alive".into()));
+        ed.cancel(ID, m1);
+        let el = start(&net, &l, &db, ID);
+        assert!(connected(&el) && connected(&ed));
+        assert!(got(&el, "still alive"));
+        assert!(!wait_for(&el, Duration::from_millis(500), |e| matches!(e, Event::Message { text, .. } if &***text == "expired")), "the cancelled text never arrives");
     }
 
     fn offer_xid(e: &Engine) -> (file::Xid, u32) {

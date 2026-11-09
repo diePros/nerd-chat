@@ -24,7 +24,7 @@ private val InShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, botto
 @Composable
 fun ChatScreen(
     contact: Contact, messages: List<Message>, tor: TorState, online: Boolean,
-    onBack: () -> Unit, onSend: (String) -> Unit, onDetails: () -> Unit, keepOutbox: Boolean = false,
+    onBack: () -> Unit, onSend: (String) -> Unit, onDetails: () -> Unit, persist: Persist = Persist.Off,
 ) {
     var draft by remember { mutableStateOf("") }
     val list = rememberLazyListState()
@@ -42,7 +42,7 @@ fun ChatScreen(
                         Icon(if (contact.verified) NerdIcons.Shield else NerdIcons.Warning, if (contact.verified) "Verified" else "Not verified", NerdTheme.colors.onBar, 15.dp)
                     }
                     Text(
-                        when { !online -> if (keepOutbox) "You are offline: messages wait, encrypted" else "You are offline"; contact.link == Link.Connected -> "Connected over Tor"; contact.link == Link.Connecting -> "Connecting…"; else -> "Not reachable: messages wait here" },
+                        when { !online -> if (persist != Persist.Off) "You are offline: messages wait, encrypted" else "You are offline"; contact.link == Link.Connected -> "Connected over Tor"; contact.link == Link.Connecting -> "Connecting…"; else -> "Not reachable: messages wait here" },
                         fontSize = 12.sp, color = NerdTheme.colors.onBar.copy(alpha = 0.85f),
                     )
                 }
@@ -51,7 +51,12 @@ fun ChatScreen(
         Box(Modifier.weight(1f)) {
             ChatWallpaper()
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                item("memory") { Pill(if (keepOutbox) "Unsent messages are kept encrypted on this phone until they arrive. Everything else lives only in memory." else "Messages live only in memory on this phone, and only while the app is open.") }
+                item("memory") { Pill(when (persist) {
+                    Persist.Off -> "Messages live only in memory on this phone, and only while the app is open."
+                    Persist.Outbox -> "Unsent messages are kept encrypted on this phone until they arrive. Everything else lives only in memory."
+                    Persist.Day -> "Messages are kept encrypted on this phone for about a day."
+                    Persist.Week -> "Messages are kept encrypted on this phone for about a week."
+                }) }
                 if (!contact.verified) item("verify") { VerifyBanner(onDetails) }
                 items(messages, key = { it.id }) { Bubble(it) }
                 item("end") { Spacer(Modifier.height(2.dp)) }
