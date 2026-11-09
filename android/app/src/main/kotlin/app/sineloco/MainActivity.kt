@@ -10,6 +10,9 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.platform.InterceptPlatformTextInput
 import androidx.compose.ui.platform.PlatformTextInputInterceptor
@@ -25,6 +28,48 @@ import app.sineloco.ui.DarkMode
 import app.sineloco.ui.SineApp
 
 class MainActivity : ComponentActivity() {
+    /** a pairing link that arrived as a `sineloco:` link (QR code, another app); in memory only, it pre-fills the pairing form and is dropped */
+    private var incoming by mutableStateOf<app.sineloco.model.PairLink?>(null)
+    private var pendingSave: String? = null
+    private var pickCallback: ((String) -> Unit)? = null
+
+    // the system pickers (no storage permission needed: the user chooses the file, we get that one file)
+    private val savePicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        val t = pendingSave; pendingSave = null
+        if (uri != null && t != null) try { contentResolver.openOutputStream(uri)?.use { it.write(t.toByteArray()) } } catch (_: Exception) { }
+    }
+    private val openPicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        val cb = pickCallback; pickCallback = null
+        if (uri != null && cb != null) readSmallText(uri)?.let(cb)
+    }
+
+    private fun readSmallText(uri: android.net.Uri): String? = try {
+        contentResolver.openInputStream(uri)?.use { s -> val b = s.readNBytes(8 * 1024 + 1); if (b.size > 8 * 1024) null else String(b, Charsets.UTF_8) }
+    } catch (_: Exception) { null }
+
+    private fun handleIntent(i: android.content.Intent?) {
+        val d = i?.data ?: return
+        if (i.action == android.content.Intent.ACTION_VIEW && d.scheme == "sineloco") incoming = app.sineloco.model.PairLink.parse(d.toString())
+        i.data = null // not kept in the activity's intent either
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) { super.onNewIntent(intent); handleIntent(intent) }
+
+    private val platform = object : app.sineloco.ui.PlatformActions {
+        override fun copy(text: String) = copySensitive(text)
+        override fun share(text: String) {
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, text)
+            try { startActivity(android.content.Intent.createChooser(send, null)) } catch (_: Exception) { }
+        }
+        override fun saveText(suggestedName: String, text: String) { pendingSave = text; try { savePicker.launch(suggestedName) } catch (_: Exception) { pendingSave = null } }
+        override fun pickText(onText: (String) -> Unit) { pickCallback = onText; try { openPicker.launch(arrayOf("text/*", "application/octet-stream")) } catch (_: Exception) { pickCallback = null } }
+        override fun lanAddresses(): List<String> = try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            cm.allNetworks.flatMap { cm.getLinkProperties(it)?.linkAddresses.orEmpty() }.map { it.address }
+                .filterIsInstance<java.net.Inet4Address>().filter { it.isSiteLocalAddress }.mapNotNull { it.hostAddress }.distinct()
+        } catch (_: Exception) { emptyList() }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // No screenshots, no screen recording, and a blank thumbnail in the recent-apps list.
@@ -47,6 +92,7 @@ class MainActivity : ComponentActivity() {
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { (application as SineLocoApp).backend.lock(); moveTaskToBack(true) }
         })
+        handleIntent(intent)
         val prefs = getSharedPreferences("look", Context.MODE_PRIVATE) // only the colour choice: nothing sensitive
         val palette = Palettes.byId(prefs.getString("palette", null))
         val mode = runCatching { DarkMode.valueOf(prefs.getString("mode", null) ?: "") }.getOrDefault(DarkMode.System)
@@ -59,6 +105,7 @@ class MainActivity : ComponentActivity() {
                 onThemeChanged = { p, m -> prefs.edit().putString("palette", p.id).putString("mode", m.name).apply() },
                 backHandler = { enabled, onBack -> BackHandler(enabled, onBack) },
                 onCopy = ::copySensitive,
+                platform = platform, incomingLink = incoming, onIncomingLinkUsed = { incoming = null },
                 onExit = { finishAndRemoveTask(); android.os.Process.killProcess(android.os.Process.myPid()) },
             )
             }

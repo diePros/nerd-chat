@@ -233,6 +233,9 @@ enum LinkMsg { Ready { link: Zeroizing<String>, code: Zeroizing<String>, expires
 /// The link and code of an open offer over Tor, for the front end to show (the link goes to the partner only, the code by voice).
 pub struct TorLink { pub contact: [u8; 8], pub link: Zeroizing<String>, pub code: Zeroizing<String>, pub expires: Instant }
 
+/// An open pairing offer on the LOCAL network (no Tor): where to connect and the code, for the front end to show. The address goes to the partner, the code is told in person.
+pub struct LanOffer { pub addr: String, pub code: Zeroizing<String>, pub expires: Instant }
+
 /// A stream that came through Tor, as a pairing stream.
 struct TorPairStream(BoxStream);
 impl std::io::Read for TorPairStream { fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.0.read(b) } }
@@ -392,6 +395,8 @@ pub struct App {
     lock_auth: bool,
     /// A lock was requested while the screen could not take it (a key derivation is running): it is applied the moment the app is back on the main screen.
     lock_pending: bool,
+    /// The open local-network offer (shown by the phone app; the terminal reads the same text from `pair_info`).
+    pub lan_offer: Option<LanOffer>,
     /// The status line expires: what it said when we last looked and since when (see `expire_status`).
     status_seen: (String, Instant),
     /// Lets a start that is under way know that it was cancelled.
@@ -450,7 +455,7 @@ impl App {
             input: String::new(), status: String::new(), error: false, sel: 0, vf: None, view: None,
             pair_rx: None, link_rx: None, tor_offer: None, tor_contact: None, remote_lockout: std::sync::Arc::new(Lockout::default()), pair_remote: false, probe_rx: None, probe_then: None, pair_info: None, pair_ctl: None, code_buf: SecretBuf::new(), pending_pair: None, pair_adv: None, rot_accepted: HashMap::new(), failures: 0, locked_until: None,
             lockout: std::sync::Arc::new(Lockout::default()),
-            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, status_seen: (String::new(), Instant::now()), start_cancel: None, locked_since: None, lock_attempts: 0, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
+            engine: None, start_rx: None, started_ids: HashSet::new(), started_outbox: HashSet::new(), history: None, migrate_pending: false, grid_next: Instant::now(), pending_confirms: Vec::new(), pending_sends: Vec::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, lock_auth: false, lock_pending: false, lan_offer: None, status_seen: (String::new(), Instant::now()), start_cancel: None, locked_since: None, lock_attempts: 0, lock_err: false, lock_msg: String::new(), scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
             counter_warn: false, alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
@@ -841,7 +846,7 @@ impl App {
         self.view = None;
         self.pending_pair = None;
         self.pair_rx = None;
-        self.link_rx = None; self.tor_offer = None; self.tor_contact = None; // the link and the code of an open offer (zeroizing, dropped now)
+        self.link_rx = None; self.tor_offer = None; self.tor_contact = None; self.lan_offer = None; // the link and the code of an open offer (zeroizing, dropped now)
         self.probe_rx = None; self.probe_then = None;
         self.pair_info = None;
         self.pw.clear();
@@ -1091,6 +1096,8 @@ impl App {
         self.panic_wipe();
         true
     }
+    /// The selected contact has no peer key (yet): the phone checks this after an import to know whether it worked.
+    pub fn cur_peer_missing(&self) -> bool { self.vf.as_ref().and_then(|v| v.store.contacts.get(self.sel)).is_none_or(|c| c.peer.is_none()) }
     pub fn lock_auth(&self) -> bool { self.locked && self.lock_auth }
     /// The only status text the locked screen may show.
     pub fn lock_msg(&self) -> &str { &self.lock_msg }
@@ -1726,19 +1733,7 @@ impl App {
                     .and_then(|b| String::from_utf8(b).map_err(|_| StoreError::Corrupt));
                 match r {
                     Err(e) => self.err(format!("Cannot read {text}: {e}")),
-                    Ok(s) => match file::dearmor(&s) {
-                        Err(_) => self.err("Not a valid Sine Loco contact file."),
-                        Ok(b) => {
-                            let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
-                            if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return; }
-                            if self.onion_collision(self.sel, &b) { self.err("Refused: this bundle reuses an onion address that another contact (or you) already has."); return; }
-                            let (peer, trust) = ImportedContact::from_file(b).into_parts();
-                            let c = self.cur().expect("selected");
-                            c.peer = Some(peer);
-                            c.trust = trust;
-                            if self.save() { let i = self.sel; self.engine_add(i); { let m = self.say("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel.", "Imported - UNVERIFIED. Compare the safety number with them over another channel."); self.ok(m); } }
-                        }
-                    },
+                    Ok(s) => self.import_armored(&s),
                 }
             }
             Prompt::ConfirmDelete => {
@@ -1800,6 +1795,43 @@ impl App {
         }
         self.ok("The keys of this contact were forgotten. Pair again.");
         true
+    }
+
+    /// The contact file as TEXT (what `e` writes to a file): for the phone, which shares it through the system instead of a path. It carries the public bundle (onion address and
+    /// public keys), not a secret, but it is not public either (it shows when you are online): hand it over in person or by a channel you trust, then compare the safety number.
+    pub fn export_text(&mut self) -> Option<Zeroizing<String>> {
+        let sel = self.sel;
+        let Some(c) = self.vf.as_ref().and_then(|v| v.store.contacts.get(sel)) else { self.err(self.say(NO_CONTACT, NO_CONTACT_GUI)); return None };
+        if c.next_transport.is_some() { self.err("A key rotation for this contact is still waiting for its answer: export after it finished."); return None; }
+        // the capability told to this contact: what was told before, else (no tor control to probe here) what this device can do
+        let can_host = if c.adv_can_host.is_some() || !self.cfg.can_host { self.advertised(sel) } else { true };
+        let armored = { let id = &self.vf.as_ref().expect("checked").store.contacts[sel].identity; file::armor(&Bundle::from_identity(id).with_can_host(can_host).encode(id)) };
+        if !self.commit_advertised(sel, can_host) { self.err("Export cancelled: the vault could not be saved (the capability told to this contact must be recorded)."); return None; }
+        self.ok("Your contact text is ready. Hand it over in person or by a channel you trust, then compare the safety number.");
+        Some(Zeroizing::new(armored))
+    }
+
+    /// Import the other person's contact text into the selected (unpaired) contact. Same checks as importing a file.
+    pub fn import_text(&mut self, text: &str) {
+        if text.len() as u64 > MAX_IMPORT_BYTES { return self.err("That text is too long to be a contact file."); }
+        if !self.require_no_peer() { return; }
+        self.import_armored(text);
+    }
+
+    fn import_armored(&mut self, s: &str) {
+        match file::dearmor(s) {
+            Err(_) => self.err("Not a valid Sine Loco contact file."),
+            Ok(b) => {
+                let mine = Bundle::from_identity(&self.cur().expect("selected").identity);
+                if b.sign_pub == mine.sign_pub { self.err("That is YOUR OWN bundle, not the other person's."); return; }
+                if self.onion_collision(self.sel, &b) { self.err("Refused: this bundle reuses an onion address that another contact (or you) already has."); return; }
+                let (peer, trust) = ImportedContact::from_file(b).into_parts();
+                let c = self.cur().expect("selected");
+                c.peer = Some(peer);
+                c.trust = trust;
+                if self.save() { let i = self.sel; self.engine_add(i); let m = self.say("Imported - UNVERIFIED. Press v and compare the safety number with them over another channel.", "Imported - UNVERIFIED. Compare the safety number with them over another channel."); self.ok(m); }
+            }
+        }
     }
 
     // ---------- verify ----------
@@ -1933,6 +1965,7 @@ impl App {
         let listener = match TcpListener::bind(addr) { Ok(l) => l, Err(e) => { self.err(format!("Cannot listen: {e}")); return } };
         let bound = listener.local_addr().expect("bound");
         let expires = offer.expires_in();
+        self.lan_offer = Some(LanOffer { addr: bound.to_string(), code: code.clone(), expires: Instant::now() + expires });
         let info = Zeroizing::new(format!("Listening on {bound}  -  CODE: {}  (valid {} min, ONE attempt; x = cancel). Tell the other person the address and code IN PERSON.", *code, expires.as_secs() / 60));
         self.spawn_pair(info, move |cancel, slot, ident| {
             listener.set_nonblocking(true).ok();
@@ -1968,6 +2001,8 @@ impl App {
             return;
         }
         let sock: SocketAddr = match addr.parse() { Ok(a) => a, Err(_) => { self.code_buf.clear(); self.err("Bad address, expected ip:port"); return } };
+        // LOCAL pairing: the address must be on a private network (or this device). A typed or scanned address must never make this app open a direct connection to the internet.
+        if !listen_addr_ok(&sock) { self.code_buf.clear(); self.err("Local pairing only works with a device on the same network (a private address like 192.168.x.x). Use pairing over Tor otherwise."); return; }
         let parsed = std::str::from_utf8(self.code_buf.as_bytes()).map_err(|_| ExchangeError::BadCode)
             .and_then(|c| PairingJoin::parse_in(c, self.lockout.clone()));
         self.code_buf.clear();
@@ -2284,11 +2319,11 @@ impl App {
     }
 
     /// The worker is done (or gone): forget its handles and the code/address line.
-    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.tor_contact = None; }
+    fn end_pairing(&mut self) { self.pair_rx = None; self.pair_ctl = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.tor_contact = None; self.lan_offer = None; }
 
     fn cancel_pairing(&mut self) {
         match self.pair_ctl.take() {
-            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.tor_contact = None; self.ok("Pairing cancelled."); }
+            Some(c) => { c.cancel(); self.pair_rx = None; self.pair_info = None; self.link_rx = None; self.tor_offer = None; self.tor_contact = None; self.lan_offer = None; self.ok("Pairing cancelled."); }
             None => self.ok("No pairing in progress."),
         }
     }

@@ -17,6 +17,7 @@ dependencies {
     implementation(compose.foundation)
     implementation(compose.material3)
     implementation(compose.ui)
+    implementation("com.google.zxing:core:3.5.3") // QR encoder only (pure Java, Apache-2.0); there is no camera code in this app
     testImplementation(compose.desktop.currentOs)
     testImplementation(kotlin("test"))
 }

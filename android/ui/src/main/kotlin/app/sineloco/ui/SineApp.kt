@@ -31,6 +31,10 @@ fun SineApp(
     onThemeChanged: (Palette, DarkMode) -> Unit = { _, _ -> },
     backHandler: @Composable (enabled: Boolean, onBack: () -> Unit) -> Unit = { _, _ -> },
     onCopy: (String) -> Unit = {},
+    platform: PlatformActions = NoPlatform,
+    /** a `sineloco:` link opened from another app or scanned from a QR code: it only PRE-FILLS the pairing form, the user still presses Pair */
+    incomingLink: PairLink? = null,
+    onIncomingLinkUsed: () -> Unit = {},
     onExit: () -> Unit = {},
     startAt: Int? = null,
 ) {
@@ -40,6 +44,8 @@ fun SineApp(
     var pairAgain by remember { mutableStateOf<String?>(null) } // in memory only: the contact whose keys were just forgotten, to pair with again
     LaunchedEffect(dest) { if (dest != Dest.Main(1)) pairAgain = null }
     val st by backend.state.collectAsState()
+    // a pairing link arrived (QR code, another app): show the pairing screen as soon as the app is usable (a locked app keeps it in memory until the password is typed)
+    LaunchedEffect(incomingLink, st.stage) { if (incomingLink != null && st.stage == Stage.Ready) dest = Dest.Main(1) }
 
     // a wipe (panic or purge) ends the process; leaving Ready for any other reason shows the lock screen again from the list
     LaunchedEffect(st.stage) {
@@ -69,10 +75,7 @@ fun SineApp(
                             Box(Modifier.weight(1f)) {
                                 when (d.tab) {
                                     0 -> ChatListScreen(st.chats, st.tor, st.online, onOpen = { backend.open(it); dest = Dest.Chat(it) }, onPair = { dest = Dest.Main(1) }, onLock = panic)
-                                    1 -> PairScreen(st,
-                                        onOffer = { name -> if (pairAgain == null) backend.addContact(name); backend.startOffer() },
-                                        onJoin = { name, link, code -> if (pairAgain == null) backend.addContact(name); backend.joinWithLink(link, code) },
-                                        onCancel = backend::cancelPairing, onCopy = onCopy, existingName = pairAgain)
+                                    1 -> PairScreen(st, backend, platform, existingName = pairAgain, prefill = incomingLink, onPrefillUsed = onIncomingLinkUsed)
                                     else -> SettingsScreen(palette, mode, st.online, st.tor, st.persist,
                                         onPalette = { palette = it; onThemeChanged(it, mode) }, onMode = { mode = it; onThemeChanged(palette, it) },
                                         onOnline = backend::setOnline, onPersist = backend::setPersist, onLock = panic, onPurge = { backend.purge() })

@@ -75,6 +75,13 @@ class RustBackend(
     override fun lock() { op("lock") }
     override fun goOfflineNow() { op("offline_now") }
     override fun refresh() { op("snapshot") }
+    override fun exportMine(newName: String?) { if (newName != null) op("new_contact", text(newName), "export_bundle" to text("")) else op("export_bundle", text("")) }
+    override fun clearExport() { op("export_clear") }
+    override fun importTheirs(newName: String?, theirs: String) { if (newName != null) op("new_contact", text(newName), "import_bundle" to text(theirs)) else op("import_bundle", text(theirs)) }
+    override fun lanOffer(newName: String?, addr: String) { if (newName != null) op("new_contact", text(newName), "lan_offer" to text(addr)) else op("lan_offer", text(addr)) }
+    override fun lanJoin(newName: String?, addr: String, code: CharArray) {
+        if (newName != null) op("new_contact", text(newName), "lan_join" to text(addr), "secret" to code, "enter" to null) else op("lan_join", text(addr), "secret" to code, "enter" to null)
+    }
     override fun repairContact(contactId: Int) { op("repair_contact", text(contactId.toString())) }
     override fun discardPairing() { op("in_person", text("x")) }
     override fun deleteContact(contactId: Int) { op("delete_contact", text(contactId.toString())) }

@@ -98,6 +98,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.core:core-ktx:1.19.1")
+    implementation("com.google.zxing:core:3.5.3") // QR encoder (the :ui sources use it); no camera code, the phone's own camera app scans
 }
 
 // A RELEASE must ship exactly the libtor.so that scripts/build-tor-android.sh produced and that was pinned in android/libtor.sha256 (reproducible build, checked by the script).

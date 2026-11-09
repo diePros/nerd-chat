@@ -38,3 +38,10 @@ Fixed:
 - **Remove this contact** (see above);
 - the failure message on the side that failed now says what to do on the other one.
 Not changed: the protocol still cannot make both sides finish atomically (two-generals problem); the TUI has no "pair again" key yet (delete the contact and add it again there).
+
+## Pairing options on Android (built after the report above; bridge tests pass with two phones, UI checked in screenshots and on the emulator)
+The Pair screen has four tabs. Every way ends in the same checks (the in-person question, the safety number); a one-sided pairing can be discarded or paired again.
+1. **Show link / Enter link** (over Tor, as before) plus a **QR code** of link+code in one (behind a button, with a warning: show it only to the person next to you). The other phone scans it with ITS CAMERA APP (or any scanner): `sineloco:pair/<id>#<code>` opens Sine Loco on "Enter link", filled in; the user still types a name and presses Pair. There is no camera code and no camera permission in the app.
+2. **Contact text** (the file way, no network): "Show my contact text" (copy, share sheet, save as a file) and "Add their contact text" (paste, or open a file with the system picker). Same checks as importing a contact file.
+3. **Same network**: a direct TCP connection on a private network with an address and a 10-digit code (also as a QR: `sineloco:lan/<ip>:<port>#<code>`). It is NOT through Tor and the screen says so. The phone only listens on, and only connects to, private addresses (loopback, 10.x, 172.16-31.x, 192.168.x, link-local); a public address is refused with a reason.
+Open: an in-app camera scanner (a deliberate omission: it would add a camera permission and a scanning library to a high-risk app), pairing over Bluetooth, the terminal/GUI scanning the phone's QR (they can type the link and code).

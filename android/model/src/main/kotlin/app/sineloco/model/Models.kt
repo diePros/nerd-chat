@@ -55,6 +55,9 @@ sealed interface TorState {
 enum class Stage { Unlock, CreatePassword, ConfirmPassword, Working, Ready, Wiped, Error }
 
 /** The link and code of an open pairing offer over Tor: the link goes to the partner by any channel, the code by a DIFFERENT one. */
+/** An open pairing offer on the LOCAL network: where the other device connects (a private address) and the code. */
+data class LanOffer(val addr: String, val code: String, val expiresInSeconds: Int)
+
 data class TorOffer(val link: String, val code: String, val expiresInSeconds: Int, val forContact: String?)
 
 /**
@@ -77,6 +80,9 @@ data class AppState(
     val online: Boolean = false,
     /** the user chose offline (not a failure): nothing may keep the app running or reachable */
     val userOffline: Boolean = false,
+    /** our own contact text, after "show my contact text": to copy, share or save until the user is done (not secret, but not public either) */
+    val exportText: String? = null,
+    val lanOffer: LanOffer? = null,
     /** tor is being shut down (an orderly teardown takes a few seconds): the process must stay alive and awake until it is over */
     val stopping: Boolean = false,
     val chats: List<ChatSummary> = emptyList(),

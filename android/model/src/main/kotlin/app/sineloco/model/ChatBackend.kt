@@ -31,6 +31,18 @@ interface ChatBackend {
     /** The phone's network went away (`false`) or came back (`true`): with it gone tor's network is switched off, coming back is delayed by a random few seconds. */
     fun networkChanged(up: Boolean) {}
 
+    /**
+     * Pairing by contact TEXT (the contact file, shared or pasted instead of saved as a file). [exportMine]: show my text, for a NEW contact called [newName], or (null) for the contact
+     * that is selected now; the result arrives as [AppState.exportText]. [importTheirs]: add the other person's text, to a new contact or (null) the selected one.
+     */
+    fun exportMine(newName: String?) {}
+    fun clearExport() {}
+    fun importTheirs(newName: String?, theirs: String) {}
+
+    /** Pairing on the LOCAL network (a direct connection, private addresses only): offer (result in [AppState.lanOffer]) or join with the other device's address and code. */
+    fun lanOffer(newName: String?, addr: String) {}
+    fun lanJoin(newName: String?, addr: String, code: CharArray) {}
+
     /** Forget the keys of a contact (and give it fresh keys of our own) so that it can be paired AGAIN; name and conversation stay. For a pairing that only finished on one side. The caller has asked the user to confirm. */
     fun repairContact(contactId: Int) {}
 

@@ -19,6 +19,8 @@ pub struct Extra<'a> {
     pub user_offline: bool,
     /// the phone has a usable network (the Kotlin side tells; false: tor's network is disabled and the app waits)
     pub network_up: bool,
+    /// our contact text, once exported (shown until the user is done with it)
+    pub export: Option<&'a str>,
 }
 
 pub fn trust_str(t: Trust) -> &'static str {
@@ -68,6 +70,7 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
     w.f_str("persist", match app.persist() { Persist::Off => "off", Persist::Outbox => "outbox", Persist::Day => "day", Persist::Week => "week" });
     w.f_bool("user_offline", x.user_offline);
     w.f_bool("network_up", x.network_up);
+    match x.export.filter(|_| !app.lock_auth()) { Some(t) => w.f_str("export", t), None => w.f_null("export") }
 
     let (online, pct, fail) = match &app.online {
         Online::Offline => ("offline", 0, None),
@@ -141,6 +144,10 @@ pub fn snapshot(app: &App, x: &Extra) -> Zeroizing<String> {
         None => w.f_null("tor_offer"),
     }
     w.f_bool("pairing_waiting", app.pairing_waiting() && !locked);
+    match app.lan_offer.as_ref().filter(|_| !locked) {
+        Some(o) => { w.f_obj("lan_offer"); w.f_str("addr", &o.addr); w.f_str("code", &o.code); w.f_num("expires_in", o.expires.saturating_duration_since(Instant::now()).as_secs() as i64); w.end_obj(); }
+        None => w.f_null("lan_offer"),
+    }
 
     w.f_arr("alerts");
     for (text, count) in app.alerts.iter().filter(|_| !locked) { w.arr_item_obj(); w.f_str("text", text); w.f_num("count", *count as i64); w.end_obj(); }

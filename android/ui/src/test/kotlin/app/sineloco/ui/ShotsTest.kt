@@ -5,6 +5,7 @@ package app.sineloco.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import app.sineloco.model.*
@@ -58,9 +59,12 @@ class ShotsTest {
         lock(Stage.ConfirmPassword, "Repeat the password.")
         lock(Stage.Working)
         val offer = TorOffer("sineloco:pair/mxqfz3k7ayv2wbn5cdr4eh6jg2tup7lis3o5kqwn4yz6ahbvc3dfe6xi", "4821-7390-52", 299, "Sam")
-        render("fern-light-pair") { SineTheme(p, DarkMode.Light) { PairScreen(ready.copy(torOffer = offer), {}, { _, _, _ -> }, {}, {}, 0) } }
-        render("fern-light-pair-name") { SineTheme(p, DarkMode.Light) { PairScreen(ready, {}, { _, _, _ -> }, {}, {}, 0) } }
-        render("fern-light-pair-join") { SineTheme(p, DarkMode.Light) { PairScreen(ready.copy(status = "That link is not a Sine Loco link.", statusIsError = true), {}, { _, _, _ -> }, {}, {}, 1) } }
+        render("fern-light-pair") { SineTheme(p, DarkMode.Light) { PairScreen(ready.copy(torOffer = offer), FakeBackend(), NoPlatform, 0) } }
+        render("fern-light-pair-name") { SineTheme(p, DarkMode.Light) { PairScreen(ready, FakeBackend(), NoPlatform, 0) } }
+        render("fern-light-pair-join") { SineTheme(p, DarkMode.Light) { PairScreen(ready.copy(status = "That link is not a Sine Loco link.", statusIsError = true), FakeBackend(), NoPlatform, 1) } }
+        render("fern-light-pair-text") { SineTheme(p, DarkMode.Light) { PairScreen(ready.copy(exportText = "-----BEGIN SINE LOCO CONTACT-----\nAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4\n-----END SINE LOCO CONTACT-----"), FakeBackend(), object : PlatformActions { override fun lanAddresses() = listOf("192.168.1.5") }, 2) } }
+        render("fern-light-pair-lan") { SineTheme(p, DarkMode.Light) { PairScreen(ready.copy(lanOffer = app.sineloco.model.LanOffer("192.168.1.5:40123", "4821739052", 290)), FakeBackend(), object : PlatformActions { override fun lanAddresses() = listOf("192.168.1.5", "10.0.0.7") }, 3) } }
+        render("fern-light-qr") { SineTheme(p, DarkMode.Light) { Surface(color = MaterialTheme.colorScheme.background) { QrCode(app.sineloco.model.PairLink.torQr("sineloco:pair/mxqfz3k7ayv2wbn5cdr4eh6jg2tup7lis3o5kqwn4yz6ahbvc3dfe6xi", "4821-7390-52"), 300.dp) } } }
         render("fern-light-details") { SineTheme(p, DarkMode.Light) { DetailsScreen(contact(1), null, {}, {}, {}) } }
         render("fern-light-details-verify") { SineTheme(p, DarkMode.Light) { DetailsScreen(contact(1), "48213 07791 36502 91844 20365 77018", {}, {}, {}) } }
         render("fern-light-details-verified") { SineTheme(p, DarkMode.Light) { DetailsScreen(contact(0), null, {}, {}, {}) } }
