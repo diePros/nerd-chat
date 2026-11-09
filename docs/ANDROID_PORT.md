@@ -3,6 +3,14 @@
 Priority decision for this port: **internet anonymity comes first; "store nothing" is negotiable.** Where the two conflict, the
 rule below says which wins. Nothing here is built; section 1 is the only part that was verified by compiling.
 
+## Decisions taken (2026-11-09)
+- **Native Kotlin front end (Option B of 3.4).** Jetpack Compose, WhatsApp-style layout, clean but not minimal. Lives in `android/` (see `android/README.md`).
+  It is the third native front end after the TUI and the Linux GUI. The egui GUI is not used on Android.
+- **Releases:** no new distribution channel. The signed APK is meant to join the existing release flow (`scripts/release.sh`, SHA256SUMS): not wired yet.
+- **Colours:** five palettes in one file (`Palettes.kt`) with a contrast test, switchable in Settings.
+- **Built and verified:** `android/` builds a debug and a release APK, lints without errors, 11 unit/render tests pass. NOT verified: any run on a device.
+- **Still open:** the JNI bridge to `nerd-chat-app`, embedded Tor, the isolated-process cleaner, the secure input path (gap G1), foreground service.
+
 ## 0. Rule changes this priority implies
 | Today (desktop) | Android |
 |---|---|
