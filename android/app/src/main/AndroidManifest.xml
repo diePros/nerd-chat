@@ -33,6 +33,12 @@
             android:exported="false"
             android:foregroundServiceType="remoteMessaging" />
 
+        <!-- Everything that parses a picture from outside runs here: a separate UID, no permissions, no network, no access to the app's files. A fresh process per job. -->
+        <service
+            android:name=".clean.CleanerService"
+            android:exported="false"
+            android:isolatedProcess="true" />
+
         <service
             android:name=".EraseJobService"
             android:exported="false"

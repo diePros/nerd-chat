@@ -39,4 +39,11 @@ class PlatformKeysTest {
         assertEquals(listOf(Int::class.javaPrimitiveType, ByteArray::class.java), m["unwrap"]!!.parameterTypes.toList()); assertEquals(ByteArray::class.java, m["unwrap"]!!.returnType)
         assertEquals(listOf(Int::class.javaPrimitiveType), m["erase"]!!.parameterTypes.toList()); assertEquals(Void.TYPE, m["erase"]!!.returnType)
     }
+
+    /** Same for the cleaner (`crates/android/src/media.rs` calls `clean([B)[B`). */
+    @Test fun theMediaCleanerContractIsFixed() {
+        val m = MediaCleaner::class.java.methods.associateBy { it.name }
+        assertEquals(setOf("clean"), m.keys)
+        assertEquals(listOf(ByteArray::class.java), m["clean"]!!.parameterTypes.toList()); assertEquals(ByteArray::class.java, m["clean"]!!.returnType)
+    }
 }

@@ -11,8 +11,10 @@ class RustBackendTest {
         val calls = CopyOnWriteArrayList<Pair<String, String?>>()
         var lastArrays = CopyOnWriteArrayList<CharArray>()
         val answer = """{"v":1,"screen":"main","status":"","error":false,"online":"offline","contacts":[],"chat":null,"detail":null,"alerts":[]}"""
-        override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?): String = answer.replace("\"main\"", "\"unlock\"")
+        override fun init(vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?, media: MediaCleaner?): String = answer.replace("\"main\"", "\"unlock\"")
         var respond: (String) -> String = { answer }
+        val sent = CopyOnWriteArrayList<ByteArray>()
+        override fun sendFile(data: ByteArray): String { sent += data.copyOf(); return respond("send_file") }
         override fun call(op: String, arg: CharArray?): String { if (op != "snapshot") { calls += op to arg?.concatToString(); arg?.let { lastArrays += it } }; return respond(op) }
     }
 
@@ -83,6 +85,21 @@ class RustBackendTest {
         awaitCalls(s, 2)
         runBlocking { delay(100) }
         assertEquals(listOf("new_contact" to "Bob", "cmd" to "T"), s.calls.toList(), "startOffer is its own op here, but a refused creation shows its reason")
+        b.close()
+    }
+
+    @Test fun aPhotoGoesToTheCoreAsBytesAndTheCallersArrayIsWiped() {
+        val s = Script()
+        val b = backend(s)
+        val photo = byteArrayOf(1, 2, 3, 4)
+        b.sendPhoto(photo)
+        runBlocking { repeat(400) { if (s.sent.isEmpty()) delay(5) } }
+        assertEquals(listOf(listOf<Byte>(1, 2, 3, 4)), s.sent.map { it.toList() })
+        runBlocking { repeat(400) { if (photo.any { it != 0.toByte() }) delay(5) } }
+        assertTrue(photo.all { it == 0.toByte() }, "the caller's array is wiped once the core has it")
+        b.answerFile(true); b.answerFile(false)
+        awaitCalls(s, 2)
+        assertEquals(listOf("file_accept", "file_decline"), s.calls.map { it.first })
         b.close()
     }
 }

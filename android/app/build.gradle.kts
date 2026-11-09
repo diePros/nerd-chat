@@ -26,22 +26,23 @@ val rustFlags = listOf("-C link-arg=-Wl,-z,max-page-size=16384", "-C link-arg=-W
     "--remap-path-prefix=${repoRoot}=/src", "--remap-path-prefix=${System.getProperty("user.home")}/.cargo=/cargo", "--remap-path-prefix=${System.getProperty("user.home")}/.rustup=/rustup").joinToString(" ")
 val rustTasks = rustAbis.map { (abi, triple) ->
     tasks.register<Exec>("buildRust_$abi") {
-        group = "build"; description = "cargo build --release -p sine-loco-android --target $triple"
+        group = "build"; description = "cargo build --release -p sine-loco-android -p sine-loco-android-clean --target $triple"
         workingDir = repoRoot
-        commandLine("cargo", "build", "--locked", "--release", "-p", "sine-loco-android", "--target", triple)
+        commandLine("cargo", "build", "--locked", "--release", "-p", "sine-loco-android", "-p", "sine-loco-android-clean", "--target", triple)
         val clang = File(ndkBin, "$triple" + "29-clang")
         val under = triple.replace('-', '_'); val upper = triple.uppercase().replace('-', '_')
         environment("CARGO_TARGET_${upper}_LINKER", clang.path); environment("CC_$under", clang.path); environment("AR_$under", File(ndkBin, "llvm-ar").path)
         // 16 KB page alignment (Android 15+), no build-id and remapped paths so that the library is reproducible
         environment("RUSTFLAGS", rustFlags)
         doFirst { if (!clang.isFile) throw GradleException("NDK $ndkVersion not found at $ndkBin: sdkmanager \"ndk;$ndkVersion\" (docs/ANDROID_DEV_SETUP.md)") }
-        val so = File(repoRoot, "target/$triple/release/libsineloco_bridge.so")
-        val dest = rustOut.map { it.dir(abi).file("libsineloco_bridge.so") }
-        outputs.file(dest)
+        // libsineloco_bridge.so (the core, main process) and libsineloco_clean.so (only the stripper, loaded ONLY in the isolated media process)
+        val libs = listOf("libsineloco_bridge.so", "libsineloco_clean.so")
+        val dests = libs.map { l -> rustOut.map { it.dir(abi).file(l) } }
+        outputs.files(dests)
         // EVERYTHING that changes the library: all crates, the vendored crypto patch, the workspace manifest (release profile: panic=abort, strip), the lock file, the toolchain pin, the flags
         inputs.files(fileTree(File(repoRoot, "crates")) { include("**/*.rs", "**/Cargo.toml") }, fileTree(File(repoRoot, "vendor")), File(repoRoot, "Cargo.toml"), File(repoRoot, "Cargo.lock"), File(repoRoot, "rust-toolchain.toml"))
         inputs.property("rustflags", rustFlags)
-        doLast { so.copyTo(dest.get().asFile, overwrite = true) }
+        doLast { libs.forEachIndexed { i, l -> File(repoRoot, "target/$triple/release/$l").copyTo(dests[i].get().asFile, overwrite = true) } }
     }
 }
 

@@ -738,3 +738,20 @@ Design limits held (SPAKE2 + 10-digit one-shot code, imports cannot replace a pe
 | R39-11 | no Gradle dependency verification, no wrapper checksum, no repository content filter | FIXED (partly) | `gradle/verification-metadata.xml` (sha256 of all 529 components, written from this machine's first download: it pins, it does not prove origin; zxing's hash matches the reviewer's copy), `distributionSha256Sum` for the wrapper (taken from services.gradle.org). NOT done: pgp verification, `exclusiveContent` for google() |
 | R39-12 | info: `tor:` in the LAN address field, deep links can interrupt and overwrite a half-typed form; LAN code in the polled snapshot; the "no sockets except tor" claim | OPEN (info) | the claim is documented as false while a LAN offer is open |
 Reviewer's answers: LAN pairing is the riskiest option (the only path off Tor; ship it disabled by default behind a confirmation each time: DONE, the tab shows the warning and asks "I understand, use this network" every time the screen is opened); deep link second. Most valuable step (done): the mandatory side-by-side safety-number check.
+
+
+## Photos on Android: design checklist for the next review (2026-11-09)
+
+Built, not yet reviewed. Points a reviewer should attack first:
+
+| Id | Question | State |
+|---|---|---|
+| PH-1 | Does ANY image parser run in the key-holding process? (`BitmapFactory`/`ImageDecoder` only in `CleanerService`; the main process never decodes: it builds a Bitmap from raw pixels whose size it checks) | by design; verify with a grep and on a device |
+| PH-2 | Is there a fallback to in-process parsing when the isolated process fails? (`media.rs`: no; a missing object installs a refusing cleaner) | by design |
+| PH-3 | The isolated process reads up to 32 MiB from a pipe and 100 MP of pixels: memory bombs only kill that process (caller times out after 30 s) | check on a low-RAM phone |
+| PH-4 | The answer of the isolated process is untrusted: `strip::wire` decoder is strict; the raw-pixel answer is length-checked (`decode`) | by design |
+| PH-5 | A decoded Bitmap is only dropped (not recycled) on lock/leave: pixels may stay in the heap until GC; Compose's dialog is `SecureOn` | OPEN (document) |
+| PH-6 | A picked picture's bytes and the re-encoded JPEG exist as Java byte arrays (wiped after use, best effort, like every secret on the JVM) | known gap G1 |
+| PH-7 | No `CAP_FILE` bit: an old contact silently drops the offer; the sender sees "Sending" until the contact disconnects | OPEN |
+| PH-8 | Accepting reveals presence (declining or timing out differs); the sender learns the bucket size only | documented in FILE_SHARING.md |
+| PH-9 | JNI surface grew from 2 to 4 symbols (`nSendFile`, `nFileBytes`); hygiene tests pin both crates (no `unsafe` block, one/four exports, `android-clean` links only `strip`) | tested |

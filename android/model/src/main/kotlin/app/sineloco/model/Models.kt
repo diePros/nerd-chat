@@ -40,6 +40,22 @@ data class Contact(
     val verified: Boolean get() = trust == Trust.Verified
 }
 
+/** What is going on with a photo of the OPEN chat (the core holds at most one per contact; photos are never queued and live in memory only). */
+sealed interface FileState {
+    data object None : FileState
+    /** ours: being re-checked and padded before it is offered */
+    data object Preparing : FileState
+    /** ours: offered or being sent; the contact must be connected for all of it */
+    data object Sending : FileState
+    /** ours: their app has it */
+    data object Sent : FileState
+    /** theirs: offered, waiting for OUR answer (the size is only the padded bucket) */
+    data class Offered(val kib: Int) : FileState
+    data object Arriving : FileState
+    /** theirs: received, re-cleaned here, in memory only until discarded or locked */
+    data class Received(val kib: Int, val isImage: Boolean) : FileState
+}
+
 data class ChatSummary(val contact: Contact, val preview: String?, val unread: Int)
 
 sealed interface TorState {
@@ -109,4 +125,6 @@ data class AppState(
     val persist: Persist = Persist.Off,
     /** the core has a text prompt open (a half-finished step): the backend closes it when a step of a chain was refused */
     val promptOpen: Boolean = false,
+    /** the photo state of the open chat */
+    val file: FileState = FileState.None,
 )

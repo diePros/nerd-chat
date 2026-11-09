@@ -61,3 +61,13 @@ Tor, the vault and keys never exist in the helper. The rlimits (NOFILE/FSIZE/NPR
 Known limits of the filter (review 18): musl's allocator needs `mprotect` only when `brk` fails (near the 1 GiB address-space cap): then
 the helper is killed and the file refused (fails closed, rare); the kernel logs seccomp kills (audit/dmesg), a small trace that a file
 was refused; `scripts/sandbox-check.sh` re-checks the shipped static binary end to end.
+
+## On the phone (Android)
+
+The same protocol, with the phone's own front end. What differs:
+
+- **Everything that parses a picture runs in an `isolatedProcess` service** (`CleanerService`): no permissions, no network, no access to the app's files, a separate UID, a FRESH process for every job. The process holds no key and no message. The main process only moves bytes (a picked picture is read as bytes, never decoded there; the answer is raw pixels or a `strip::wire` frame that the core decodes as untrusted input). When the isolated process cannot start, times out or fails, the file is REFUSED: the core's cleaner hook (`strip::set_cleaner`) is installed by the bridge and has no in-process fallback.
+- **Sending:** the picture is picked with the system photo picker (no storage permission), re-encoded in the isolated process (decode with the system decoder, apply the rotation, scale the long edge to 1600 px, JPEG at quality 80 or lower to stay under 1.5 MB), then the core cleans it again (defence in depth) and offers it. Re-encoding removes ALL metadata and the camera's quantisation tables, which a metadata stripper alone cannot (see "Honest limits").
+- **Receiving:** an offer card (the size is only the padded bucket) with Accept / Decline; the core re-cleans what arrives. Then View (decoded in the isolated process, shown in a secure window) / Save... (the user's own act, a neutral random name) / Discard. A photo is held in memory only and is gone when the app locks, is wiped or the contact is deleted. It is never queued, never in the history file and never in a backup.
+- **Limits that remain:** a visible face or place stays visible; the pixels are re-encoded but a picture can still identify its source; a transfer is a burst of a few hundred cells that is distinguishable from chat on the wire (no cover traffic); the contact must be connected for the whole transfer (a lost connection cancels it, nothing resumes); one picture per contact at a time; `FLAG_SECURE` stops screenshots, not a second camera.
+- **Not verified yet:** a real phone, real camera pictures (HEIC, very large ones), the transfer time over real Tor.

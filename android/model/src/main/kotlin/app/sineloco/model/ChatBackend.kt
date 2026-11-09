@@ -79,6 +79,14 @@ interface ChatBackend {
 
     fun send(contactId: Int, text: String)
 
+    // --- photos (memory only, never queued: the contact must be connected) ---
+    /** Offer a photo to the open chat's contact. [jpeg] is what the isolated media process produced; the array is wiped afterwards. */
+    fun sendPhoto(jpeg: ByteArray) {}
+    /** Accept (true) or decline (false) the photo the open chat's contact offers; false also throws away a received photo that is still held in memory. */
+    fun answerFile(accept: Boolean) {}
+    /** The received photo of the open chat (re-cleaned by the core), or null. BLOCKS until the core thread answers: call it off the main thread. The caller wipes the array. */
+    fun receivedPhoto(): ByteArray? = null
+
     // --- pairing over Tor ---
     /** Create a contact with a fresh key pair (it has no peer yet) and select it. */
     fun addContact(name: String)

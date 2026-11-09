@@ -10,6 +10,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -53,6 +54,41 @@ class MainActivity : ComponentActivity() {
         }
     } catch (_: Throwable) { null }
 
+    // ---- photos: the picked picture is only READ here (bytes, never decoded in this process); the isolated media process re-encodes it, then the core offers it
+    private var photoBitmap: android.graphics.Bitmap? = null
+    private var pendingPhotoExt = "jpg"
+    private val photoPicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) Thread { sendPhoto(uri) }.start()
+    }
+    private val photoSaver = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("image/*")) { uri ->
+        if (uri != null) Thread { writePhoto(uri) }.start()
+    }
+
+    private fun note(text: String) = runOnUiThread { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
+
+    /** At most 32 MiB (a camera original), read by hand: any failure (also an Error) means "no photo", never a crash. */
+    private fun readPhoto(uri: android.net.Uri): ByteArray? = try {
+        contentResolver.openInputStream(uri)?.use { s ->
+            val out = java.io.ByteArrayOutputStream(1 shl 20); val buf = ByteArray(1 shl 16); var total = 0
+            while (true) { val n = s.read(buf); if (n < 0) break; total += n; if (total > app.sineloco.clean.CleanerService.MAX_IN) return@use null; out.write(buf, 0, n) }
+            out.toByteArray()
+        }
+    } catch (_: Throwable) { null }
+
+    private fun sendPhoto(uri: android.net.Uri) {
+        val app = application as SineLocoApp
+        val media = app.media ?: return note("Photos are not available in this build.")
+        val raw = readPhoto(uri) ?: return note("That picture could not be read (or is larger than 32 MB).")
+        val jpeg = try { media.reencode(raw) } finally { raw.fill(0) }
+        if (jpeg == null) return note("That picture could not be prepared. Only ordinary photos work.")
+        app.backend.sendPhoto(jpeg) // the backend wipes the array
+    }
+
+    private fun writePhoto(uri: android.net.Uri) {
+        val bytes = (application as SineLocoApp).backend.receivedPhoto() ?: return note("The photo is no longer in memory.")
+        try { contentResolver.openOutputStream(uri)?.use { it.write(bytes) } } catch (_: Exception) { note("The photo could not be saved.") } finally { bytes.fill(0) }
+    }
+
     private fun handleIntent(i: android.content.Intent?) {
         val d = i?.data ?: return
         if (i.action == android.content.Intent.ACTION_VIEW && d.scheme == "sineloco") incoming = app.sineloco.model.PairLink.parse(d.toString())
@@ -72,6 +108,22 @@ class MainActivity : ComponentActivity() {
             val rnd = java.security.SecureRandom(); val name = "note-" + (1..6).joinToString("") { "0123456789abcdef"[rnd.nextInt(16)].toString() } + ".txt"
             pendingSave = text; try { savePicker.launch(name) } catch (_: Exception) { pendingSave = null }
         }
+        override val photos: Boolean get() = (application as SineLocoApp).media != null
+        override fun pickPhoto() { try { photoPicker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) } catch (_: Exception) { } }
+        override fun loadPhoto(onLoaded: (androidx.compose.ui.graphics.ImageBitmap?) -> Unit) {
+            val app = application as SineLocoApp
+            Thread {
+                val bytes = app.backend.receivedPhoto()
+                val bmp = try { bytes?.let { app.media?.decode(it) } } finally { bytes?.fill(0) }
+                runOnUiThread { photoBitmap = bmp; onLoaded(bmp?.asImageBitmap()) }
+            }.start()
+        }
+        override fun savePhoto(ext: String) {
+            pendingPhotoExt = if (ext == "png") "png" else "jpg"
+            val rnd = java.security.SecureRandom(); val name = "img-" + (1..6).joinToString("") { "0123456789abcdef"[rnd.nextInt(16)].toString() } + "." + pendingPhotoExt
+            try { photoSaver.launch(name) } catch (_: Exception) { }
+        }
+        override fun forgetPhoto() { photoBitmap = null }
         override fun pickText(onText: (String) -> Unit) { pickCallback = onText; try { openPicker.launch(arrayOf("text/*", "application/octet-stream")) } catch (_: Exception) { pickCallback = null } }
         /** Wi-Fi or Ethernet networks that are NOT a VPN: a "private" address on a VPN or on mobile data belongs to somebody else's network (the provider's, the carrier's). */
         private fun localLinks(): List<android.net.LinkAddress> {
@@ -144,7 +196,7 @@ class MainActivity : ComponentActivity() {
     /** Leaving the screen (home, recents, another app) locks the app: it keeps running, but whoever opens it next needs the password. A rotation is not leaving. */
     override fun onStop() {
         super.onStop()
-        if (!isChangingConfigurations) (application as SineLocoApp).backend.lock()
+        if (!isChangingConfigurations) { photoBitmap = null; (application as SineLocoApp).backend.lock() }
     }
 
     /**

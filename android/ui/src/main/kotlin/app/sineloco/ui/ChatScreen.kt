@@ -16,6 +16,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import app.sineloco.model.*
 
 private val OutShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 4.dp)
@@ -25,11 +29,16 @@ private val InShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, botto
 fun ChatScreen(
     contact: Contact, messages: List<Message>, tor: TorState, online: Boolean,
     onBack: () -> Unit, onSend: (String) -> Unit, onDetails: () -> Unit, persist: Persist = Persist.Off,
+    file: FileState = FileState.None, platform: PlatformActions = NoPlatform, onAnswerFile: (Boolean) -> Unit = {},
 ) {
     var draft by remember { mutableStateOf("") }
     var bannerDismissed by remember(contact.id) { mutableStateOf(false) } // in memory only: it comes back on the next start, nothing is saved
     val list = rememberLazyListState()
-    LaunchedEffect(messages.size) { if (messages.isNotEmpty()) list.animateScrollToItem(messages.size + 1) }
+    var viewer by remember(contact.id) { mutableStateOf<ImageBitmap?>(null) }
+    var viewing by remember(contact.id) { mutableStateOf(false) }
+    // a decoded picture never outlives the chat screen
+    DisposableEffect(contact.id) { onDispose { platform.forgetPhoto() } }
+    LaunchedEffect(messages.size, file) { if (messages.isNotEmpty() || file != FileState.None) list.animateScrollToItem(messages.size + 2) }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AppBar {
             IconButton(onClick = onBack) { Icon(SineIcons.Back, "Back", SineTheme.colors.onBar) }
@@ -60,10 +69,66 @@ fun ChatScreen(
                 }) }
                 if (!contact.verified && !bannerDismissed) item("verify") { VerifyBanner(onDetails, onLater = { bannerDismissed = true }) }
                 items(messages, key = { it.id }) { Bubble(it) }
+                if (file != FileState.None) item("file") {
+                    FileCard(file, contact.name, onAnswerFile,
+                        onView = { viewing = true; viewer = null; platform.loadPhoto { viewer = it; if (it == null) viewing = false } },
+                        onSave = { ext -> platform.savePhoto(ext) })
+                }
                 item("end") { Spacer(Modifier.height(2.dp)) }
             }
         }
-        Composer(draft, { draft = it }, onSend = { onSend(draft); draft = "" })
+        val canAttach = platform.photos && contact.link == Link.Connected && online && (file == FileState.None || file == FileState.Sent)
+        Composer(draft, { draft = it }, onSend = { onSend(draft); draft = "" }, onAttach = if (canAttach) platform::pickPhoto else null)
+    }
+    if (viewing) PhotoViewer(viewer, onClose = { viewing = false; viewer = null; platform.forgetPhoto() })
+}
+
+/** The card of the one photo a chat can have at a time. Photos are NEVER queued, stored or backed up: they exist in memory while the app is unlocked, and "Save" is the user's own act. */
+@Composable
+private fun FileCard(f: FileState, name: String, onAnswer: (Boolean) -> Unit, onView: () -> Unit, onSave: (String) -> Unit) {
+    val col = SineTheme.colors
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(SineIcons.Photo, null, col.muted, 20.dp); Spacer(Modifier.width(8.dp))
+            Text(when (f) {
+                FileState.Preparing -> "Preparing your photo…"
+                FileState.Sending -> "Sending your photo…"
+                FileState.Sent -> "Photo delivered: $name's app has it"
+                is FileState.Offered -> "$name wants to send a photo"
+                FileState.Arriving -> "Receiving the photo…"
+                is FileState.Received -> if (f.isImage) "Photo received" else "File received (not a picture)"
+                FileState.None -> ""
+            }, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+        }
+        when (f) {
+            is FileState.Offered -> {
+                Text("Up to about ${f.kib} KiB. It is checked and cleaned here before you can see it, and it only exists in memory until you save it or lock the app.", color = col.muted, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                Row { TextButton(onClick = { onAnswer(true) }) { Text("Accept") }; TextButton(onClick = { onAnswer(false) }) { Text("Decline") } }
+            }
+            is FileState.Received -> {
+                Text("${f.kib} KiB, kept in memory only.", color = col.muted, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                Row {
+                    if (f.isImage) TextButton(onClick = onView) { Text("View") }
+                    TextButton(onClick = { onSave(if (f.isImage) "jpg" else "bin") }) { Text("Save…") }
+                    TextButton(onClick = { onAnswer(false) }) { Text("Discard") }
+                }
+            }
+            FileState.Preparing, FileState.Sending, FileState.Arriving -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
+            else -> {}
+        }
+    }
+}
+
+/** Full screen, black, in memory: the only place a received picture is drawn. */
+@Composable
+private fun PhotoViewer(image: ImageBitmap?, onClose: () -> Unit) {
+    // a dialog is its OWN window: secure it explicitly so that it can never be captured, whatever the default policy is
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = true, securePolicy = androidx.compose.ui.window.SecureFlagPolicy.SecureOn)) {
+        Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black).clickable(onClick = onClose), contentAlignment = Alignment.Center) {
+            if (image == null) CircularProgressIndicator()
+            else androidx.compose.foundation.Image(image, "Received photo", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            IconButton(onClick = onClose, modifier = Modifier.align(Alignment.TopStart).statusBarsPadding()) { Icon(SineIcons.Back, "Close", androidx.compose.ui.graphics.Color.White) }
+        }
     }
 }
 
@@ -120,10 +185,11 @@ fun DeliveryMark(d: Delivery?) {
 }
 
 @Composable
-private fun Composer(draft: String, onChange: (String) -> Unit, onSend: () -> Unit) {
+private fun Composer(draft: String, onChange: (String) -> Unit, onSend: () -> Unit, onAttach: (() -> Unit)? = null) {
     // the core's draft holds 2048 bytes: refuse here instead of letting the text be cut or the send refused out of sight
     val tooLong = draft.encodeToByteArray().size > 2048
     Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).navigationBarsPadding().imePadding().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
+        if (onAttach != null) { IconButton(onClick = onAttach, modifier = Modifier.size(50.dp)) { Icon(SineIcons.Photo, "Send a photo", SineTheme.colors.muted) }; Spacer(Modifier.width(4.dp)) }
         SecureField(draft, onChange, if (tooLong) "Too long: 2048 bytes at most" else "Message", singleLine = false, maxLines = 5, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(8.dp))
         val on = draft.isNotBlank() && !tooLong

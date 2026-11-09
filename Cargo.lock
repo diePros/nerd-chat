@@ -3359,8 +3359,18 @@ dependencies = [
  "sine-loco-core",
  "sine-loco-net",
  "sine-loco-store",
+ "sine-loco-strip",
  "sine-loco-vault",
  "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "sine-loco-android-clean"
+version = "0.1.0"
+dependencies = [
+ "jni 0.21.1",
+ "sine-loco-strip",
  "zeroize",
 ]
 

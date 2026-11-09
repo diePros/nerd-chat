@@ -15,6 +15,7 @@ object SineIcons {
         pathData = PathParser().parsePathString(d).toNodes(), fill = SolidColor(Color.Black),
     ).build()
 
+    val Photo = icon("photo", "M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z")
     val Send = icon("send", "M2.01 21L23 12 2.01 3 2 10l15 2-15 2z")
     val Back = icon("back", "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z")
     val Check = icon("check", "M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z")

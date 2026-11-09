@@ -14,5 +14,6 @@
 pub mod bridge;
 pub mod json;
 pub mod keys;
+pub mod media;
 pub mod snapshot;
 mod ffi;

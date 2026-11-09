@@ -23,8 +23,14 @@ class SineLocoApp : Application() {
     lateinit var backend: ChatBackend
         private set
 
+    /** the client of the isolated media process (null in the demo build: no photos there) */
+    var media: MediaProcess? = null
+        private set
+
     override fun onCreate() {
         super.onCreate()
+        // The isolated media process ([app.sineloco.clean.CleanerService]) gets a copy of this Application too: it must start NOTHING here (no core, no key store, no tor, no receivers). It parses pictures and nothing else.
+        if (android.os.Process.isIsolated()) return
         backend = if (resources.getBoolean(R.bool.sineloco_demo)) FakeBackend(hasVault = false) else rust()
         watchConnection()
         if (backend !is FakeBackend) watchNetwork()
@@ -46,7 +52,8 @@ class SineLocoApp : Application() {
         keys.eraseOlderThan(System.currentTimeMillis() / 1000)
         keys.ensureKeys(System.currentTimeMillis() / 1000)
         EraseJobService.schedule(this)
-        return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys)
+        val mp = MediaProcess(this).also { media = it }
+        return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys, media = mp)
     }
 
     /**

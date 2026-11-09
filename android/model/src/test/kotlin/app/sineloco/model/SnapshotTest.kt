@@ -57,4 +57,16 @@ class SnapshotTest {
             assertEquals(Stage.Error, s.stage, bad); assertTrue(s.statusIsError)
         }
     }
+
+    @Test fun thePhotoStateOfTheOpenChatMapsToTheModel() {
+        fun file(f: String) = Snapshot.parse(snap("").replace("\"contacts\":[]", """"contacts":[{"name":"Mira","trust":"verified","paired":true,"connected":true,"unread":0}]""")
+            .replace("\"chat\":null", """"chat":{"name":"Mira","trust":"verified","connected":true,"lines":[],"file":$f}""")).file
+        assertEquals(FileState.None, file("""{"state":"none"}"""))
+        assertEquals(FileState.Offered(512), file("""{"state":"offered","kib":512}"""))
+        assertEquals(FileState.Received(300, true), file("""{"state":"received","kib":300,"ext":"jpg"}"""))
+        assertEquals(FileState.Received(1, false), file("""{"state":"received","kib":1,"ext":"txt"}"""), "only a jpg or png is shown as a picture")
+        assertEquals(FileState.Sending, file("""{"state":"sending"}"""))
+        assertEquals(FileState.None, file("""{"state":"something-new"}"""), "an unknown state shows nothing")
+        assertEquals(FileState.None, Snapshot.parse(snap("")).file, "no open chat, no photo state")
+    }
 }

@@ -26,12 +26,13 @@ fn err_json(msg: &str) -> String {
     w.finish().to_string()
 }
 
-/// `nInit(dir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
+/// `nInit(dir: String, lowMem: Boolean, torPath: String?, historyDefault: Int, keys: PlatformKeys?, media: MediaCleaner?): String` -> a snapshot, or an `"error"` screen if the vault directory is unusable.
 #[no_mangle]
-pub extern "system" fn Java_app_sineloco_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, history_default: jint, keys: JObject<'l>) -> jstring {
+pub extern "system" fn Java_app_sineloco_model_NativeBridge_nInit<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>, dir: JString<'l>, low_mem: jboolean, tor: JString<'l>, history_default: jint, keys: JObject<'l>, media: JObject<'l>) -> jstring {
     let dir: String = match env.get_string(&dir) { Ok(s) => s.into(), Err(_) => return out(&mut env, &err_json("bad directory argument")) };
     let tor_path = if tor.is_null() { None } else { env.get_string(&tor).ok().map(|s| PathBuf::from(String::from(s))) };
     let platform_keys: Option<std::sync::Arc<dyn sine_loco_store::history::PlatformKeys>> = crate::keys::JniKeys::new(&env, &keys).map(|k| std::sync::Arc::new(k) as _);
+    crate::media::install(&env, &media); // before anything can open a file: a missing cleaner refuses files, it never parses them here
     let mut g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(old) = g.as_mut() { old.wipe(); } // a second init must not leave a running core (or a half-written new vault) behind
     let json = match Bridge::new(std::path::Path::new(&dir), Options { low_mem: low_mem == JNI_TRUE, tor_path, persist_default: match history_default { 1 => Persist::Outbox, 2 => Persist::Day, 3 => Persist::Week, _ => Persist::Off }, platform_keys }) {
@@ -81,7 +82,7 @@ pub extern "system" fn Java_app_sineloco_model_NativeBridge_nSendFile<'l>(mut en
 
 /// `nFileBytes(): ByteArray?` -> the re-cleaned file received in the open chat (the caller wipes the array after use), or null.
 #[no_mangle]
-pub extern "system" fn Java_app_sineloco_model_NativeBridge_nFileBytes<'l>(mut env: JNIEnv<'l>, _this: JObject<'l>) -> jbyteArray {
+pub extern "system" fn Java_app_sineloco_model_NativeBridge_nFileBytes<'l>(env: JNIEnv<'l>, _this: JObject<'l>) -> jbyteArray {
     let g = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
     let bytes = g.as_ref().and_then(|b| b.file_bytes());
     drop(g);

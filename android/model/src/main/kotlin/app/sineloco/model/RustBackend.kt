@@ -10,13 +10,13 @@ import java.util.concurrent.Executors
  * (the key derivation, Tor start, incoming messages and confirmations all arrive by polling) and every answer replaces [state].
  */
 class RustBackend(
-    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Persist, private val keys: PlatformKeys? = null,
+    private val native: Native, vaultDir: String, lowMem: Boolean, torPath: String?, historyDefault: Persist, private val keys: PlatformKeys? = null, media: MediaCleaner? = null,
     private val pollMillis: Long = 250, private val pollMillisBusy: Long = 80,
 ) : ChatBackend {
     private val thread = Executors.newSingleThreadExecutor { Thread(it, "sineloco-core").apply { isDaemon = true } }
     private val dispatcher = thread.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
-    private val s = MutableStateFlow(Snapshot.parse(native.init(vaultDir, lowMem, torPath, historyDefault.ordinal, keys)))
+    private val s = MutableStateFlow(Snapshot.parse(native.init(vaultDir, lowMem, torPath, historyDefault.ordinal, keys, media)))
     override val state: StateFlow<AppState> = s
 
     @Volatile private var closed = false
@@ -102,6 +102,13 @@ class RustBackend(
     override fun open(contactId: Int) = op("select", text(contactId.toString()), "open_chat" to null)
     override fun closeChat() = op("back")
     override fun send(contactId: Int, text: String) = op("send", text(text))
+    override fun sendPhoto(jpeg: ByteArray) {
+        scope.launch {
+            try { s.value = track(withLatch(Snapshot.parse(native.sendFile(jpeg)).also { it.rejected?.let(::latch) })) } finally { jpeg.fill(0) }
+        }
+    }
+    override fun answerFile(accept: Boolean) { op(if (accept) "file_accept" else "file_decline") }
+    override fun receivedPhoto(): ByteArray? = try { thread.submit(java.util.concurrent.Callable { native.fileBytes() }).get(10, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) { null }
     override fun addContact(name: String) = op("new_contact", text(name))
     override fun startOffer() = op("cmd", text("T"))
     override fun joinWithLink(link: String, code: CharArray) = op("cmd", text("J"), "submit" to text(link.trim()), "secret" to code, "enter" to null)
