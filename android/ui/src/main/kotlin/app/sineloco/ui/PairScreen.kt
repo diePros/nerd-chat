@@ -57,6 +57,7 @@ fun PairScreen(
     var ip by remember { mutableStateOf("") }
     var joinAddr by remember { mutableStateOf("") }
     var joinCode by remember { mutableStateOf("") }
+    var lanConfirmed by remember { mutableStateOf(false) } // asked every time this screen is opened: the only way of pairing that does not go through Tor
     val offer = state.torOffer
     LaunchedEffect(prefill) {
         when (prefill) {
@@ -143,8 +144,10 @@ fun PairScreen(
                 }
                 else -> {
                     Card("This is a direct connection, NOT through Tor") {
-                        Text("Both devices see each other's address on this network, and so does everyone on it. Use it only on a network you trust (your own Wi-Fi or a hotspot you made), with the other person next to you.", color = SineTheme.colors.muted, fontSize = 13.sp)
+                        Text("Both devices see each other's address on this network, and so does everyone on it, and it shows the network's operator that two Sine Loco phones paired. Use it only on a network you trust (your own Wi-Fi or a hotspot you made), with the other person next to you. Pairing over Tor needs none of this.", color = SineTheme.colors.muted, fontSize = 13.sp)
+                        if (!lanConfirmed && state.lanOffer == null) Button(onClick = { lanConfirmed = true }, modifier = Modifier.fillMaxWidth()) { Text("I understand, use this network") }
                     }
+                    if (!lanConfirmed && state.lanOffer == null) return@Column
                     nameField()
                     val lan = state.lanOffer
                     if (lan == null) {
