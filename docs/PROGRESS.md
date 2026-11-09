@@ -72,3 +72,9 @@ GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phas
 - Contact details: collapsible "Advanced" panel (`App::inspect`, states only, no keys/addresses/names): connection, roles, capability told, saved count, rotation state; buttons "Switch to new keys" (K) and "Host anyway" (h, disabled when impossible).
 - "Hide screen (Ctrl+L)" in the status bar (privacy screen; not a lock); Enter or "Show again" brings it back. Only from the main screen (never over a prompt).
 - Details pane scrolls. Screenshot: docs/superpowers/specs/gui-advanced.png. Still open: purge button with confirmation, alert history in the inspector.
+
+## GUI leftovers (2026-11-09)
+- Settings: "Warnings in this session" (history kept in memory, bounded 30, wiped by panic/purge; `App::alert_history`) and a Purge button behind a confirmation checkbox (same path as Shift+F12).
+- `crates/gui/tests/cleaner.rs`: the file-cleaning helper checks (works, refuses, rlimits, seccomp filter, no_new_privs) now also run against the GUI binary.
+- Portable GUI package: `GUI_BUILD_IMAGE=rust:1-bookworm ./scripts/release.sh` builds the GUI inside Debian 12 (Tails 6 base). The .deb then says `Depends: libc6 (>= 2.35)` instead of 2.43. Two consecutive builds gave identical SHA256SUMS (reproducible, including the terminal binary and both .deb files).
+- Still open: lintian (not installed here), installing the .deb and launching from a real menu, Tails/Whonix tests (owner).
