@@ -12,3 +12,9 @@ fuzz/artifacts
 
 # tor built by scripts/build-tor-android.sh (a build artifact)
 android/app/src/main/jniLibs/
+
+# site (Cloudflare Worker)
+site/node_modules/
+site/.wrangler/
+site/worker-configuration.d.ts
+site/.dev.vars

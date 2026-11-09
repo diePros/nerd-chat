@@ -8,7 +8,11 @@ import app.sineloco.model.FakeBackend
 import app.sineloco.model.NativeBridge
 import app.sineloco.model.Persist
 import app.sineloco.model.RustBackend
+import android.os.Handler
+import android.os.Looper
 import java.io.File
+import kotlin.concurrent.thread
+import app.sineloco.model.Stage
 
 /**
  * Owns the backend so it survives the activity being recreated. The real one is the Rust core over JNI ([RustBackend]); a build with `-Pdemo`
@@ -21,6 +25,7 @@ class SineLocoApp : Application() {
     override fun onCreate() {
         super.onCreate()
         backend = if (resources.getBoolean(R.bool.sineloco_demo)) FakeBackend(hasVault = false) else rust()
+        watchConnection()
     }
 
     private fun rust(): ChatBackend {
@@ -39,5 +44,27 @@ class SineLocoApp : Application() {
         keys.ensureKeys(System.currentTimeMillis() / 1000)
         EraseJobService.schedule(this)
         return RustBackend(NativeBridge, dir.path, lowMem, tor, historyDefault = Persist.Day, keys = keys)
+    }
+
+    /**
+     * The foreground service runs exactly while the user wants to be reachable AND the vault is unlocked: online, stage Ready. Offline, panic, purge or a locked vault stop it.
+     * Only a change is acted on, and only from the main thread.
+     */
+    private fun watchConnection() {
+        val main = Handler(Looper.getMainLooper())
+        var running = false
+        thread(isDaemon = true, name = "sineloco-connection-watch") {
+            try {
+                kotlinx.coroutines.runBlocking {
+                    backend.state.collect { st ->
+                        val want = st.online && st.stage == Stage.Ready
+                        if (want != running) {
+                            running = want
+                            main.post { if (want) ConnectionService.start(this@SineLocoApp) else ConnectionService.stop(this@SineLocoApp) }
+                        }
+                    }
+                }
+            } catch (_: Exception) { }
+        }
     }
 }

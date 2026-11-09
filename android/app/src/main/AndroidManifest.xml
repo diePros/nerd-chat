@@ -9,6 +9,10 @@
     -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- the foreground service that keeps the app reachable (ConnectionService), its Android 14 type, and the notification it must show (Android 13+ asks the user) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".SineLocoApp"
@@ -21,6 +25,11 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false">
+
+        <service
+            android:name=".ConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
 
         <service
             android:name=".EraseJobService"

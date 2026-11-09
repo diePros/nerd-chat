@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sine-loco-site",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-09",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    // GitHub "owner/name". Change after the repository rename.
+    "REPO": "diePros/nerd-chat"
+  },
+  "kv_namespaces": [
+    // Created on first deploy (automatic provisioning). Holds the daily star samples.
+    { "binding": "STATS" }
+  ],
+  "triggers": { "crons": ["0 4 * * *"] },
+  "observability": { "enabled": true, "traces": { "enabled": true } }
+}

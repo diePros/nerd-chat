@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sine Loco: chat without a place</title>
+<meta name="description" content="Serverless, Tor-routed, end-to-end encrypted chat. No server, no account, no phone number. Open source, unaudited, with every claim traced to its source.">
+<meta name="color-scheme" content="dark light">
+<meta property="og:title" content="Sine Loco: chat without a place">
+<meta property="og:description" content="Serverless, Tor-routed, end-to-end encrypted chat. Every claim traced to its source file.">
+<meta property="og:type" content="website">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/fonts/familjen-grotesk-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#facts">Skip to the facts</a>
+
+<header class="bar">
+  <a class="mark" href="/" aria-label="Sine Loco, home">
+    <img src="/favicon.svg" width="28" height="28" alt="">
+    <span>Sine Loco</span>
+  </a>
+  <nav aria-label="Page">
+    <a href="#path">Path</a>
+    <a href="#facts">Facts</a>
+    <a href="#platforms">Platforms</a>
+    <a href="#pulse">Pulse</a>
+    <a href="#limits">Limits</a>
+  </nav>
+</header>
+
+<main>
+<section class="hero" aria-labelledby="h-hero">
+  <div class="rail">
+    <p class="src">crates/core/src/session.rs:34</p>
+  </div>
+  <div class="body">
+    <h1 id="h-hero" class="sr">Sine Loco: chat without a server, an account, or a phone number</h1>
+    <p class="lead" aria-hidden="true">The handshake, as written in the source:</p>
+    <ol class="proto" aria-label="Noise_KKpsk0+psk2_25519_ChaChaPoly_BLAKE2s">
+      <li><span class="tok" data-final="Noise">Noise</span><span class="gloss">the protocol framework</span></li>
+      <li><span class="tok" data-final="KKpsk0+psk2">KKpsk0+psk2</span><span class="gloss">both sides already hold each other's key, plus a shared secret mixed in twice</span></li>
+      <li><span class="tok" data-final="25519">25519</span><span class="gloss">the elliptic curve, with a post-quantum ML-KEM-768 exchange added inside</span></li>
+      <li><span class="tok" data-final="ChaChaPoly">ChaChaPoly</span><span class="gloss">the cipher that seals every cell</span></li>
+      <li><span class="tok" data-final="BLAKE2s">BLAKE2s</span><span class="gloss">the hash</span></li>
+    </ol>
+    <p class="claim">Chat without a server, an account, or a phone number.</p>
+    <p class="actions">
+      <a class="btn primary" id="cta-download" href="https://github.com/diePros/nerd-chat/releases/latest">Download latest release</a>
+      <a class="btn" href="https://github.com/diePros/nerd-chat">Read the source</a>
+    </p>
+  </div>
+</section>
+
+<section id="path" class="sec" aria-labelledby="h-path">
+  <div class="rail"><p class="src">docs/TRANSPORT.md</p></div>
+  <div class="body">
+    <h2 id="h-path">A message has no place to rest</h2>
+    <p>There is no server in the middle. Each contact gets its own key pair and its own Tor onion service, and your messages live in memory unless you choose otherwise.</p>
+    <figure class="route">
+      <svg viewBox="0 0 720 150" role="img" aria-labelledby="route-t route-d">
+        <title id="route-t">Route of a message</title>
+        <desc id="route-d">You, then a Tor circuit of three relays, then your contact's onion service. Nothing stores the message on the way.</desc>
+        <line class="wire" x1="60" y1="60" x2="660" y2="60"/>
+        <g class="nodes">
+          <circle cx="60" cy="60" r="9"/><circle cx="240" cy="60" r="6"/><circle cx="360" cy="60" r="6"/>
+          <circle cx="480" cy="60" r="6"/><circle cx="660" cy="60" r="9"/>
+        </g>
+        <circle class="packet" cx="60" cy="60" r="5"/>
+        <g class="labels">
+          <text x="51" y="100" text-anchor="start">you</text>
+          <text x="360" y="100" text-anchor="middle">three Tor relays</text>
+          <text x="669" y="100" text-anchor="end">contact's onion service</text>
+          <text x="360" y="130" text-anchor="middle" class="dim">stored nowhere on the way</text>
+        </g>
+      </svg>
+    </figure>
+    <ol class="steps">
+      <li>You connect to one onion service created only for that contact, protected by v3 client authorization.</li>
+      <li>The two sides run a Noise handshake with fresh ephemeral keys, so each connection has its own keys.</li>
+      <li>Every message travels as a signed, encrypted 1 KiB cell with no timestamp on the wire.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="facts" class="sec" aria-labelledby="h-facts">
+  <div class="rail"><p class="src">each row names its source</p></div>
+  <div class="body wide">
+    <h2 id="h-facts">What the code does</h2>
+    <p>Every row below is taken from the repository. The right column says where to check it.</p>
+    <table class="ledger">
+      <thead><tr><th scope="col">Property</th><th scope="col">Value</th><th scope="col">Source</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Handshake</th><td>Noise KKpsk0+psk2 with fresh ephemeral keys on every connection. The prologue binds the version and both signing keys.</td><td><code>crates/core/src/session.rs</code></td></tr>
+        <tr><th scope="row">Post-quantum</th><td>X25519 plus ML-KEM-768 hybrid, with an ephemeral ML-KEM exchange inside the handshake.</td><td><code>docs/SECURITY_TRACKER.md</code> R2-H1</td></tr>
+        <tr><th scope="row">Signatures</th><td>Ed25519 with strict verification. Weak keys and low-order X25519 points are rejected.</td><td><code>crates/core</code></td></tr>
+        <tr><th scope="row">Rekey</th><td>The transport key is replaced by a one-way function of itself after 32 cells or 10 minutes. Earlier cells stay sealed if a later key leaks.</td><td><code>docs/DELIVERY.md</code></td></tr>
+        <tr><th scope="row">Vault</th><td>Argon2id at 512 MiB, 3 passes, 4 lanes. XChaCha20-Poly1305. File length bucketed to 4 KiB, no plaintext header, rollback counter, optional keyfile on another device.</td><td><code>crates/vault/src/lib.rs</code></td></tr>
+        <tr><th scope="row">Messages</th><td>Held in memory by default. History is opt-in, in a separate encrypted file with 6-hour key buckets wrapped per 24-hour epoch.</td><td><code>docs/DELIVERY.md</code></td></tr>
+        <tr><th scope="row">Panic and purge</th><td>F12 wipes memory and screen and exits. Ctrl+] also overwrites and deletes the vault. Swap is refused and core dumps are disabled.</td><td><code>README.md</code></td></tr>
+        <tr><th scope="row">File metadata</th><td>JPEG and PNG are rebuilt from an allowlist inside a seccomp sandbox, then padded to size buckets.</td><td><code>crates/sandbox</code>, <code>crates/strip</code></td></tr>
+        <tr><th scope="row">Network hygiene</th><td>Per-contact onion services with v3 client authorization, proof-of-work defence on, and per-contact stream isolation. Tor runs in a private RAM directory.</td><td><code>docs/TRANSPORT.md</code></td></tr>
+        <tr><th scope="row">Build</th><td>Static musl binary of about 1.5 MB. Two consecutive release builds produced identical SHA256SUMS.</td><td><code>scripts/release.sh</code></td></tr>
+        <tr><th scope="row">Supply chain</th><td>cargo-deny passes. Fuzz targets exist. cargo-vet is initialised with all 210 crates still exempted.</td><td><code>deny.toml</code>, <code>fuzz/</code></td></tr>
+        <tr><th scope="row">Licence</th><td>AGPL-3.0-or-later.</td><td><code>LICENSE</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="platforms" class="sec" aria-labelledby="h-plat">
+  <div class="rail"><p class="src">README.md, android/README.md</p></div>
+  <div class="body">
+    <h2 id="h-plat">Where it runs</h2>
+    <dl class="plat">
+      <div><dt>Linux terminal</dt><dd>One static x86_64 binary. Runs from a live USB. Needs <code>tor</code> installed, or an existing Tor via <code>--tor-control</code>.</dd></div>
+      <div><dt>Linux desktop</dt><dd>A native Rust app, packaged as a .deb. Targeted for 0.2.</dd></div>
+      <div><dt>Android</dt><dd>Kotlin and Compose over the same Rust core, with Tor embedded. It reaches “Tor connected” on an emulator. It has not run on a real phone yet.</dd></div>
+      <div><dt>Not planned</dt><dd>macOS, Windows, groups, voice and video, any cloud or account.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="pulse" class="sec" aria-labelledby="h-pulse">
+  <div class="rail"><p class="src">GitHub, refreshed every 10 minutes</p></div>
+  <div class="body wide">
+    <h2 id="h-pulse">Project pulse</h2>
+    <div class="pulse" id="pulse" aria-live="polite">
+      <div class="stars">
+        <p class="num" id="p-stars">–</p>
+        <p class="cap">stars</p>
+        <svg id="p-spark" class="spark" viewBox="0 0 160 40" role="img" aria-label="Star history" hidden></svg>
+      </div>
+      <div class="rel">
+        <p class="cap" id="p-latest-cap">Latest release</p>
+        <p class="tag" id="p-tag">–</p>
+        <p class="when" id="p-when"></p>
+        <ul class="assets" id="p-assets"></ul>
+      </div>
+      <div class="all">
+        <p class="cap">Recent releases</p>
+        <ul class="list" id="p-list"></ul>
+      </div>
+    </div>
+    <p class="note" id="p-note">Release data loads from this site's own server. Without JavaScript, see <a href="https://github.com/diePros/nerd-chat/releases">all releases on GitHub</a>.</p>
+  </div>
+</section>
+
+<section id="limits" class="sec limits" aria-labelledby="h-limits">
+  <div class="rail"><p class="src">README.md, docs/SECURITY_TRACKER.md</p></div>
+  <div class="body">
+    <h2 id="h-limits">Status and limits</h2>
+    <ul class="caveats">
+      <li><strong>Unaudited.</strong> Version 0.1.0. It has had no independent professional audit.</li>
+      <li><strong>33 review rounds, by AI.</strong> Adversarial reviews by Claude Opus are tracked finding by finding. They are not a substitute for a human audit.</li>
+      <li><strong>Online only.</strong> Both people must be online unless the optional encrypted outbox is on.</li>
+      <li><strong>Your online time is visible</strong> to anyone who knows a contact's onion address. Treat a shared bundle as confidential and rotate keys when in doubt.</li>
+      <li><strong>Out of reach for any software like this:</strong> a compromised device, a global observer correlating traffic, and RAM remanence.</li>
+      <li><strong>Android on a real phone</strong> has not been tried. The Android storage and key-erasure code has never run on a device.</li>
+    </ul>
+    <p>Not a replacement for a tool you can trust with your life. Report vulnerabilities through GitHub's private “Report a vulnerability” form on the repository.</p>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="rail"></div>
+  <div class="body">
+    <p>This page sets no cookies, runs no analytics and loads nothing from other sites. Fonts are served from here.</p>
+    <p>Sine Loco is free software under the AGPL-3.0-or-later. <a href="https://github.com/diePros/nerd-chat">Source</a> · <a href="https://github.com/diePros/nerd-chat/releases">Releases</a></p>
+  </div>
+</footer>
+</body>
+</html>

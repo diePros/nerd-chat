@@ -34,6 +34,14 @@ class MainActivity : ComponentActivity() {
         window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         if (Build.VERSION.SDK_INT >= 34) window.decorView.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
 
+        // Android 13+: the foreground service's notification needs the user's permission; asked once. Without it the service still works (it shows in the system's task list).
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            val asked = getSharedPreferences("look", Context.MODE_PRIVATE)
+            if (!asked.getBoolean("asked_notifications", false)) {
+                asked.edit().putBoolean("asked_notifications", true).apply()
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            }
+        }
         val prefs = getSharedPreferences("look", Context.MODE_PRIVATE) // only the colour choice: nothing sensitive
         val palette = Palettes.byId(prefs.getString("palette", null))
         val mode = runCatching { DarkMode.valueOf(prefs.getString("mode", null) ?: "") }.getOrDefault(DarkMode.System)

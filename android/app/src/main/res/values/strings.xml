@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Sine Loco</string>
+    <!-- The connection notification is shown to anybody who sees the phone: it must say nothing about contacts, messages or activity. -->
+    <string name="channel_name">Connection</string>
+    <string name="channel_description">Shown while the app stays reachable over Tor. Contains no message or contact information.</string>
+    <string name="notification_title">Sine Loco</string>
+    <string name="notification_text">Reachable over Tor</string>
+    <string name="notification_go_offline">Go offline</string>
 </resources>
