@@ -18,7 +18,20 @@ fi
 if nft list table inet killswitch >/dev/null 2>&1; then say "kill switch: loaded"
 else bad "kill switch is not loaded: traffic can leave outside the VPN"; fi
 
-ip=$(curl -fsS --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | jq -r '.IP // empty')
+egress_ip() { # prints the public IP as seen from the internet. Several sources, retried, validated.
+  local v try
+  for try in 1 2 3; do
+    v=$(curl -fsS --max-time 8 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p')
+    [[ $v =~ ^[0-9a-fA-F.:]+$ ]] && { echo "$v"; return 0; }
+    v=$(curl -fsS --max-time 8 https://check.torproject.org/api/ip 2>/dev/null | jq -r '.IP // empty' 2>/dev/null)
+    [[ $v =~ ^[0-9a-fA-F.:]+$ ]] && { echo "$v"; return 0; }
+    v=$(curl -fsS --max-time 8 https://icanhazip.com 2>/dev/null | tr -d '[:space:]')
+    [[ $v =~ ^[0-9a-fA-F.:]+$ ]] && { echo "$v"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+ip=$(egress_ip || true)
 if [ -n "$ip" ]; then say "public IP: $ip   (must be your VPN's, not your home IP)"; else bad "no internet through the tunnel"; fi
 
 # Leak test: try to reach the internet bound to each real network port. It must NOT work.

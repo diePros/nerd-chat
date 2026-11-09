@@ -96,7 +96,19 @@ diagnose() { # prints what is needed to tell DNS, routing and firewall problems 
   if curl -fsS --max-time 8 -o /dev/null https://1.1.1.1/cdn-cgi/trace 2>/dev/null; then echo "[by IP] reaching 1.1.1.1 works"; else echo "[by IP] reaching 1.1.1.1 FAILS"; fi
   echo "--- end diagnostics"
 }
-egress_ip() { curl -fsS --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | jq -r '.IP // empty'; }
+egress_ip() { # prints the public IP as seen from the internet. Several sources, retried, validated.
+  local v try
+  for try in 1 2 3; do
+    v=$(curl -fsS --max-time 8 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p')
+    [[ $v =~ ^[0-9a-fA-F.:]+$ ]] && { echo "$v"; return 0; }
+    v=$(curl -fsS --max-time 8 https://check.torproject.org/api/ip 2>/dev/null | jq -r '.IP // empty' 2>/dev/null)
+    [[ $v =~ ^[0-9a-fA-F.:]+$ ]] && { echo "$v"; return 0; }
+    v=$(curl -fsS --max-time 8 https://icanhazip.com 2>/dev/null | tr -d '[:space:]')
+    [[ $v =~ ^[0-9a-fA-F.:]+$ ]] && { echo "$v"; return 0; }
+    sleep 2
+  done
+  return 1
+}
 
 # Does this host let the container make WireGuard interfaces? (needs the kernel module on the Proxmox host)
 if ! ip link add dev wgprobe type wireguard 2>/dev/null; then
@@ -151,6 +163,7 @@ if [ -z "${hs:-}" ] || [ "$hs" = 0 ]; then
   echo "Check: journalctl -u wg-quick@$IF   and   wg show"
   diagnose; exit 1
 fi
+sleep 3
 after=$(egress_ip || true)
 echo "   public IP before: ${before:-unknown}"
 echo "   public IP now:    ${after:-unknown}"
