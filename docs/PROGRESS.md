@@ -78,3 +78,7 @@ GUI (0.2), approved plan `docs/superpowers/specs/2026-11-09-gui-design.md`: phas
 - `crates/gui/tests/cleaner.rs`: the file-cleaning helper checks (works, refuses, rlimits, seccomp filter, no_new_privs) now also run against the GUI binary.
 - Portable GUI package: `GUI_BUILD_IMAGE=rust:1-bookworm ./scripts/release.sh` builds the GUI inside Debian 12 (Tails 6 base). The .deb then says `Depends: libc6 (>= 2.35)` instead of 2.43. Two consecutive builds gave identical SHA256SUMS (reproducible, including the terminal binary and both .deb files).
 - Still open: lintian (not installed here), installing the .deb and launching from a real menu, Tails/Whonix tests (owner).
+
+## lintian and a trial of the GUI .deb (2026-11-09)
+- Added man pages (`packaging/nerd-chat.1`, `nerd-chat-gui.1`), a Debian-format `changelog.gz` next to `CHANGELOG.md.gz`, and a lintian override for the static terminal binary. lintian 2.129 now reports only `bogus-mail-host` (the placeholder maintainer `noreply@invalid`): it needs the owner's real contact address in `scripts/release.sh` (Maintainer line and `deb_changelog`).
+- Trial without root: the .deb was unpacked, `desktop-file-validate` passes, `ldd` finds every library, and the binary built in Debian 12 starts here (first screen shown). A real `apt install` and a launch from the menu are still for the owner (needs sudo).
