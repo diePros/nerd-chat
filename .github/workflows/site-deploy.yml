@@ -1,6 +1,6 @@
 # Website (sineloco.dev): checks every change under site/, deploys the Worker when main changes.
-# Needs two repository secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see site/README.md).
-# Without them the checks still run and the deploy step is skipped with a notice.
+# Needs one repository secret: CLOUDFLARE_API_TOKEN (see site/README.md). The account ID is in wrangler.jsonc.
+# Without it the checks still run and the deploy step is skipped with a notice.
 name: Website
 
 on:
@@ -54,14 +54,13 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - name: Secrets present?
         id: secrets
         working-directory: .   # runs before checkout, when site/ does not exist yet
         run: |
-          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not set, so the Worker was not deployed."; fi
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::CLOUDFLARE_API_TOKEN is not set, so the Worker was not deployed."; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.secrets.outputs.ok == 'true'
         with:

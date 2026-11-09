@@ -1,6 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "sine-loco-site",
+  // Not a secret (it appears in dashboard URLs). Setting it here means CI only needs an API token.
+  "account_id": "50fc7af9b9f3e256b5662c3cf6227ad4",
   "main": "src/worker.ts",
   "compatibility_date": "2026-11-09",
   "assets": {

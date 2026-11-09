@@ -17,8 +17,8 @@ Static page plus one small Worker, for Cloudflare Workers.
 - **Cloudflare (sineloco.dev):** `.github/workflows/site-deploy.yml` checks every change under `site/` and, on a push
   to `main`, runs `wrangler deploy`. One-time setup: create an API token (Cloudflare dashboard → My Profile → API Tokens →
   template **Edit Cloudflare Workers**, limited to this account and the `sineloco.dev` zone), then store it with
-  `gh secret set CLOUDFLARE_API_TOKEN` and `gh secret set CLOUDFLARE_ACCOUNT_ID` (paste the value when asked; never
-  put it in a file or a chat). Without the secrets the checks still run and the deploy step is skipped.
+  `gh secret set CLOUDFLARE_API_TOKEN` (paste the value when asked; never put it in a file or a chat). The account ID is
+  not secret and lives in `wrangler.jsonc`. Without the token the checks still run and the deploy step is skipped.
 - **Onion server:** updates itself from signed commits; see `onion/README.md`.
 
 ## Before going live
