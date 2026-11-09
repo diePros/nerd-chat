@@ -30,7 +30,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Privacy screen: ONLY this is drawn (the app underneath is not rendered at all, so no name or message stays in the terminal buffer).
     if app.locked { lock_view(f, area, app); return; }
     let rows = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 }), Constraint::Length(1)]).split(area);
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(if app.alerts.is_empty() { 2 } else { 3 } + app.pair_info.as_ref().map_or(0, |p| p.lines().count().saturating_sub(1) as u16)), Constraint::Length(1)]).split(area);
     let mode = if app.is_ram_only() { "RAM-ONLY" } else { "vault" };
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(" NERD-CHAT ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
@@ -48,7 +48,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Security warnings are sticky: shown above the status line until acknowledged (z), never overwritten.
     let rows2 = if let Some((a, n)) = app.alerts.first() {
-        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(rows[2]);
         let more = if app.alerts.len() > 1 || app.alerts_dropped > 0 { format!(" (+{} more)", app.alerts.len() - 1 + app.alerts_dropped as usize) } else { String::new() };
         let times = if *n > 1 { format!(" (x{n})") } else { String::new() };
         f.render_widget(Paragraph::new(format!("[z] ! {a}{times}{more}")).style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)), sub[0]);
@@ -57,7 +57,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let style = if app.error { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Cyan) };
     // Rendered straight from borrowed &str (no per-frame String copies of the pairing code).
     if let Some(p) = &app.pair_info {
-        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(1)]).split(rows2);
+        let n = p.lines().count().max(1) as u16; // a pairing over Tor shows the link and the code on two lines
+        let sub = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(n), Constraint::Length(1)]).split(rows2);
         f.render_widget(Paragraph::new(&***p).style(Style::default().fg(Color::Yellow)), sub[0]);
         f.render_widget(Paragraph::new(app.status.as_str()).style(style), sub[1]);
     } else {

@@ -21,7 +21,8 @@ nerd-chat-vault = { path = "../vault" }
 nerd-chat-strip = { path = "../strip" }
 nerd-chat-net = { path = "../net" }
 nerd-chat-chat = { path = "../chat", optional = true }
-# GUI toolkit: NO accesskit (a screen reader would receive every message: spike report), NO clipboard, NO web screen reader
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+# GUI toolkit: NO accesskit (a screen reader would receive every message: spike report), NO web screen reader. The clipboard feature is on ONLY
+# for the pairing link (owner decision 2026-11-09): explicit Copy button + Ctrl+V in the link field; the view code drops every paste event and disables selectable labels.
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
 zeroize = "1"
 png = "0.18"

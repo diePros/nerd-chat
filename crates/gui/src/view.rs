@@ -14,7 +14,8 @@ const MUTED: Color32 = Color32::from_gray(140);
 
 pub fn style(ctx: &egui::Context) {
     ctx.set_visuals(egui::Visuals::dark());
-    ctx.global_style_mut(|s| { s.spacing.item_spacing = egui::vec2(8.0, 8.0); s.spacing.button_padding = egui::vec2(12.0, 6.0); });
+    // the clipboard exists ONLY for the pairing link (explicit Copy button, Ctrl+V in the link field): nothing else may be selected and copied
+    ctx.global_style_mut(|s| { s.spacing.item_spacing = egui::vec2(8.0, 8.0); s.spacing.button_padding = egui::vec2(12.0, 6.0); s.interaction.selectable_labels = false; });
 }
 
 // ---------------------------------------------------------------- commands (what a click means)
@@ -74,11 +75,12 @@ pub fn collect_input(ctx: &egui::Context, app: &App, block_text: bool) -> (Vec<K
     let takes_text = !block_text && (matches!(app.screen, Screen::Unlock | Screen::CreatePw | Screen::CreateConfirm | Screen::Prompt(Prompt::JoinCode(_)))
         || (app.screen == Screen::Main && app.pane == Pane::Chat && app.mode == Mode::Insert));
     let mut keys = vec![];
-    let mut pasted = None;
+    let pasted: Option<String> = None;
     ctx.input(|i| for e in &i.events {
         match e {
             Event::Text(s) if takes_text => keys.extend(s.chars().filter(|c| !c.is_control()).map(Key::Char)),
-            Event::Paste(s) if takes_text => pasted = Some(s.clone()),
+            // a clipboard paste never reaches the passwords, the pairing code or the message draft (only the link field takes Ctrl+V, through its own widget)
+            Event::Paste(_) => {}
             Event::Key { key, pressed: true, modifiers, .. } => match key {
                 egui::Key::F12 if modifiers.shift => keys.push(Key::Purge),
                 egui::Key::F12 => keys.push(Key::F12),
@@ -222,6 +224,13 @@ fn secret_screen(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
 
 fn status_bar(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
     egui::Panel::bottom("status").show(ui, |ui| {
+        // an open pairing service is public for a while: it must be visible and cancellable from EVERY screen, not only from its own contact
+        if let Some(name) = app.tor_offer_name() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Pairing with {name} is open (a public link exists)")).color(Color32::BLACK).background_color(AMBER).strong());
+                if ui.button("Cancel pairing").clicked() { cmds.push(Cmd::Command('x')); }
+            });
+        }
         if let Some((a, n)) = app.alerts.first() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("! {a}{}", if *n > 1 { format!(" (x{n})") } else { String::new() })).color(Color32::WHITE).background_color(RED).strong());
@@ -279,7 +288,7 @@ fn details(ui: &mut egui::Ui, app: &App, cmds: &mut Cmds) {
         ui.group(|ui| {
             ui.label(RichText::new("Over the internet").strong().color(GREEN));
             ui.label("Works anywhere, in the same room or far apart. One of you creates a link and a code, the other types them in. Both of you need to be online.");
-            if let Some(o) = &app.tor_offer { offer_card(ui, name, o, cmds); } else {
+            if let Some(o) = app.tor_offer.as_ref().filter(|o| Some(o.contact) == app.selected_contact_id()) { offer_card(ui, name, o, cmds); } else if app.tor_offer.is_some() { ui.label(RichText::new("Another pairing over the internet is open. Finish or cancel it first (see the bar at the bottom).").color(AMBER)); } else {
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new(RichText::new("Create a link and code").strong().color(Color32::WHITE)).fill(Color32::from_rgb(40, 100, 170))).clicked() { cmds.push(Cmd::Command('T')); }
                     if ui.button("I have a link").clicked() { cmds.push(Cmd::Command('J')); }
@@ -388,7 +397,7 @@ fn popups(ui: &mut egui::Ui, app: &App, text: &mut String, prompt_for: &mut Opti
                         if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(140, 40, 40))).clicked() { cmds.push(Cmd::Submit("yes".into())); }
                         if ui.button("Cancel").clicked() { cmds.push(Cmd::CancelPrompt); } }); }
                     Prompt::InPerson => { ui.horizontal(|ui| {
-                        if ui.button("Yes, in person").clicked() { cmds.push(Cmd::Keys(vec![Key::Char('y')])); }
+                        if ui.button(if app.pair_remote() { "Yes, I heard it by voice" } else { "Yes, in person" }).clicked() { cmds.push(Cmd::Keys(vec![Key::Char('y')])); }
                         if ui.button("No").clicked() { cmds.push(Cmd::Keys(vec![Key::Char('n')])); } }); }
                     Prompt::JoinCode(_) => {
                         let dots = "\u{2022}".repeat(app.code_chars().min(40));
@@ -460,6 +469,7 @@ fn offer_card(ui: &mut egui::Ui, name: &str, o: &nerd_chat_app::app::TorLink, cm
     let l: &str = &o.link;
     let grouped: Vec<&str> = (0..l.len()).step_by(14).map(|i| &l[i..(i + 14).min(l.len())]).collect();
     ui.label(RichText::new(grouped.join(" ")).monospace().size(15.0));
+    if ui.button("Copy link").on_hover_text("Puts the link on the system clipboard (clipboard managers may keep it). Only the link is ever copied.").clicked() { ui.ctx().copy_text(l.to_string()); }
     ui.label(RichText::new(format!("2. Tell {name} this code by voice or in person, NOT in the same message:")).strong());
     ui.label(RichText::new(o.code.as_str()).monospace().size(28.0).strong().color(AMBER));
     let left = o.expires.saturating_duration_since(std::time::Instant::now()).as_secs();

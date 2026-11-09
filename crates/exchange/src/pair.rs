@@ -178,6 +178,18 @@ impl PairingJoin {
     pub fn with_deadline(mut self, d: Duration) -> Self { self.deadline = d; self }
     pub fn with_can_host(mut self, can_host: bool) -> Self { self.can_host = can_host; self }
 
+    /// Like `join`, for a pairing over Tor: a failure only counts toward the (remote) lockout when a well-formed SPAKE2 message arrived,
+    /// so an offer that was cancelled or already used (EOF before the first frame) cannot lock the joiner out. The error carries `true`
+    /// when a real guess was made.
+    pub fn join_remote<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, (ExchangeError, bool)> {
+        self.lockout.guard().map_err(|e| (e, false))?;
+        let got = std::cell::Cell::new(false);
+        match run(Role::B, s, me, &self.code, self.deadline, self.can_host, None, &got) {
+            Ok(p) => { self.lockout.ok(); Ok(p) }
+            Err(e) => { if got.get() { self.lockout.fail(); } Err((e, got.get())) }
+        }
+    }
+
     pub fn join<S: PairStream>(self, s: &mut S, me: &ContactIdentity) -> Result<Paired, ExchangeError> {
         self.lockout.guard()?;
         let r = run(Role::B, s, me, &self.code, self.deadline, self.can_host, None, &std::cell::Cell::new(false));
@@ -577,5 +589,18 @@ mod tests {
         }
         assert!(matches!(PairingOffer::generate_remote(l.clone(), Duration::from_secs(60)), Err(ExchangeError::Locked(_))), "three real guesses lock the REMOTE lockout");
         assert_eq!(lo().remaining(), 0, "the local pairing lockout is a different object");
+    }
+
+    #[test]
+    fn a_remote_join_that_meets_a_closed_offer_does_not_grow_the_lockout() {
+        let l = lo();
+        for _ in 0..6 {
+            let (mut sa, sb) = UnixStream::pair().unwrap();
+            drop(sb); // the offerer cancelled / the offer was already used: EOF before any frame
+            let join = PairingJoin::parse_in("1212121212", l.clone()).unwrap().with_deadline(Duration::from_secs(2));
+            let e = join.join_remote(&mut sa, &ContactIdentity::generate()).err().unwrap();
+            assert!(!e.1);
+        }
+        assert_eq!(l.remaining(), 0, "closed offers must never lock the joiner out");
     }
 }

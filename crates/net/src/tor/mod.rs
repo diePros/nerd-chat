@@ -329,7 +329,14 @@ impl Dialer {
 
 /// The hosted pairing service. It owns ITS OWN authenticated control connection: dropping it closes that connection, and tor then
 /// removes the (non-detached) service: on cancel, on panic, on a crash or a kill, and even if the main control connection is broken.
-pub struct PairService { ctl: Controller<Box<dyn Stream>>, pub id: String }
+/// When is a freshly uploaded descriptor safe to hand out? A v3 service uploads two descriptors (this and the next time period) to ~8 HSDirs
+/// each; two `UPLOADED` events can both belong to the wrong one, and a joiner whose HSDirs all say "not found" is locked out of that
+/// descriptor for ~15 minutes (review 29, M-c). So: many uploads plus a grace period, or a few uploads plus a long one.
+#[derive(Clone, Copy)]
+pub struct PublishRule { pub many: usize, pub many_grace: Duration, pub few: usize, pub few_grace: Duration }
+impl Default for PublishRule { fn default() -> Self { Self { many: 4, many_grace: Duration::from_secs(8), few: 2, few_grace: Duration::from_secs(30) } } }
+
+pub struct PairService { ctl: Controller<Box<dyn Stream>>, pub id: String, pub rule: PublishRule, events: bool }
 
 pub type PairHostFactory = Arc<dyn Fn(&Target) -> Result<PairService, TorError> + Send + Sync>;
 
@@ -339,18 +346,25 @@ impl PairService {
     /// `Err` = not published within `max` or the control connection failed.
     pub fn wait_published(&mut self, max: Duration, fallback: Duration, cancel: &CancelToken) -> Result<bool, TorError> {
         self.ctl.set_poll_timeout(Duration::from_millis(500)).map_err(TorError::from)?;
-        let (start, mut dirs, mut saw_event) = (std::time::Instant::now(), std::collections::HashSet::new(), false);
+        let (start, mut dirs, mut saw_event, mut first_up) = (std::time::Instant::now(), std::collections::HashSet::new(), false, None::<std::time::Instant>);
         loop {
             if cancel.is_cancelled() { return Ok(false); }
-            if let Some(lines) = self.ctl.poll_event()? {
-                for l in &lines {
-                    let t: Vec<&str> = l.split_whitespace().collect();
-                    if t.len() >= 5 && t[0] == "HS_DESC" && t[2] == self.id {
-                        saw_event = true;
-                        if t[1] == "UPLOADED" { dirs.insert(t[4].to_string()); }
+            if self.events {
+                if let Some(lines) = self.ctl.poll_event()? {
+                    for l in &lines {
+                        let t: Vec<&str> = l.split_whitespace().collect();
+                        if t.len() >= 5 && t[0] == "HS_DESC" && t[2] == self.id {
+                            saw_event = true;
+                            if t[1] == "UPLOADED" { dirs.insert(t[4].to_string()); first_up.get_or_insert_with(std::time::Instant::now); }
+                        }
                     }
                 }
-                if dirs.len() >= 2 { return Ok(true); }
+            } else {
+                std::thread::sleep(Duration::from_millis(200)); // no events available (filtered): only the fixed wait below applies
+            }
+            if let Some(f) = first_up {
+                let (n, g) = (dirs.len(), f.elapsed());
+                if (n >= self.rule.many && g >= self.rule.many_grace) || (n >= self.rule.few && g >= self.rule.few_grace) { return Ok(true); }
             }
             let el = start.elapsed();
             if !saw_event && el >= fallback { return Ok(true); }
@@ -370,9 +384,11 @@ impl Tor {
         let reconnect = self.reconnect.clone()?;
         Some(Arc::new(move |target: &Target| {
             let mut ctl = reconnect()?;
-            ctl.set_events(&["HS_DESC"])?; // before ADD_ONION: no upload event may be missed
+            // before ADD_ONION: no upload event may be missed. A tor that filters SETEVENTS (onion-grater) is not a reason to refuse:
+            // without events the fixed wait is used.
+            let events = ctl.set_events(&["HS_DESC"]).is_ok();
             let id = ctl.add_public_ephemeral_onion(VIRT_PORT, target)?;
-            Ok(PairService { ctl, id })
+            Ok(PairService { ctl, id, rule: PublishRule::default(), events })
         }))
     }
 }
@@ -475,6 +491,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------- pairing service (spec 2026-11-09-tor-pairing-spec.md)
+    fn fast_rule() -> PublishRule { PublishRule { many: 4, many_grace: Duration::from_millis(200), few: 2, few_grace: Duration::from_millis(400) } }
     fn valid_id() -> String { service_id(&ContactIdentity::generate().onion_public()) }
 
     #[test]
@@ -533,7 +550,7 @@ mod tests {
     fn wait_published_needs_two_distinct_uploads_and_ignores_other_services() {
         let (ctl, mut peer) = event_ctl();
         let id = valid_id();
-        let mut svc = PairService { ctl, id: id.clone() };
+        let mut svc = PairService { ctl, id: id.clone(), rule: fast_rule(), events: true };
         peer.write_all(&event_line(&valid_id(), "UPLOADED", "dirX")).unwrap(); // somebody else's service
         peer.write_all(&event_line(&id, "UPLOAD", "dir1")).unwrap();             // started, not finished
         peer.write_all(&event_line(&id, "UPLOADED", "dir1")).unwrap();
@@ -555,17 +572,17 @@ mod tests {
         let tok = CancelToken::new();
         // no HS_DESC events at all (filtered): the fixed wait
         let (ctl, _peer) = event_ctl();
-        let mut svc = PairService { ctl, id: valid_id() };
+        let mut svc = PairService { ctl, id: valid_id(), rule: fast_rule(), events: true };
         assert!(svc.wait_published(Duration::from_secs(5), Duration::from_millis(150), &tok).unwrap());
         // events for our id are arriving (so no fallback) but never two directories: the maximum applies
         let (ctl, mut peer) = event_ctl();
         let id = valid_id();
-        let mut svc = PairService { ctl, id: id.clone() };
+        let mut svc = PairService { ctl, id: id.clone(), rule: fast_rule(), events: true };
         peer.write_all(&event_line(&id, "UPLOADED", "dir1")).unwrap();
         assert!(svc.wait_published(Duration::from_millis(300), Duration::from_millis(100), &tok).is_err());
         // cancel
         let (ctl, _peer) = event_ctl();
-        let mut svc = PairService { ctl, id: valid_id() };
+        let mut svc = PairService { ctl, id: valid_id(), rule: fast_rule(), events: true };
         let tok2 = CancelToken::new();
         tok2.cancel();
         assert_eq!(svc.wait_published(Duration::from_secs(5), Duration::from_secs(5), &tok2).unwrap(), false);

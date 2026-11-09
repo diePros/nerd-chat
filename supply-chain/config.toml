@@ -135,8 +135,16 @@ criteria = "safe-to-deploy"
 version = "0.13.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.calloop]]
+version = "0.14.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.calloop-wayland-source]]
 version = "0.3.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.calloop-wayland-source]]
+version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.castaway]]
@@ -505,10 +513,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.hashbrown]]
 version = "0.14.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.hashbrown]]
-version = "0.17.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.hermit-abi]]
@@ -1179,6 +1183,14 @@ criteria = "safe-to-deploy"
 version = "0.19.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.smithay-client-toolkit]]
+version = "0.20.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.smithay-clipboard]]
+version = "0.7.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.smol_str]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -1397,6 +1409,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.wayland-protocols]]
 version = "0.32.13"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-protocols-experimental]]
+version = "20250721.0.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-protocols-misc]]
+version = "0.3.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.wayland-protocols-plasma]]

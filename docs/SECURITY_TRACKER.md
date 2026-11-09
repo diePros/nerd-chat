@@ -516,3 +516,24 @@ No critical. The crypto argument holds (one online guess per offer; nothing offl
 | R28-M5 | `can_host` probe tests the wrong command form | SPEC FIXED: the real public `ADD_ONION` decides; bit untouched |
 | R28-M6 | `nerdchat:pair/` prefix names the app to the link carrier | SPEC FIXED: bare onion id |
 | R28-L1..L7, I1..I4 | descriptor lingers ~3 h; random socket name; joiner error classes; clear code after failure; trust wording; online presence; derive nothing from the code | SPEC FIXED / documented |
+
+## Review 29 (Opus, IMPLEMENTATION of pairing over Tor, commits fc1d179..2ffdb49)
+No critical/high; 225 tests passed in the reviewed crates. Fixed in the commit that follows (live test result: see PROGRESS).
+
+| # | Finding | Status | Fix / note |
+|---|---|---|---|
+| R29-M-a | the GUI offer card followed whichever contact was selected: the code/link could be told to the wrong person while the result landed in another contact's entry | FIXED | `TorLink.contact`; the card shows only for that contact; a bar "Pairing with X is open, Cancel" on every screen |
+| R29-M-b | a delayed resume (hosting probe) could start a second pairing on top of a running one and orphan it | FIXED | `resume` refuses while a pairing runs or waits (keys are already ignored during a probe; defence in depth) |
+| R29-M-c | "2 distinct HSDirs uploaded" is too weak: joiners can hit HSDirs without the right descriptor and be blocked ~15 min (probable cause of the first live failure: the joiner dialed 2 s after the link appeared) | FIXED | `PublishRule`: 4+ uploads and 8 s grace, or 2+ uploads and 30 s |
+| R29-L-a | the joiner's lockout grew on EOF/cancelled offers; spec L4 not implemented | FIXED | `join_remote` counts only after a well-formed SPAKE message, on the remote lockout |
+| R29-L-b | a tor that rejects SETEVENTS made offering fail (wrong message "cannot create service") | FIXED | continue without events, fixed wait |
+| R29-L-c | the remote lockout was checked only after the service was published | FIXED | checked before hosting |
+| R29-L-d | the TUI showed link+code on one clipped line | FIXED | two lines, layout grows |
+| R29-L-e | spec H2: count the first HS_SERVICE_REND as use | OPEN | silent presence probes stay undetected (documented in TRANSPORT.md) |
+| R29-L-f | GUI button said "Yes, in person" for the voice question | FIXED | |
+| R29-L-g | CancelToken keeps a dup fd per registered stream until it is dropped | ACCEPTED (low) | the token dies with the pairing |
+| R29-L-h | nothing watches the service/control connection after publication | OPEN (low) | a dead link is shown until the TTL |
+| R29-I | the code is copied into non-zeroized memory (TUI `format!`, GUI RichText/galley): same class as R4-M2; the link sits in plain Strings | ACCEPTED | the code is worthless once consumed/expired; the link is presence-sensitive, not authenticating |
+| R29-I2 | "someone used your link" alert also fires when an honest partner's circuit breaks after a well-formed message | ACCEPTED | counting is right; wording could hedge |
+
+Clipboard (owner decision 2026-11-09): enabled ONLY for the pairing link (explicit Copy button, Ctrl+V in the link field). The GUI drops every paste event and disables selectable labels, so passwords, the code, chat text and everything else stay out of it.
