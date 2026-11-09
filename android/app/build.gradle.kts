@@ -1,3 +1,4 @@
+import java.security.MessageDigest
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -98,3 +99,28 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.core:core-ktx:1.19.1")
 }
+
+// A RELEASE must ship exactly the libtor.so that scripts/build-tor-android.sh produced and that was pinned in android/libtor.sha256 (reproducible build, checked by the script).
+// A debug build only warns (you may be testing a tor you just rebuilt). Update the pin file in the same commit as a deliberate tor upgrade.
+val verifyLibtor by tasks.registering {
+    group = "verification"; description = "libtor.so in src/main/jniLibs must match android/libtor.sha256"
+    val pins = layout.projectDirectory.file("../libtor.sha256").asFile
+    val libs = layout.projectDirectory.dir("src/main/jniLibs").asFile
+    doLast {
+        val problems = mutableListOf<String>()
+        pins.readLines().filter { it.isNotBlank() }.forEach { line ->
+            val (want, rel) = line.trim().split(Regex("\\s+"), limit = 2)
+            val f = File(libs, rel)
+            if (!f.isFile) problems += "$rel is missing (run scripts/build-tor-android.sh)"
+            else {
+                val got = MessageDigest.getInstance("SHA-256").digest(f.readBytes()).joinToString("") { "%02x".format(it) }
+                if (got != want) problems += "$rel: sha256 $got is not the pinned $want"
+            }
+        }
+        if (problems.isNotEmpty()) {
+            val msg = "libtor.so does not match android/libtor.sha256:\n  " + problems.joinToString("\n  ")
+            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) throw GradleException(msg) else logger.warn("WARNING: $msg")
+        }
+    }
+}
+tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(verifyLibtor) }

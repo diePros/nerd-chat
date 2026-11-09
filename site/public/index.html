@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sine Loco: chat without a place</title>
-<meta name="description" content="Serverless, Tor-routed, end-to-end encrypted chat. No server, no account, no phone number. Open source, unaudited, with every claim traced to its source.">
+<meta name="description" content="Serverless, Tor-routed, end-to-end encrypted chat. No server, no account, no phone number. Open source and unaudited, with every claim traced to its source.">
 <meta name="color-scheme" content="dark light">
 <meta property="og:title" content="Sine Loco: chat without a place">
 <meta property="og:description" content="Serverless, Tor-routed, end-to-end encrypted chat. Every claim traced to its source file.">
@@ -15,7 +15,7 @@
 <script src="/app.js" defer></script>
 </head>
 <body>
-<a class="skip" href="#facts">Skip to the facts</a>
+<a class="skip" href="#rest">Skip to the comparisons</a>
 
 <header class="bar">
   <a class="mark" href="/" aria-label="Sine Loco, home">
@@ -23,154 +23,308 @@
     <span>Sine Loco</span>
   </a>
   <nav aria-label="Page">
-    <a href="#path">Path</a>
-    <a href="#facts">Facts</a>
-    <a href="#platforms">Platforms</a>
+    <a href="#rest">Compare</a>
+    <a href="#sealed">Sealed</a>
     <a href="#pulse">Pulse</a>
     <a href="#limits">Limits</a>
   </nav>
 </header>
 
 <main>
-<section class="hero" aria-labelledby="h-hero">
-  <div class="rail">
-    <p class="src">crates/core/src/session.rs:34</p>
-  </div>
-  <div class="body">
-    <h1 id="h-hero" class="sr">Sine Loco: chat without a server, an account, or a phone number</h1>
-    <p class="lead" aria-hidden="true">The handshake, as written in the source:</p>
-    <ol class="proto" aria-label="Noise_KKpsk0+psk2_25519_ChaChaPoly_BLAKE2s">
-      <li><span class="tok" data-final="Noise">Noise</span><span class="gloss">the protocol framework</span></li>
-      <li><span class="tok" data-final="KKpsk0+psk2">KKpsk0+psk2</span><span class="gloss">both sides already hold each other's key, plus a shared secret mixed in twice</span></li>
-      <li><span class="tok" data-final="25519">25519</span><span class="gloss">the elliptic curve, with a post-quantum ML-KEM-768 exchange added inside</span></li>
-      <li><span class="tok" data-final="ChaChaPoly">ChaChaPoly</span><span class="gloss">the cipher that seals every cell</span></li>
-      <li><span class="tok" data-final="BLAKE2s">BLAKE2s</span><span class="gloss">the hash</span></li>
-    </ol>
-    <p class="claim">Chat without a server, an account, or a phone number.</p>
-    <p class="actions">
-      <a class="btn primary" id="cta-download" href="https://github.com/diePros/nerd-chat/releases/latest">Download latest release</a>
-      <a class="btn" href="https://github.com/diePros/nerd-chat">Read the source</a>
-    </p>
-  </div>
+<!-- HERO: the relay path is the one big moment -->
+<section class="hero wrap" aria-labelledby="h1">
+  <h1 id="h1">Chat without<br>a place.</h1>
+  <p class="sub">No server. No account. No phone number.</p>
+  <p class="actions">
+    <a class="btn primary" id="cta-download" href="https://github.com/diePros/nerd-chat/releases/latest">Download</a>
+    <a class="btn" href="https://github.com/diePros/nerd-chat">Source</a>
+  </p>
+
+  <figure class="relay" id="relay">
+    <svg viewBox="0 0 1200 380" role="img" aria-labelledby="rl-t rl-d">
+      <title id="rl-t">A message crossing Tor</title>
+      <desc id="rl-d">A message leaves you wrapped in three layers of encryption. Each relay removes one layer and knows only its neighbours. The two chains of relays meet at a rendezvous point, then the message reaches your contact's onion service. Nothing stores it on the way.</desc>
+      <defs>
+        <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5"/></filter>
+      </defs>
+
+      <!-- the rest of the Tor network, dimmed -->
+      <g class="decoy">
+        <line x1="160" y1="320" x2="230" y2="110"/><line x1="160" y1="320" x2="370" y2="260"/>
+        <line x1="300" y1="50" x2="230" y2="110"/><line x1="300" y1="50" x2="510" y2="130"/>
+        <line x1="450" y1="335" x2="370" y2="260"/><line x1="450" y1="335" x2="600" y2="190"/>
+        <line x1="560" y1="40" x2="510" y2="130"/><line x1="560" y1="40" x2="690" y2="130"/>
+        <line x1="650" y1="320" x2="600" y2="190"/><line x1="650" y1="320" x2="830" y2="260"/>
+        <line x1="760" y1="50" x2="690" y2="130"/><line x1="760" y1="50" x2="970" y2="110"/>
+        <line x1="900" y1="335" x2="830" y2="260"/><line x1="900" y1="335" x2="1120" y2="190"/>
+        <line x1="1050" y1="55" x2="970" y2="110"/><line x1="1050" y1="55" x2="1120" y2="190"/>
+        <line x1="60" y1="60" x2="80" y2="190"/><line x1="60" y1="60" x2="230" y2="110"/>
+        <circle cx="160" cy="320" r="4"/><circle cx="300" cy="50" r="4"/><circle cx="450" cy="335" r="4"/>
+        <circle cx="560" cy="40" r="4"/><circle cx="650" cy="320" r="4"/><circle cx="760" cy="50" r="4"/>
+        <circle cx="900" cy="335" r="4"/><circle cx="1050" cy="55" r="4"/><circle cx="60" cy="60" r="4"/>
+      </g>
+
+      <!-- the route -->
+      <path id="route" class="wire" d="M80 190 L230 110 L370 260 L510 130 L600 190 L690 130 L830 260 L970 110 L1120 190"/>
+      <g class="nodes">
+        <circle class="n end" data-n="0" cx="80" cy="190" r="11"/>
+        <circle class="n" data-n="1" cx="230" cy="110" r="8"/>
+        <circle class="n" data-n="2" cx="370" cy="260" r="8"/>
+        <circle class="n" data-n="3" cx="510" cy="130" r="8"/>
+        <circle class="n rdv" data-n="4" cx="600" cy="190" r="12"/>
+        <circle class="n" data-n="5" cx="690" cy="130" r="8"/>
+        <circle class="n" data-n="6" cx="830" cy="260" r="8"/>
+        <circle class="n" data-n="7" cx="970" cy="110" r="8"/>
+        <circle class="n end" data-n="8" cx="1120" cy="190" r="11"/>
+      </g>
+      <circle class="arrive" cx="1120" cy="190" r="11"/>
+
+      <!-- the message: a sealed core inside three Tor layers -->
+      <g class="packet" id="packet" transform="translate(80 190)">
+        <circle class="halo" r="22" filter="url(#glow)"/>
+        <circle class="ring" r="22"/>
+        <circle class="ring" r="17"/>
+        <circle class="ring" r="12"/>
+        <rect class="core" x="-6" y="-6" width="12" height="12" rx="3"/>
+      </g>
+
+      <g class="lbl">
+        <text x="80" y="232" text-anchor="middle">you</text>
+        <text x="1120" y="232" text-anchor="middle">your contact</text>
+        <text x="600" y="232" text-anchor="middle">rendezvous</text>
+        <text x="300" y="368" text-anchor="middle" class="dim">relays you pick</text>
+        <text x="900" y="368" text-anchor="middle" class="dim">relays they pick</text>
+      </g>
+    </svg>
+    <ul class="legend">
+      <li><span class="key k-ring"></span>A relay peels one layer and sees only its two neighbours</li>
+      <li><span class="key k-core"></span>The message inside stays sealed end to end</li>
+      <li><span class="key k-none"></span>Nothing stores it on the way</li>
+    </ul>
+    <figcaption class="src">docs/TRANSPORT.md</figcaption>
+  </figure>
 </section>
 
-<section id="path" class="sec" aria-labelledby="h-path">
-  <div class="rail"><p class="src">docs/TRANSPORT.md</p></div>
-  <div class="body">
-    <h2 id="h-path">A message has no place to rest</h2>
-    <p>There is no server in the middle. Each contact gets its own key pair and its own Tor onion service, and your messages live in memory unless you choose otherwise.</p>
-    <figure class="route">
-      <svg viewBox="0 0 720 150" role="img" aria-labelledby="route-t route-d">
-        <title id="route-t">Route of a message</title>
-        <desc id="route-d">You, then a Tor circuit of three relays, then your contact's onion service. Nothing stores the message on the way.</desc>
-        <line class="wire" x1="60" y1="60" x2="660" y2="60"/>
-        <g class="nodes">
-          <circle cx="60" cy="60" r="9"/><circle cx="240" cy="60" r="6"/><circle cx="360" cy="60" r="6"/>
-          <circle cx="480" cy="60" r="6"/><circle cx="660" cy="60" r="9"/>
+<!-- COMPARISON 1: where a message rests -->
+<section id="rest" class="sec wrap" aria-labelledby="h-rest">
+  <h2 id="h-rest">Where does your message rest?</h2>
+  <ul class="rows">
+    <li class="row">
+      <p class="who">Typical cloud messenger</p>
+      <svg viewBox="0 0 520 110" role="img" aria-label="You, then a company server that keeps a copy, then your contact">
+        <line class="w" x1="36" y1="55" x2="212" y2="55"/><line class="w" x1="308" y1="55" x2="484" y2="55"/>
+        <circle class="e" cx="30" cy="55" r="9"/><circle class="e" cx="490" cy="55" r="9"/>
+        <g class="hold">
+          <rect x="220" y="22" width="80" height="14" rx="3"/><rect x="220" y="41" width="80" height="14" rx="3"/><rect x="220" y="60" width="80" height="14" rx="3"/>
+          <circle cx="232" cy="29" r="2"/><circle cx="232" cy="48" r="2"/><circle cx="232" cy="67" r="2"/>
         </g>
-        <circle class="packet" cx="60" cy="60" r="5"/>
-        <g class="labels">
-          <text x="51" y="100" text-anchor="start">you</text>
-          <text x="360" y="100" text-anchor="middle">three Tor relays</text>
-          <text x="669" y="100" text-anchor="end">contact's onion service</text>
-          <text x="360" y="130" text-anchor="middle" class="dim">stored nowhere on the way</text>
-        </g>
+        <text class="sm" x="260" y="98" text-anchor="middle">company server</text>
       </svg>
-    </figure>
-    <ol class="steps">
-      <li>You connect to one onion service created only for that contact, protected by v3 client authorization.</li>
-      <li>The two sides run a Noise handshake with fresh ephemeral keys, so each connection has its own keys.</li>
-      <li>Every message travels as a signed, encrypted 1 KiB cell with no timestamp on the wire.</li>
-    </ol>
-  </div>
+      <p class="verdict bad">The server keeps a copy and sees who talks to whom.</p>
+    </li>
+    <li class="row">
+      <p class="who">Network with mailboxes</p>
+      <svg viewBox="0 0 520 110" role="img" aria-label="You, then a group of nodes that store the message for days, then your contact">
+        <line class="w" x1="36" y1="55" x2="212" y2="55"/><line class="w" x1="308" y1="55" x2="484" y2="55"/>
+        <circle class="e" cx="30" cy="55" r="9"/><circle class="e" cx="490" cy="55" r="9"/>
+        <g class="hold">
+          <circle class="cl" cx="260" cy="52" r="38"/>
+          <rect x="226" y="40" width="22" height="12" rx="3"/><rect x="272" y="40" width="22" height="12" rx="3"/>
+          <rect x="238" y="58" width="22" height="12" rx="3"/><rect x="262" y="58" width="22" height="12" rx="3"/>
+        </g>
+        <text class="sm" x="260" y="108" text-anchor="middle">storage nodes</text>
+      </svg>
+      <p class="verdict bad">Nodes hold it for days, so a stranger holds your ciphertext.</p>
+    </li>
+    <li class="row mine">
+      <p class="who">Sine Loco</p>
+      <svg viewBox="0 0 520 110" role="img" aria-label="You, then Tor relays that store nothing, then your contact">
+        <line class="w mine" x1="36" y1="55" x2="484" y2="55"/>
+        <circle class="e" cx="30" cy="55" r="9"/><circle class="e" cx="490" cy="55" r="9"/>
+        <circle class="r" cx="140" cy="55" r="5"/><circle class="r" cx="220" cy="55" r="5"/><circle class="r" cx="300" cy="55" r="5"/><circle class="r" cx="380" cy="55" r="5"/>
+        <text class="sm" x="260" y="92" text-anchor="middle">Tor relays</text>
+      </svg>
+      <p class="verdict good">Nothing holds it. Unsent texts wait in your own memory.</p>
+    </li>
+  </ul>
+  <p class="src">docs/COMPARISON_SESSION.md, docs/DELIVERY.md</p>
 </section>
 
-<section id="facts" class="sec" aria-labelledby="h-facts">
-  <div class="rail"><p class="src">each row names its source</p></div>
-  <div class="body wide">
-    <h2 id="h-facts">What the code does</h2>
-    <p>Every row below is taken from the repository. The right column says where to check it.</p>
+<!-- COMPARISON 2: identity -->
+<section class="sec wrap" aria-labelledby="h-id">
+  <h2 id="h-id">One key per contact, not one ID for all</h2>
+  <div class="pair">
+    <figure class="panel">
+      <svg viewBox="0 0 300 200" role="img" aria-label="One public ID connected to four contacts, so they can all tell it is the same person">
+        <g class="fan">
+          <line x1="50" y1="100" x2="250" y2="25"/><line x1="50" y1="100" x2="250" y2="75"/>
+          <line x1="50" y1="100" x2="250" y2="125"/><line x1="50" y1="100" x2="250" y2="175"/>
+        </g>
+        <circle class="e" cx="50" cy="100" r="11"/>
+        <circle class="c" cx="250" cy="25" r="7"/><circle class="c" cx="250" cy="75" r="7"/><circle class="c" cx="250" cy="125" r="7"/><circle class="c" cx="250" cy="175" r="7"/>
+        <text class="chip bad" x="150" y="62" text-anchor="middle">ID 7f3a</text>
+        <text class="chip bad" x="150" y="106" text-anchor="middle">ID 7f3a</text>
+        <text class="chip bad" x="150" y="150" text-anchor="middle">ID 7f3a</text>
+      </svg>
+      <figcaption>One shared ID. Any two contacts can compare notes and see the same you.</figcaption>
+    </figure>
+    <figure class="panel mine">
+      <svg viewBox="0 0 300 200" role="img" aria-label="Four separate keys, one per contact, with nothing linking them">
+        <g class="fan sep">
+          <line class="a" x1="50" y1="100" x2="250" y2="25"/><line class="b" x1="50" y1="100" x2="250" y2="75"/>
+          <line class="a" x1="50" y1="100" x2="250" y2="125"/><line class="b" x1="50" y1="100" x2="250" y2="175"/>
+        </g>
+        <circle class="e" cx="50" cy="100" r="11"/>
+        <circle class="c" cx="250" cy="25" r="7"/><circle class="c" cx="250" cy="75" r="7"/><circle class="c" cx="250" cy="125" r="7"/><circle class="c" cx="250" cy="175" r="7"/>
+        <text class="chip good" x="190" y="48" text-anchor="middle">key A</text>
+        <text class="chip good" x="190" y="86" text-anchor="middle">key B</text>
+        <text class="chip good" x="190" y="124" text-anchor="middle">key C</text>
+        <text class="chip good" x="190" y="164" text-anchor="middle">key D</text>
+      </svg>
+      <figcaption>A fresh key pair and onion address for each contact. Nothing ties them together.</figcaption>
+    </figure>
+  </div>
+  <p class="src">README.md, docs/KEY_ROTATION.md</p>
+</section>
+
+<!-- WHAT YOU NEED -->
+<section class="sec wrap" aria-labelledby="h-need">
+  <h2 id="h-need">What you need to start</h2>
+  <div class="need">
+    <ul class="gone" aria-label="Not needed">
+      <li><s>Phone number</s></li><li><s>Email address</s></li><li><s>Account</s></li><li><s>Server</s></li><li><s>Cloud</s></li>
+    </ul>
+    <p class="have">A key you swap with your contact.</p>
+  </div>
+  <p class="src">README.md</p>
+</section>
+
+<!-- SEALED: handshake, rekey, vault -->
+<section id="sealed" class="sec wrap" aria-labelledby="h-seal">
+  <h2 id="h-seal">Sealed, then resealed</h2>
+  <ol class="proto" aria-label="Noise_KKpsk0+psk2_25519_ChaChaPoly_BLAKE2s">
+    <li><span class="tok" data-final="Noise">Noise</span><span class="g">framework</span></li>
+    <li><span class="tok hl" data-final="KKpsk0+psk2">KKpsk0+psk2</span><span class="g">both keys known, plus a shared secret</span></li>
+    <li><span class="tok" data-final="25519">25519</span><span class="g">curve, with ML-KEM-768 added</span></li>
+    <li><span class="tok" data-final="ChaChaPoly">ChaChaPoly</span><span class="g">cipher</span></li>
+    <li><span class="tok" data-final="BLAKE2s">BLAKE2s</span><span class="g">hash</span></li>
+  </ol>
+  <p class="src">crates/core/src/session.rs:34</p>
+
+  <h3>If one key leaks</h3>
+  <figure class="rekey">
+    <svg viewBox="0 0 720 190" role="img" aria-labelledby="rk-t rk-d">
+      <title id="rk-t">One key against a key that moves on</title>
+      <desc id="rk-d">With a single key for the whole session, a leak exposes every message, before and after. With a new key every 32 cells or 10 minutes, messages before the leak stay sealed. Later ones are exposed until a new handshake.</desc>
+      <text class="sm" x="0" y="16">One key for the whole session</text>
+      <rect class="seg bad" x="0" y="26" width="720" height="30" rx="4"/>
+      <text class="sm" x="0" y="96">Sine Loco: new key every 32 cells or 10 minutes</text>
+      <g class="segs">
+        <rect class="seg ok" x="0" y="106" width="68" height="30" rx="4"/><rect class="seg ok" x="72" y="106" width="68" height="30" rx="4"/>
+        <rect class="seg ok" x="144" y="106" width="68" height="30" rx="4"/><rect class="seg ok" x="216" y="106" width="68" height="30" rx="4"/>
+        <rect class="seg ok" x="288" y="106" width="68" height="30" rx="4"/>
+        <rect class="seg bad" x="360" y="106" width="68" height="30" rx="4"/><rect class="seg bad" x="432" y="106" width="68" height="30" rx="4"/>
+        <rect class="seg bad" x="504" y="106" width="68" height="30" rx="4"/><rect class="seg bad" x="576" y="106" width="68" height="30" rx="4"/>
+        <rect class="seg bad" x="648" y="106" width="72" height="30" rx="4"/>
+      </g>
+      <line class="leak" x1="358" y1="22" x2="358" y2="146"/>
+      <text class="sm leaktxt" x="358" y="12" text-anchor="middle">key leaks</text>
+      <text class="sm good" x="180" y="166" text-anchor="middle">earlier cells stay sealed</text>
+      <text class="sm bad" x="540" y="166" text-anchor="middle">later cells exposed until a new handshake</text>
+    </svg>
+    <figcaption class="src">docs/DELIVERY.md. A rekey is one-way, so it protects the past, not the future.</figcaption>
+  </figure>
+
+  <h3>What one password guess costs</h3>
+  <figure class="vault">
+    <svg viewBox="0 0 320 160" role="img" aria-label="A grid of 512 dots, one per mebibyte of memory">
+      <defs><pattern id="mib" width="10" height="10" patternUnits="userSpaceOnUse"><circle cx="5" cy="5" r="2.6" class="dot"/></pattern></defs>
+      <rect width="320" height="160" fill="url(#mib)"/>
+    </svg>
+    <div class="vtxt">
+      <p class="big">512 MiB</p>
+      <p>of memory for every guess at your vault password, using Argon2id. One dot is 1 MiB.</p>
+      <p class="chips"><span>XChaCha20-Poly1305</span><span>4 KiB buckets</span><span>no plaintext header</span></p>
+    </div>
+    <figcaption class="src">crates/vault/src/lib.rs</figcaption>
+  </figure>
+</section>
+
+<!-- PLATFORMS -->
+<section class="sec wrap" aria-labelledby="h-plat">
+  <h2 id="h-plat">Where it runs</h2>
+  <ul class="plat">
+    <li><span class="dot full" role="img" aria-label="works"></span><strong>Linux terminal</strong><span>one static x86_64 binary, about 1.5 MB</span></li>
+    <li><span class="dot half" role="img" aria-label="in progress"></span><strong>Linux desktop</strong><span>native app, .deb, targeted for 0.2</span></li>
+    <li><span class="dot none" role="img" aria-label="emulator only"></span><strong>Android</strong><span>Tor connects on an emulator, no real phone yet</span></li>
+  </ul>
+</section>
+
+<!-- PULSE -->
+<section id="pulse" class="sec wrap" aria-labelledby="h-pulse">
+  <h2 id="h-pulse">Project pulse</h2>
+  <div class="pulse" id="pulse" aria-live="polite">
+    <div class="stars">
+      <p class="num" id="p-stars">–</p>
+      <p class="cap">stars</p>
+      <svg id="p-spark" class="spark" viewBox="0 0 160 40" role="img" aria-label="Star history" hidden></svg>
+    </div>
+    <div class="rel">
+      <p class="cap" id="p-latest-cap">Latest release</p>
+      <p class="tag" id="p-tag">–</p>
+      <p class="when" id="p-when"></p>
+      <ul class="assets" id="p-assets"></ul>
+    </div>
+    <div class="all">
+      <p class="cap">Recent releases</p>
+      <ul class="list" id="p-list"></ul>
+    </div>
+  </div>
+  <p class="note" id="p-note">Loads from this site's own server. Without JavaScript, see <a href="https://github.com/diePros/nerd-chat/releases">releases on GitHub</a>.</p>
+</section>
+
+<!-- LIMITS -->
+<section id="limits" class="sec wrap limits" aria-labelledby="h-limits">
+  <h2 id="h-limits">Status and limits</h2>
+  <ul class="caveats">
+    <li><strong>Unaudited.</strong> Version 0.1.0, no independent audit.</li>
+    <li><strong>33 review rounds, by AI.</strong> Not a human audit.</li>
+    <li><strong>Online only.</strong> Both people must be online, unless the outbox is on.</li>
+    <li><strong>Online time is visible</strong> to anyone who knows a contact's onion address.</li>
+    <li><strong>Out of scope:</strong> a compromised device, a global observer, RAM remanence.</li>
+    <li><strong>Android</strong> has never run on a real phone.</li>
+  </ul>
+  <p class="src">README.md, docs/SECURITY_TRACKER.md. Report vulnerabilities with GitHub's private “Report a vulnerability” form.</p>
+</section>
+
+<!-- every claim, with its source -->
+<section class="sec wrap" aria-labelledby="h-all">
+  <h2 id="h-all" class="sr">Every claim, with its source</h2>
+  <details class="ledger-wrap">
+    <summary>Every claim, with its source file</summary>
     <table class="ledger">
       <thead><tr><th scope="col">Property</th><th scope="col">Value</th><th scope="col">Source</th></tr></thead>
       <tbody>
-        <tr><th scope="row">Handshake</th><td>Noise KKpsk0+psk2 with fresh ephemeral keys on every connection. The prologue binds the version and both signing keys.</td><td><code>crates/core/src/session.rs</code></td></tr>
+        <tr><th scope="row">Handshake</th><td>Noise KKpsk0+psk2, fresh ephemeral keys on every connection. The prologue binds the version and both signing keys.</td><td><code>crates/core/src/session.rs</code></td></tr>
         <tr><th scope="row">Post-quantum</th><td>X25519 plus ML-KEM-768 hybrid, with an ephemeral ML-KEM exchange inside the handshake.</td><td><code>docs/SECURITY_TRACKER.md</code> R2-H1</td></tr>
-        <tr><th scope="row">Signatures</th><td>Ed25519 with strict verification. Weak keys and low-order X25519 points are rejected.</td><td><code>crates/core</code></td></tr>
-        <tr><th scope="row">Rekey</th><td>The transport key is replaced by a one-way function of itself after 32 cells or 10 minutes. Earlier cells stay sealed if a later key leaks.</td><td><code>docs/DELIVERY.md</code></td></tr>
-        <tr><th scope="row">Vault</th><td>Argon2id at 512 MiB, 3 passes, 4 lanes. XChaCha20-Poly1305. File length bucketed to 4 KiB, no plaintext header, rollback counter, optional keyfile on another device.</td><td><code>crates/vault/src/lib.rs</code></td></tr>
-        <tr><th scope="row">Messages</th><td>Held in memory by default. History is opt-in, in a separate encrypted file with 6-hour key buckets wrapped per 24-hour epoch.</td><td><code>docs/DELIVERY.md</code></td></tr>
-        <tr><th scope="row">Panic and purge</th><td>F12 wipes memory and screen and exits. Ctrl+] also overwrites and deletes the vault. Swap is refused and core dumps are disabled.</td><td><code>README.md</code></td></tr>
-        <tr><th scope="row">File metadata</th><td>JPEG and PNG are rebuilt from an allowlist inside a seccomp sandbox, then padded to size buckets.</td><td><code>crates/sandbox</code>, <code>crates/strip</code></td></tr>
-        <tr><th scope="row">Network hygiene</th><td>Per-contact onion services with v3 client authorization, proof-of-work defence on, and per-contact stream isolation. Tor runs in a private RAM directory.</td><td><code>docs/TRANSPORT.md</code></td></tr>
-        <tr><th scope="row">Build</th><td>Static musl binary of about 1.5 MB. Two consecutive release builds produced identical SHA256SUMS.</td><td><code>scripts/release.sh</code></td></tr>
-        <tr><th scope="row">Supply chain</th><td>cargo-deny passes. Fuzz targets exist. cargo-vet is initialised with all 210 crates still exempted.</td><td><code>deny.toml</code>, <code>fuzz/</code></td></tr>
+        <tr><th scope="row">Signatures</th><td>Ed25519, strict verification. Weak keys and low-order X25519 points are rejected.</td><td><code>crates/core</code></td></tr>
+        <tr><th scope="row">Rekey</th><td>Transport key replaced by a one-way function of itself after 32 cells or 10 minutes.</td><td><code>docs/DELIVERY.md</code></td></tr>
+        <tr><th scope="row">Vault</th><td>Argon2id 512 MiB, 3 passes, 4 lanes. XChaCha20-Poly1305. Length bucketed to 4 KiB, no plaintext header, rollback counter, optional keyfile.</td><td><code>crates/vault/src/lib.rs</code></td></tr>
+        <tr><th scope="row">Messages</th><td>In memory by default. History is opt-in: separate encrypted file, 6-hour key buckets wrapped per 24-hour epoch.</td><td><code>docs/DELIVERY.md</code></td></tr>
+        <tr><th scope="row">Panic and purge</th><td>F12 wipes memory and screen and exits. Ctrl+] also overwrites and deletes the vault. Swap refused, core dumps off.</td><td><code>README.md</code></td></tr>
+        <tr><th scope="row">File metadata</th><td>JPEG and PNG rebuilt from an allowlist in a seccomp sandbox, then padded to size buckets.</td><td><code>crates/sandbox</code>, <code>crates/strip</code></td></tr>
+        <tr><th scope="row">Network</th><td>Per-contact onion services, v3 client authorization, proof-of-work defence on, per-contact stream isolation, Tor in a private RAM directory.</td><td><code>docs/TRANSPORT.md</code></td></tr>
+        <tr><th scope="row">Build</th><td>Static musl binary, about 1.5 MB. Two consecutive release builds gave identical SHA256SUMS.</td><td><code>scripts/release.sh</code></td></tr>
+        <tr><th scope="row">Supply chain</th><td>cargo-deny passes, fuzz targets exist, cargo-vet initialised with all 210 crates still exempted.</td><td><code>deny.toml</code>, <code>fuzz/</code></td></tr>
         <tr><th scope="row">Licence</th><td>AGPL-3.0-or-later.</td><td><code>LICENSE</code></td></tr>
       </tbody>
     </table>
-  </div>
-</section>
-
-<section id="platforms" class="sec" aria-labelledby="h-plat">
-  <div class="rail"><p class="src">README.md, android/README.md</p></div>
-  <div class="body">
-    <h2 id="h-plat">Where it runs</h2>
-    <dl class="plat">
-      <div><dt>Linux terminal</dt><dd>One static x86_64 binary. Runs from a live USB. Needs <code>tor</code> installed, or an existing Tor via <code>--tor-control</code>.</dd></div>
-      <div><dt>Linux desktop</dt><dd>A native Rust app, packaged as a .deb. Targeted for 0.2.</dd></div>
-      <div><dt>Android</dt><dd>Kotlin and Compose over the same Rust core, with Tor embedded. It reaches “Tor connected” on an emulator. It has not run on a real phone yet.</dd></div>
-      <div><dt>Not planned</dt><dd>macOS, Windows, groups, voice and video, any cloud or account.</dd></div>
-    </dl>
-  </div>
-</section>
-
-<section id="pulse" class="sec" aria-labelledby="h-pulse">
-  <div class="rail"><p class="src">GitHub, refreshed every 10 minutes</p></div>
-  <div class="body wide">
-    <h2 id="h-pulse">Project pulse</h2>
-    <div class="pulse" id="pulse" aria-live="polite">
-      <div class="stars">
-        <p class="num" id="p-stars">–</p>
-        <p class="cap">stars</p>
-        <svg id="p-spark" class="spark" viewBox="0 0 160 40" role="img" aria-label="Star history" hidden></svg>
-      </div>
-      <div class="rel">
-        <p class="cap" id="p-latest-cap">Latest release</p>
-        <p class="tag" id="p-tag">–</p>
-        <p class="when" id="p-when"></p>
-        <ul class="assets" id="p-assets"></ul>
-      </div>
-      <div class="all">
-        <p class="cap">Recent releases</p>
-        <ul class="list" id="p-list"></ul>
-      </div>
-    </div>
-    <p class="note" id="p-note">Release data loads from this site's own server. Without JavaScript, see <a href="https://github.com/diePros/nerd-chat/releases">all releases on GitHub</a>.</p>
-  </div>
-</section>
-
-<section id="limits" class="sec limits" aria-labelledby="h-limits">
-  <div class="rail"><p class="src">README.md, docs/SECURITY_TRACKER.md</p></div>
-  <div class="body">
-    <h2 id="h-limits">Status and limits</h2>
-    <ul class="caveats">
-      <li><strong>Unaudited.</strong> Version 0.1.0. It has had no independent professional audit.</li>
-      <li><strong>33 review rounds, by AI.</strong> Adversarial reviews by Claude Opus are tracked finding by finding. They are not a substitute for a human audit.</li>
-      <li><strong>Online only.</strong> Both people must be online unless the optional encrypted outbox is on.</li>
-      <li><strong>Your online time is visible</strong> to anyone who knows a contact's onion address. Treat a shared bundle as confidential and rotate keys when in doubt.</li>
-      <li><strong>Out of reach for any software like this:</strong> a compromised device, a global observer correlating traffic, and RAM remanence.</li>
-      <li><strong>Android on a real phone</strong> has not been tried. The Android storage and key-erasure code has never run on a device.</li>
-    </ul>
-    <p>Not a replacement for a tool you can trust with your life. Report vulnerabilities through GitHub's private “Report a vulnerability” form on the repository.</p>
-  </div>
+  </details>
 </section>
 </main>
 
-<footer class="foot">
-  <div class="rail"></div>
-  <div class="body">
-    <p>This page sets no cookies, runs no analytics and loads nothing from other sites. Fonts are served from here.</p>
-    <p>Sine Loco is free software under the AGPL-3.0-or-later. <a href="https://github.com/diePros/nerd-chat">Source</a> · <a href="https://github.com/diePros/nerd-chat/releases">Releases</a></p>
-  </div>
+<footer class="foot wrap">
+  <p>No cookies, no analytics, nothing loaded from other sites. Free software, AGPL-3.0-or-later. <a href="https://github.com/diePros/nerd-chat">Source</a> · <a href="https://github.com/diePros/nerd-chat/releases">Releases</a></p>
 </footer>
 </body>
 </html>
