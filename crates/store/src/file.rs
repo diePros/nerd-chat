@@ -95,6 +95,31 @@ const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Write `data` atomically: random temp name (create_new: never follows a planted symlink or reuses
 /// an attacker's file) -> chmod 0600 -> fsync -> rename -> fsync(dir). Temp file removed on error.
+/// The rollback-counter file: `nonce[24] | AEAD(counter u64 LE)[8+16]` = 48 bytes, ALWAYS the same size, under a key only the unlocked vault has, a fresh nonce on every write.
+/// (Before, it was the 8 plain bytes of the counter: anyone who could look at the folder saw how many times the vault had been saved.)
+const COUNTER_FILE_LEN: usize = 24 + 8 + 16;
+const COUNTER_AAD: &[u8] = b"nerd-chat-counter-file-v1";
+
+fn counter_file(vault: &Vault) -> Vec<u8> {
+    use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut nonce).expect("OS RNG unavailable");
+    let key = vault.subkey(b"counter-file");
+    let ct = XChaCha20Poly1305::new((&*key).into()).encrypt(XNonce::from_slice(&nonce), Payload { msg: &vault.counter().to_le_bytes(), aad: COUNTER_AAD }).expect("encrypt");
+    [nonce.as_slice(), ct.as_slice()].concat()
+}
+
+/// Read the counter file (new 48-byte form, or the old 8 plain bytes: it is rewritten in the new form on the next save).
+fn read_counter(path: &Path, vault: &Vault) -> Result<u64, StoreError> {
+    use chacha20poly1305::{aead::{Aead, KeyInit, Payload}, XChaCha20Poly1305, XNonce};
+    let b = read_regular_file(path, COUNTER_FILE_LEN as u64)?;
+    if b.len() == 8 { return Ok(u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?)); }
+    if b.len() != COUNTER_FILE_LEN { return Err(StoreError::Corrupt); }
+    let key = vault.subkey(b"counter-file");
+    let pt = XChaCha20Poly1305::new((&*key).into()).decrypt(XNonce::from_slice(&b[..24]), Payload { msg: &b[24..], aad: COUNTER_AAD }).map_err(|_| StoreError::Corrupt)?;
+    Ok(u64::from_le_bytes(pt.try_into().map_err(|_| StoreError::Corrupt)?))
+}
+
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StoreError> {
     let mut rnd = [0u8; 8];
     getrandom::fill(&mut rnd).expect("OS RNG unavailable");
@@ -163,11 +188,10 @@ impl VaultFile {
     pub fn open(path: &Path, counter_path: Option<&Path>, pw: &[u8], keyfile: Option<&[u8]>) -> Result<(Self, OpenInfo), StoreError> {
         let blob = read_regular_file(path, MAX_VAULT_BYTES)?;
         let cpath = counter_path.map(Path::to_path_buf).unwrap_or_else(|| default_counter_path(path));
-        let min = if cpath.exists() {
-            let b = read_regular_file(&cpath, 8)?;
-            Some(u64::from_le_bytes(b.try_into().map_err(|_| StoreError::Corrupt)?))
-        } else { None };
-        let (vault, data) = Vault::open_checked(&blob, pw, keyfile, min.unwrap_or(0))?;
+        // open first, THEN read the counter: its file is encrypted under a key that only the unlocked vault has
+        let (vault, data) = Vault::open_checked(&blob, pw, keyfile, 0)?;
+        let min = if cpath.exists() { Some(read_counter(&cpath, &vault)?) } else { None };
+        if let Some(m) = min { if vault.counter() < m { return Err(StoreError::Vault(VaultError::Rollback { found: vault.counter(), expected: m })); } }
         let store = Store::decode(&data).map_err(|_| StoreError::Vault(VaultError::Malformed))?;
         let info = OpenInfo { rollback_unchecked: min.is_none(), counter: vault.counter(), counter_same_device: same_device(path, &cpath) };
         Ok((Self { path: Some(path.to_path_buf()), counter_path: Some(cpath), vault, store }, info))
@@ -184,7 +208,7 @@ impl VaultFile {
             if cancel.load(Ordering::SeqCst) { return Err(StoreError::Cancelled); }
             write_atomic(p, &blob)?;
             // the vault file IS written at this point: a failure of the counter file must be told apart (the caller must not roll its memory back)
-            if let Some(c) = &self.counter_path { write_atomic(c, &self.vault.counter().to_le_bytes()).map_err(|e| StoreError::CounterWrite(e.to_string()))?; }
+            if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault)).map_err(|e| StoreError::CounterWrite(e.to_string()))?; }
         }
         Ok(())
     }
@@ -195,7 +219,7 @@ impl VaultFile {
         let blob = self.vault.change_credentials(old_pw, old_kf, new_pw, new_kf, profile, &data)?;
         if let Some(p) = &self.path {
             write_atomic(p, &blob)?;
-            if let Some(c) = &self.counter_path { write_atomic(c, &self.vault.counter().to_le_bytes())?; }
+            if let Some(c) = &self.counter_path { write_atomic(c, &counter_file(&self.vault))?; }
         }
         Ok(())
     }
@@ -377,5 +401,57 @@ mod tests {
         let r = VaultFile::create(Some(&link), None, b"a password of 12+", None, Profile::LowMem);
         assert!(matches!(r, Err(StoreError::Exists)), "{:?}", r.err());
         assert!(!d.path().join("nowhere").exists());
+    }
+
+    #[test]
+    fn the_counter_file_is_fixed_size_encrypted_and_does_not_count_the_saves() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("v");
+        let mut vf = VaultFile::create(Some(&p), None, b"pw", None, Profile::InsecureTest).unwrap();
+        let cp = default_counter_path(&p);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..12 {
+            vf.save().unwrap();
+            let raw = fs::read(&cp).unwrap();
+            assert_eq!(raw.len(), COUNTER_FILE_LEN, "always the same size");
+            assert!(!raw.windows(8).any(|w| w == vf.vault.counter().to_le_bytes()), "the counter value is not in the file in the clear");
+            seen.insert(raw);
+        }
+        assert_eq!(seen.len(), 12, "a fresh nonce every time: no two writes look alike");
+        let (again, info) = VaultFile::open(&p, None, b"pw", None).unwrap();
+        assert!(!info.rollback_unchecked && info.counter == again.vault.counter());
+    }
+
+    #[test]
+    fn an_old_plain_counter_file_still_opens_and_is_upgraded_on_the_next_save() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("v");
+        let vf = VaultFile::create(Some(&p), None, b"pw", None, Profile::InsecureTest).unwrap();
+        let cp = default_counter_path(&p);
+        fs::write(&cp, vf.vault.counter().to_le_bytes()).unwrap();                 // what the previous version wrote
+        let (mut vf2, info) = VaultFile::open(&p, None, b"pw", None).unwrap();
+        assert!(!info.rollback_unchecked);
+        vf2.save().unwrap();
+        assert_eq!(fs::read(&cp).unwrap().len(), COUNTER_FILE_LEN, "rewritten in the new form");
+        // and the old form still catches a rollback: a plain counter FAR ahead of the vault
+        fs::write(&cp, u64::MAX.to_le_bytes()).unwrap();
+        assert!(matches!(VaultFile::open(&p, None, b"pw", None), Err(StoreError::Vault(VaultError::Rollback { .. }))));
+    }
+
+    #[test]
+    fn a_tampered_or_foreign_counter_file_is_refused_not_trusted() {
+        let d = tempfile::tempdir().unwrap(); let p = d.path().join("v");
+        let mut vf = VaultFile::create(Some(&p), None, b"pw", None, Profile::InsecureTest).unwrap();
+        vf.save().unwrap();
+        let cp = default_counter_path(&p);
+        let good = fs::read(&cp).unwrap();
+        let mut bad = good.clone(); bad[30] ^= 1;
+        fs::write(&cp, &bad).unwrap();
+        assert!(matches!(VaultFile::open(&p, None, b"pw", None), Err(StoreError::Corrupt)), "flipped bit");
+        fs::write(&cp, &good[..40]).unwrap();
+        assert!(matches!(VaultFile::open(&p, None, b"pw", None), Err(StoreError::Corrupt)), "wrong length");
+        // a counter file made by ANOTHER vault does not decrypt (different key): refused
+        let d2 = tempfile::tempdir().unwrap(); let p2 = d2.path().join("w");
+        let mut other = VaultFile::create(Some(&p2), None, b"pw", None, Profile::InsecureTest).unwrap(); other.save().unwrap();
+        fs::copy(default_counter_path(&p2), &cp).unwrap();
+        assert!(matches!(VaultFile::open(&p, None, b"pw", None), Err(StoreError::Corrupt)));
     }
 }

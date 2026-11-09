@@ -35,6 +35,8 @@ const PAD_BUCKET: usize = 4096;
 /// Bytes in the file besides the padded plaintext: prefix + data nonce + AEAD tag.
 const OVERHEAD: usize = PREFIX + 24 + 16;
 pub const MIN_KEYFILE_LEN: usize = 32;
+/// The save counter grows by 1 to this many per save (random, see `seal`).
+pub const COUNTER_STEP: u64 = 1 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -187,10 +189,25 @@ impl Vault {
     /// KDF profile this vault was opened/created with (offer an upgrade if it is `LowMem`).
     pub fn profile(&self) -> Profile { self.profile }
 
-    /// Serialize `data`. Increments the save counter; fresh nonce every call.
+    /// Serialize `data`. Advances the save counter by a RANDOM amount (1..=COUNTER_STEP) and uses a fresh nonce every call. The counter only has to be monotone; a random
+    /// step means that the rollback-counter file (which sits next to the vault) does not reveal HOW MANY times the vault was saved, i.e. roughly how many messages were sent.
     pub fn seal(&mut self, data: &[u8]) -> Result<Vec<u8>, VaultError> {
-        self.counter += 1;
+        let mut r = [0u8; 4];
+        OsRng.fill_bytes(&mut r);
+        self.counter = self.counter.checked_add(1 + (u32::from_le_bytes(r) as u64 % COUNTER_STEP)).ok_or(VaultError::TooLarge)?;
         self.encode(data)
+    }
+
+    /// A 32-byte key for another purpose (a file next to the vault), derived from the data key and a label: unknown to anyone without the password, and different per label.
+    pub fn subkey(&self, label: &[u8]) -> Zeroizing<[u8; 32]> {
+        let mut h = Blake2b::<U32>::new();
+        h.update(b"nerd-chat-vault-subkey-v1");
+        h.update((label.len() as u32).to_le_bytes());
+        h.update(label);
+        h.update(&**self.dk);
+        let mut out = Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&h.finalize());
+        out
     }
 
     fn encode(&self, data: &[u8]) -> Result<Vec<u8>, VaultError> {
@@ -289,10 +306,27 @@ mod tests {
         let blob = v.seal(b"secret keys").unwrap();
         let (v2, pt) = Vault::open(&blob, b"pw", None).unwrap();
         assert_eq!(&pt[..], b"secret keys");
-        assert_eq!(v2.counter(), 1);
+        assert!(v2.counter() >= 1 && v2.counter() <= COUNTER_STEP);
+        let first = v2.counter();
         let mut v2 = v2;
         let b2 = v2.seal(b"x").unwrap();
-        assert_eq!(Vault::open(&b2, b"pw", None).unwrap().0.counter(), 2);
+        let second = Vault::open(&b2, b"pw", None).unwrap().0.counter();
+        assert!(second > first && second - first <= COUNTER_STEP, "monotone, by a random step");
+    }
+
+    #[test]
+    fn the_counter_does_not_count_saves_and_a_subkey_is_per_label_and_per_vault() {
+        let mut v = Vault::create(b"pw", None, P).unwrap();
+        let mut steps = std::collections::BTreeSet::new();
+        let mut last = v.counter();
+        for _ in 0..40 { v.seal(b"x").unwrap(); steps.insert(v.counter() - last); last = v.counter(); }
+        assert!(steps.len() > 20, "the increments are random, not +1: {steps:?}");
+        assert!(steps.iter().all(|s| (1..=COUNTER_STEP).contains(s)));
+        let (a, b) = (v.subkey(b"counter-file"), v.subkey(b"history"));
+        assert_ne!(*a, *b, "different labels, different keys");
+        assert_eq!(*a, *v.subkey(b"counter-file"), "deterministic for one vault");
+        let other = Vault::create(b"pw", None, P).unwrap();
+        assert_ne!(*a, *other.subkey(b"counter-file"), "another vault has another key");
     }
 
     #[test]
@@ -339,10 +373,10 @@ mod tests {
     #[test]
     fn rollback_empty_password_and_credential_recheck() {
         let mut v = Vault::create(b"pw", None, P).unwrap();
-        let b1 = v.seal(b"1").unwrap();
-        let b2 = v.seal(b"2").unwrap();
-        assert!(Vault::open_checked(&b2, b"pw", None, 2).is_ok());
-        assert!(matches!(Vault::open_checked(&b1, b"pw", None, 2), Err(VaultError::Rollback { found: 1, expected: 2 })));
+        let b1 = v.seal(b"1").unwrap(); let c1 = v.counter();
+        let b2 = v.seal(b"2").unwrap(); let c2 = v.counter();
+        assert!(Vault::open_checked(&b2, b"pw", None, c2).is_ok());
+        assert!(matches!(Vault::open_checked(&b1, b"pw", None, c2), Err(VaultError::Rollback { found, expected }) if found == c1 && expected == c2));
         assert!(matches!(Vault::create(b"", None, P), Err(VaultError::EmptyPassword)));
         assert!(matches!(v.change_credentials(b"WRONG", None, b"n", None, P, b"x"), Err(VaultError::WrongCredentials)));
         assert!(matches!(v.change_credentials(b"pw", None, b"", None, P, b"x"), Err(VaultError::EmptyPassword)));
