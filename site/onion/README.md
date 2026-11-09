@@ -20,30 +20,68 @@ with checksums. New releases appear by themselves: you never edit the site for a
 - The last 3 releases are kept; older ones are deleted. `/dl/latest/` always points at the newest
   non-pre-release.
 
-## Server: plain Debian LXC, no Docker
+## Server: a small Debian LXC, no Docker
 
-1. In Proxmox, create an **unprivileged Debian 12 LXC** (1 vCPU, 512 MB RAM, 4 GB disk is plenty).
-2. Put it **behind the VPN** (see below), then get this repository's `site/` folder into it
-   (`git clone`, or `scp -r site root@<container>:`).
-3. `cd site/onion && sudo ./install.sh`
-   It installs `tor` and `nginx`, builds the onion variant of the site, starts the onion service,
-   starts the sync timer, and prints the onion address.
-4. Back up `/var/lib/tor/sineloco/`. The secret key in there **is** the address.
+**Recommended resources** (unprivileged Debian 12 container):
 
-Standard (location-hiding) onion service instead of single-hop: `SINGLE_HOP=0 sudo ./install.sh`.
+| | Recommended | Why |
+|---|---|---|
+| CPU | 1 vCPU, no limit | Tor's main loop is single-threaded, so one fast core matters more than many. A second core only helps under a flood of requests. |
+| RAM | 1 GB (512 MB is the floor) | Tor needs roughly 100 to 250 MB for one onion service, nginx about 10 MB. The rest is headroom for updates and the sync job. |
+| Swap | 512 MB | Safety net only. |
+| Disk | 8 GB | The system is about 1.5 GB. Each release is a few MB to tens of MB, 3 are kept, and any single file is capped at 100 MB (`MAX_ASSET_MB`). |
+| Network | one bridge, VPN as the only way out | Real speed is limited by your VPN and upload, not the container. |
+| Options | start at boot, no nesting, no extra features | Nothing here needs Docker, FUSE or a privileged container. |
 
-## VPN in front, and why it needs a kill switch
+## Set it up (with WireGuard)
 
-The installer sets up a **single-hop onion service** (`HiddenServiceSingleHopMode`): faster, but Tor
-relays then connect straight to this server and see its public IP. With a VPN in front they see the
-VPN's address instead of your home IP. That only holds if traffic can **never** leave outside the VPN:
+Run these on the **Proxmox host**. Replace `210` with a free container ID, `vmbr0` with your bridge, and the
+template name with what `pveam available | grep debian-12` shows.
 
-- Best: make the VPN the container's only route (a VPN gateway/router VM, or a firewall rule on the
-  Proxmox bridge that drops everything not going through the VPN). Do it outside the container, so a
-  container problem cannot undo it.
-- After install, the script prints the public IP seen from the container. It must be the VPN's.
-- Test the kill switch: take the VPN down and confirm the container has no connectivity.
-- Single-hop mode is incompatible with running Tor as a client on the same instance. That is fine here.
+    # 0. once: WireGuard is a kernel module and loads on the host, not in the container
+    modprobe wireguard && echo wireguard >> /etc/modules
+
+    # 1. the container
+    pct create 210 local:vztmpl/<debian-12 template> --hostname sineloco-onion \
+        --unprivileged 1 --cores 1 --memory 1024 --swap 512 --rootfs local-lvm:8 \
+        --net0 name=eth0,bridge=vmbr0,ip=dhcp --onboot 1
+    pct start 210
+
+    # 2. your VPN config (a full-tunnel WireGuard .conf from your provider) goes in as wg0.conf
+    pct exec 210 -- install -d -m 700 /etc/wireguard
+    pct push 210 ./myvpn.conf /etc/wireguard/wg0.conf --perms 600
+
+    # 3. this repository's site/ folder, then install
+    tar czf site.tgz site && pct push 210 site.tgz /root/site.tgz
+    pct exec 210 -- bash -c 'cd /root && tar xzf site.tgz && cd site/onion && ./install.sh'
+
+The installer ends by printing the onion address. Back up `/var/lib/tor/sineloco/`: the secret key in there
+**is** the address.
+
+`SINGLE_HOP=0 ./install.sh` gives a standard (location-hiding) onion service instead of single-hop.
+
+## The VPN and the kill switch
+
+Single-hop mode is faster, but Tor relays then connect straight to this server and see its public IP.
+The installer makes sure that IP is your VPN's, and fails closed:
+
+- Your WireGuard config is installed as `/etc/wireguard/wg0.conf` and started with `wg-quick@wg0`
+  (it must route everything: `AllowedIPs` includes `0.0.0.0/0`). A hostname in `Endpoint` is replaced by
+  its IP address, because the firewall has to name it; rerun the installer if your VPN changes that address.
+- A firewall (`/etc/nftables.conf`, table `killswitch`) drops everything that is not inside the tunnel,
+  except the tunnel's own packets to your VPN endpoint and local DHCP. If the VPN drops, the container
+  has no internet; it does not fall back to your home IP.
+- Tor, nginx and the sync job are tied to the tunnel (`BindsTo=wg-quick@wg0`): they stop if it stops.
+- Tor is only started after three checks pass: a handshake with the VPN, a public IP that differs from the
+  one before, and a leak test (a request forced out of the normal network port must fail).
+- `sudo sineloco-vpn-check` repeats all of that whenever you want.
+- There is no SSH in the container. Manage it from the host with `pct enter 210`.
+- The container has no home-network access of its own other than the VPN endpoint and DHCP; apt updates
+  also go through the VPN.
+
+If the tunnel does not come up inside an unprivileged container, check on the host that `lsmod | grep wireguard`
+shows the module, and read `journalctl -u wg-quick@wg0` in the container. Some providers' configs need
+`PostUp` lines that an unprivileged container may refuse; a minimal config (Interface + one Peer) always works.
 
 ## Day to day
 
@@ -77,6 +115,8 @@ tampered download. The page says so next to the hashes.
 
 Tested here: the sync script against a fake GitHub (good release, tampered file refused, signatures
 valid / unknown / wrong key / wrong pinned fingerprint), the site build, the generated downloads page,
-and the Tor config (`tor --verify-config`). **Not tested here:** `install.sh` on a real Debian machine,
-the systemd units, and the nginx config (no nginx on the dev machine). Run `nginx -t` and the first
-sync on the server and read the output before sharing the address.
+and the Tor config (`tor --verify-config`). The firewall rules and endpoint pinning were generated and
+read back for sample configs. **Not tested here:** `install.sh` and `vpn-setup.sh --install` on a real
+Debian machine (the nft rules were not loaded, WireGuard was not started), the systemd units, and the nginx
+config (neither nginx nor nft is on the dev machine). On the server, read the installer's output, run
+`nginx -t` and `sudo sineloco-vpn-check`, and do the "take the VPN down" test before sharing the address.
