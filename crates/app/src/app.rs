@@ -342,6 +342,8 @@ pub struct App {
     prep_rx: Option<([u8; 8], Receiver<Result<(nerd_chat_chat::FileOut, Vec<String>), nerd_chat_strip::StripError>>)>,
     /// Security warnings from the engine: they stay on screen until acknowledged with `k` (never overwritten by status text).
     pub alerts: Vec<(String, u32)>,
+    /// This session's warnings, newest last, kept after they were acknowledged (memory only, wiped by panic/purge).
+    alert_log: Vec<(String, u32)>,
     /// Alerts that did not fit (never evict an unacknowledged one).
     pub alerts_dropped: u32,
     kdf_rx: Option<Receiver<KdfMsg>>,
@@ -368,7 +370,7 @@ impl App {
             engine: None, start_rx: None, started_ids: HashSet::new(), stop_rx: None, online: Online::Offline, chats: HashMap::new(), linked: HashSet::new(), unread: HashMap::new(), created: Vec::new(), purge_pending: None, purge_report: None, pane: Pane::Details, mode: Mode::Normal, locked: false, scroll: 0, select: None, saved_sel: 0, del_armed: false, max_scroll: std::cell::Cell::new(None), quit_armed: false, offline_armed: false, compose: ComposeBuf::new(),
             offers: HashMap::new(), accepted: HashMap::new(), inbox: HashMap::new(),
             prep_rx: None,
-            alerts: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
+            alerts: Vec::new(), alert_log: Vec::new(), alerts_dropped: 0, kdf_rx: None, kdf_cancel: Arc::new(AtomicBool::new(false)), kdf_creating: false, kdf_back: Screen::Unlock,
             #[cfg(test)] test_async: false,
         };
         a.status = if ram { "RAM-only mode: nothing will be written to disk.".into() }
@@ -430,6 +432,8 @@ impl App {
         Some((c.name.as_str(), c.trust, sn))
     }
     /// Number of typed characters in the (hidden) join-code buffer.
+    /// Warnings raised in this session, oldest first, with repeat counts (kept after "Got it"; memory only).
+    pub fn alert_history(&self) -> &[(String, u32)] { &self.alert_log }
     pub fn code_chars(&self) -> usize { self.code_buf.chars() }
     /// Number of typed characters in the repeat-password buffer (only the count leaves the core).
     pub fn confirm_chars(&self) -> usize { self.pw2.chars() }
@@ -528,6 +532,7 @@ impl App {
         self.inbox.clear(); // Zeroizing: received files wiped
         self.cfg.keyfile = None; // Zeroizing: dropped now
         self.alerts.clear();
+        self.alert_log.clear();
         self.alerts_dropped = 0;
         self.created.clear();
         self.kdf_cancel.store(true, Ordering::SeqCst); // a creating worker stops before it writes anything (R8-L4)
@@ -1693,6 +1698,8 @@ impl App {
         let mut t: String = text.chars().take(300).collect();
         let who = id.and_then(|i| self.contact(i)).map(|c| c.name.clone());
         if let Some(w) = who { t = format!("{w}: {t}"); }
+        if let Some(e) = self.alert_log.iter_mut().rev().find(|(a, _)| *a == t) { e.1 = e.1.saturating_add(1); }
+        else { if self.alert_log.len() >= 30 { self.alert_log.remove(0); } self.alert_log.push((t.clone(), 1)); }
         if let Some(e) = self.alerts.iter_mut().find(|(a, _)| *a == t) { e.1 = e.1.saturating_add(1); }
         else if self.alerts.len() < 5 { self.alerts.push((t.clone(), 1)); }
         else { self.alerts_dropped = self.alerts_dropped.saturating_add(1); }
@@ -2968,6 +2975,21 @@ mod tests {
             let s = screen_text(&a, w, h);
             assert!(s.contains("File offered") || s.contains("File offered (up to"), "{w}x{h}: the offer must be visible in the chat: {s}");
         }
+    }
+
+    #[test]
+    fn the_alert_history_outlives_the_acknowledgement_and_dies_with_a_panic() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = create_app(d.path(), "v"); add_peer(&mut a, "bob");
+        let id = a.vf.as_ref().unwrap().store.contacts[0].id;
+        a.record_alert(Some(id), "bad thing"); a.record_alert(Some(id), "bad thing");
+        a.handle(Key::Char('z'));
+        assert!(a.alerts.is_empty());
+        assert_eq!(a.alert_history(), &[("bob: bad thing".to_string(), 2)]);
+        for i in 0..40 { a.record_alert(None, &format!("n{i}")); }
+        assert_eq!(a.alert_history().len(), 30, "bounded");
+        a.panic_wipe();
+        assert!(a.alert_history().is_empty(), "wiped with everything else");
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub struct Gui {
     settings_open: bool,
     menu_hidden: bool,
     menu_note: String,
+    purge_ok: bool,
     /// developer options
     shot: Option<(PathBuf, u32)>,
     frames: u32,
@@ -89,7 +90,7 @@ impl Gui {
         if let Some(a) = val("--tor-socks").and_then(|s| nerd_chat_net::tor::Addr::parse(&s)) { cfg.tor.socks = Some(a); }
         cfg.tor.trust_control = has("--tor-trust-control");
         let shot = val("--screenshot").map(|p| (PathBuf::from(p), val("--shot-frame").and_then(|s| s.parse().ok()).unwrap_or(40)));
-        let mut g = Gui { shell, cfg: Some(cfg), app: None, user_offline: false, retry_at: None, retries: 0, started: false, prompt_text: String::new(), prompt_for: None, notice_seen: Default::default(), skip_notice: has("--skip-notice"), settings_open: false, menu_hidden: crate::menu::user_entry_path().is_some_and(|p| crate::menu::is_hidden(&p)), menu_note: String::new(), shot, frames: 0,
+        let mut g = Gui { shell, cfg: Some(cfg), app: None, user_offline: false, retry_at: None, retries: 0, started: false, prompt_text: String::new(), prompt_for: None, notice_seen: Default::default(), skip_notice: has("--skip-notice"), settings_open: false, menu_hidden: crate::menu::user_entry_path().is_some_and(|p| crate::menu::is_hidden(&p)), menu_note: String::new(), purge_ok: false, shot, frames: 0,
             #[cfg(feature = "demo")] demo: None };
         #[cfg(feature = "demo")]
         if has("--demo") { g.demo = Some(crate::view::demo::Demo::new()); }
@@ -192,7 +193,8 @@ impl Gui {
         if cmds.settings { self.settings_open = true; }
         if self.settings_open {
             let entry = crate::menu::user_entry_path();
-            view::settings(ctx, &mut self.settings_open, &mut self.menu_hidden, entry.as_deref(), &mut self.menu_note);
+            let purge = match self.app.as_ref() { Some(app) => view::settings(ctx, app, &mut self.settings_open, &mut self.menu_hidden, entry.as_deref(), &mut self.menu_note, &mut self.purge_ok), None => false };
+            if purge { if let Some(app) = self.app.as_mut() { if app.handle(Key::Purge) == Action::Purge { self.wipe_and_exit(ctx, true); } } }
         }
         if cmds.panic { self.wipe_and_exit(ctx, false); }
         self.auto_connect();

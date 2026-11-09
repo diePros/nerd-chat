@@ -532,7 +532,9 @@ fn offer_card(ui: &mut egui::Ui, name: &str, o: &nerd_chat_app::app::TorLink, cm
 }
 
 /// Settings window: the application-menu entry, and what the program does and does not protect (plain words).
-pub fn settings(ctx: &egui::Context, open: &mut bool, hidden: &mut bool, entry: Option<&std::path::Path>, note: &mut String) {
+/// Returns true when the user confirmed a PURGE.
+pub fn settings(ctx: &egui::Context, app: &App, open: &mut bool, hidden: &mut bool, entry: Option<&std::path::Path>, note: &mut String, purge_ok: &mut bool) -> bool {
+    let mut purge = false;
     egui::Window::new("Settings").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
         ui.set_min_width(460.0);
         ui.label(RichText::new("Application menu").strong());
@@ -548,10 +550,23 @@ pub fn settings(ctx: &egui::Context, open: &mut bool, hidden: &mut bool, entry: 
         }
         if !note.is_empty() { ui.label(RichText::new(note.as_str()).color(RED)); }
         ui.separator();
+        ui.label(RichText::new("Warnings in this session").strong());
+        if app.alert_history().is_empty() { ui.label(RichText::new("None.").color(MUTED)); }
+        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| for (t, n) in app.alert_history().iter().rev() {
+            ui.label(RichText::new(format!("{t}{}", if *n > 1 { format!(" (x{n})") } else { String::new() })).small());
+        });
+        ui.label(RichText::new("Kept in memory only, until you close the app or press panic.").color(MUTED).small());
+        ui.separator();
+        ui.label(RichText::new("Purge").strong().color(RED));
+        ui.label(RichText::new("Like panic, and in addition every file this session made (your vault, saved contact files, saved received files) is overwritten and deleted. This cannot be undone.").color(MUTED).small());
+        ui.checkbox(purge_ok, "I understand: my vault and these files will be destroyed");
+        if ui.add_enabled(*purge_ok, egui::Button::new(RichText::new("Purge everything and exit").color(Color32::WHITE)).fill(Color32::from_rgb(140, 40, 40))).clicked() { purge = true; }
+        ui.separator();
         ui.label(RichText::new("About").strong());
         ui.label(format!("Nerd-chat {}. Unaudited software: read SECURITY.md before you rely on it.", env!("CARGO_PKG_VERSION")));
         ui.label(RichText::new("Messages exist only in memory. There is no screen-reader support on purpose: a screen reader would receive a copy of every message. The panic button wipes everything and exits.").color(MUTED).small());
         ui.add_space(8.0);
-        if ui.button("Close").clicked() { *open = false; }
+        if ui.button("Close").clicked() { *open = false; *purge_ok = false; }
     });
+    purge
 }
