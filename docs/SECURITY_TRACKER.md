@@ -501,3 +501,18 @@ No critical/high. Moved files verified byte-identical (`similarity index 100%`);
 
 ## D-5 GUI dependencies (owner approved, 2026-11-09)
 egui/eframe 0.37 with features `default_fonts, glow, wayland, x11` only (no AccessKit, no clipboard, no web screen reader, no system fonts) enter the project in `crates/gui`; the terminal binary and its static build do not link them. `cargo deny` stays green with ONE narrow exception: `epaint_default_fonts` (bundled fonts) is allowed the SIL OFL 1.1 and the Ubuntu Font Licence. `cargo vet` exemptions grew from about 210 to 395 crates (all UNAUDITED, like the existing ones); `cargo vet` and `cargo deny` pass. Audit backlog is listed by `cargo vet`.
+
+## Review 28 (Opus, SPEC of pairing over Tor, 2026-11-09) — integrated into the spec (section 8)
+No critical. The crypto argument holds (one online guess per offer; nothing offline-attackable from the link). Findings fixed IN THE SPEC before any code:
+
+| # | Finding | Status |
+|---|---|---|
+| R28-H1 | joiner retries cannot work: Tor will not re-ask the same HSDirs for ~15 min after "not found" | SPEC FIXED: publish only after `HS_DESC UPLOADED` (own control connection), bounded joiner retry |
+| R28-H2 | "the link is public, safe anywhere" is false (presence probe, rendezvous-circuit confirmation, burning) | SPEC FIXED: presence-sensitive link, publish when the partner is ready, short TTL, count first rendezvous |
+| R28-M1 | attacker-caused offer failures feed the process-wide lockout and block ALL pairing | SPEC FIXED: separate remote lockout, counted only after a real SPAKE message; distinct alert |
+| R28-M2 | `pair.rs` hard-codes a 300 s TTL | SPEC FIXED: TTL constructor, offer created at publication |
+| R28-M3 | cancel/panic cannot interrupt Tor streams (no shutdown, blocking SOCKS connect) | SPEC FIXED: `Stream::shutdown`, early registration, cancel checks |
+| R28-M4 | engine command for hosting: races, orphans, no events | SPEC FIXED: `pair_host_fn` with its own control connection; drop = removal |
+| R28-M5 | `can_host` probe tests the wrong command form | SPEC FIXED: the real public `ADD_ONION` decides; bit untouched |
+| R28-M6 | `nerdchat:pair/` prefix names the app to the link carrier | SPEC FIXED: bare onion id |
+| R28-L1..L7, I1..I4 | descriptor lingers ~3 h; random socket name; joiner error classes; clear code after failure; trust wording; online presence; derive nothing from the code | SPEC FIXED / documented |
