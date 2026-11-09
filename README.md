@@ -12,12 +12,12 @@ key pair and its own onion service, and everything runs from a **single static L
 - **Keys:** per-contact Ed25519 (signing) + X25519 + ML-KEM-768 (post-quantum hybrid) in a Noise `KKpsk0+psk2` handshake; every message is
   signed **and** encrypted; fixed 1 KiB cells; contact keys are exchanged locally (safety numbers to verify).
 - **Transport:** one Tor v3 onion service per contact with client authorisation; no server in between; online-only peer to peer
-  (messages exist only in RAM; the one exception is the opt-in encrypted outbox, which keeps messages your contact has not confirmed yet in the vault). Your own Tor is started in a RAM directory, or an existing one (Tails/Whonix) is used.
+  (messages exist only in RAM unless you choose otherwise: the `Persist` setting can keep unsent texts, or all messages for 1 or 7 days, in a separate encrypted history file; off by default on Linux, 1 day on Android). Your own Tor is started in a RAM directory, or an existing one (Tails/Whonix) is used.
 - **Vault:** keys live in one password-locked vault (Argon2id, XChaCha20-Poly1305, padded, rollback counter); optional keyfile on another device.
 - **Files:** JPEG/PNG (and explicit plain text) are cleaned of metadata by allowlist, in a sandboxed helper process (seccomp), padded to size buckets,
   accepted only by explicit consent, re-cleaned by the receiver and saved under a neutral name.
 - **Panic:** F12 or Ctrl+\ (panic-lock) wipes memory and screen and exits immediately; Ctrl+] (purge) additionally overwrites and deletes the vault, counter, keyfile and exported files. No logs, no automatic history, no clipboard.
-- **Keeping messages is manual:** nothing is ever saved by itself (the opt-in encrypted outbox, on by default in the Android app, keeps only the not-yet-confirmed messages you SENT until they arrive: `docs/DELIVERY.md`); you can save a chosen message into the encrypted vault (message cursor `m`, `y`) and delete it again.
+- **Keeping messages:** on Linux nothing is saved by itself unless you switch the history on (setting `O`; `docs/HISTORY_AND_TIMING_PLAN.md`); the Android app keeps messages for 1 day by default (changeable in Settings); you can save a chosen message into the encrypted vault (message cursor `m`, `y`) and delete it again.
 - **Key rotation:** you can replace the onion address and auth key of a contact so that old copies of your bundle stop revealing when you are online.
 - **GUI (in progress):** `cargo build -p nerd-chat-gui` (dynamically linked, needs X11/Wayland and OpenGL; no screen-reader support on purpose, see `docs/superpowers/specs/2026-11-09-gui-spike-report.md`). Build it with `-p`, never from a workspace-wide release build.
 - **UI:** terminal UI with a permanent contact list, a vim-style Normal/Insert input and a privacy screen (3rd Esc). A GUI is planned (`docs/ROADMAP.md`).

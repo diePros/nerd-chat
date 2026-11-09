@@ -104,3 +104,9 @@ On your laptop as a normal user most of these may pass: if one still fails there
 ## 7. Cloud-session leftovers you do not need
 The SDK in the cloud container (`~/android-sdk`), the Gradle caches and all build output are not in git and disappear with the container. Everything needed to rebuild is in the repository
 plus the steps above.
+
+## 8. State after the history work (2026-11-09)
+Rust side and Kotlin UI/bridge use the `Persist` setting (nothing / unsent / 1 day / 7 days; Android default 1 day). Verified in the cloud container: all Rust and Gradle tests, debug/release assemble, lint.
+**Not done and not verifiable without a phone:** the Android Keystore implementation of `PlatformKeys` (per-24 h epoch keys, non-exportable, StrongBox when present) and the erase job that runs while the device is locked.
+Until it exists the Android app runs with `NoPlatformKeys`: expired history is overwritten in place but is NOT cryptographically erased, so on flash storage the "deleted after 1 day" promise is best-effort only. Say so in any test report.
+Things to look at on the phone: whether the history file stays at a constant size and inode (`adb shell stat`), f2fs write behaviour, keyboard flags in the message field (R32-K1).
